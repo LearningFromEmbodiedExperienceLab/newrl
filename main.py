@@ -1,0 +1,379 @@
+"""Batched Anymal C walking on flat ground.
+
+``--terrain mesh`` is a slab whose top is a z=0 grid, the same surface as a
+plane. ``--mesh-res 1`` makes that top two triangles. The bottom and each side
+are two triangles. ``--terrain plane`` is Newton's analytic ground plane.
+
+Each env is one Newton world, created with ``ModelBuilder.replicate``. ``--contacts newton`` builds contacts with
+``newton.CollisionPipeline``. ``--contacts mujoco`` lets SolverMuJoCo run
+MuJoCo's own detector. ``--contacts newrl`` uses the static terrain BVH.
+All three paths use the MuJoCo Warp backend and need CUDA.
+"""
+
+from __future__ import annotations
+
+import argparse
+import time
+
+import newton
+import numpy as np
+import warp as wp
+from newton import JointTargetMode
+from tqdm import tqdm
+
+from terrain_collision import TerrainCollision
+from walk_policy import AnymalWalkPolicy
+
+FRAME_DT = 1.0 / 50.0
+SUBSTEPS = 4
+# Body-frame command (forward m/s, lateral m/s, yaw rad/s). The turning
+# radius is 0.5/0.4 = 1.25 m, so the path stays near the origin.
+WALK_COMMAND = (0.5, 0.0, 0.4)
+
+
+def flat_ground_mesh(resolution: int, size: float, thickness: float) -> newton.Mesh:
+    """A flat slab whose top is z=0 and whose bottom is ``thickness`` below.
+
+    The top is a ``resolution`` by ``resolution`` grid, ``2 * resolution**2``
+    triangles. ``resolution=1`` is two triangles. The bottom and each of the
+    four sides are two triangles, using only the slab corners, whatever the
+    top resolution is. Winding is counter-clockwise from the outside.
+    """
+    if resolution < 1:
+        raise ValueError(f"mesh resolution must be >= 1, got {resolution}")
+    if size <= 0.0:
+        raise ValueError(f"mesh size must be positive, got {size}")
+    if thickness <= 0.0:
+        raise ValueError(f"mesh thickness must be positive, got {thickness}")
+    n = resolution + 1
+    half = 0.5 * size
+    axis = np.linspace(-half, half, n, dtype=np.float32)
+    xs, ys = np.meshgrid(axis, axis, indexing="xy")
+    top = np.column_stack([xs.ravel(), ys.ravel(), np.zeros(n * n, dtype=np.float32)])
+    # Corner order: (-x,-y), (+x,-y), (-x,+y), (+x,+y).
+    bottom = np.array(
+        [
+            [-half, -half, -thickness],
+            [half, -half, -thickness],
+            [-half, half, -thickness],
+            [half, half, -thickness],
+        ],
+        dtype=np.float32,
+    )
+    vertices = np.vstack([top, bottom])
+    base = n * n
+    b00, b10, b01, b11 = base, base + 1, base + 2, base + 3
+    t00, t10, t01, t11 = 0, resolution, resolution * n, n * n - 1
+    faces = []
+    for j in range(resolution):
+        for i in range(resolution):
+            a = j * n + i
+            b = a + 1
+            c = a + n + 1
+            d = a + n
+            faces.append((a, b, c))
+            faces.append((a, c, d))
+    faces.extend(
+        [
+            (b00, b01, b11),
+            (b00, b11, b10),
+            (t10, b10, b11),
+            (t10, b11, t11),
+            (t00, t01, b01),
+            (t00, b01, b00),
+            (t01, t11, b11),
+            (t01, b11, b01),
+            (t00, b00, b10),
+            (t00, b10, t10),
+        ]
+    )
+    indices = np.asarray(faces, dtype=np.int32).reshape(-1)
+    return newton.Mesh(vertices, indices)
+
+
+class AnymalPlaneEnv:
+    """Anymal C robots walking a 4 m circle, one per world."""
+
+    def __init__(
+        self,
+        num_envs: int = 1,
+        contacts: str = "newton",
+        terrain: str = "mesh",
+        mesh_resolution: int = 1,
+        mesh_size: float = 100.0,
+        mesh_thickness: float = 1.0,
+    ) -> None:
+        if num_envs < 1:
+            raise ValueError(f"num_envs must be positive, got {num_envs}")
+        if contacts not in ("newton", "mujoco", "newrl"):
+            raise ValueError(f"contacts must be 'newton', 'mujoco', or 'newrl', got {contacts!r}")
+        if contacts == "newrl" and terrain != "mesh":
+            raise ValueError("newrl contacts require terrain='mesh'")
+        if terrain not in ("plane", "mesh"):
+            raise ValueError(f"terrain must be 'plane' or 'mesh', got {terrain!r}")
+        self.device = wp.get_device()
+        if not self.device.is_cuda:
+            raise RuntimeError("SolverMuJoCo on this path requires CUDA.")
+        self.num_envs = num_envs
+        self.contacts_backend = contacts
+        self.terrain = terrain
+        self.use_mujoco_contacts = contacts == "mujoco"
+        self.frame_dt = FRAME_DT
+        self.sim_dt = FRAME_DT / SUBSTEPS
+        self.step_count = 0
+
+        robot = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        newton.solvers.SolverMuJoCo.register_custom_attributes(robot)
+        policy_cfg = AnymalWalkPolicy.config()
+        robot.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
+            armature=0.1, limit_ke=1.0e3, limit_kd=1.0e1
+        )
+        robot.default_shape_cfg.ke = 5.0e4
+        robot.default_shape_cfg.kd = 5.0e2
+        robot.default_shape_cfg.kf = 1.0e3
+        robot.default_shape_cfg.mu = 0.75
+
+        # The locomotion checkpoint shipped with Newton is the Anymal C MuJoCo
+        # policy. Anymal D has no policy in the repo, and the C gains and joint
+        # order do not match D.
+        asset_path = AnymalWalkPolicy.asset_dir()
+        robot.add_usd(
+            str(asset_path / "usd" / "anymal_c.usda"),
+            collapse_fixed_joints=False,
+            enable_self_collisions=False,
+            joint_ordering="dfs",
+            xform=wp.transform(wp.vec3(0.0, 0.0, 0.8), wp.quat_identity()),
+        )
+        robot.joint_q[2] = 0.76
+        robot.joint_q[3:7] = [0.0, 0.0, 0.7071, 0.7071]
+        robot.joint_q[7:] = policy_cfg["mjw_joint_pos"]
+        for i in range(len(policy_cfg["mjw_joint_stiffness"])):
+            robot.joint_target_ke[i + 6] = policy_cfg["mjw_joint_stiffness"][i]
+            robot.joint_target_kd[i + 6] = policy_cfg["mjw_joint_damping"][i]
+            robot.joint_armature[i + 6] = policy_cfg["mjw_joint_armature"][i]
+            robot.joint_target_mode[i + 6] = int(JointTargetMode.POSITION)
+
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        builder.replicate(robot, copy_count=num_envs)
+        builder.default_shape_cfg.ke = 1.0e3
+        builder.default_shape_cfg.kd = 1.0e2
+        if terrain == "plane":
+            builder.add_ground_plane()
+            self.triangle_count = 0
+        else:
+            ground = flat_ground_mesh(mesh_resolution, mesh_size, mesh_thickness)
+            builder.add_shape_mesh(body=-1, mesh=ground, label="ground_mesh")
+            self.triangle_count = 2 * mesh_resolution * mesh_resolution + 10
+
+        self.model = builder.finalize()
+        self.solver = newton.solvers.SolverMuJoCo(
+            self.model,
+            cone="elliptic",
+            impratio=100.0,
+            iterations=20,
+            ls_iterations=40,
+            nconmax=80,
+            njmax=100,
+            use_mujoco_contacts=self.use_mujoco_contacts,
+        )
+        self.state = self.model.state()
+        self.state_next = self.model.state()
+        self.control = self.model.control()
+        newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
+        self._terrain_collision = None
+        if self.use_mujoco_contacts:
+            self.collision_pipeline = newton.CollisionPipeline(
+                self.model,
+                rigid_contact_max=self.solver.get_max_contact_count(),
+                soft_contact_max=0,
+            )
+            self.contacts = self.collision_pipeline.contacts()
+        elif contacts == "newrl":
+            self._terrain_collision = TerrainCollision(self.model)
+            self.collision_pipeline = None
+            self.contacts = self._terrain_collision.contacts
+        else:
+            self.collision_pipeline = newton.CollisionPipeline(self.model)
+            self.contacts = self.collision_pipeline.contacts()
+        self.graph = None
+        self._viewer = None
+        self.policy = AnymalWalkPolicy(self.model, num_envs, WALK_COMMAND)
+
+    def simulate(self) -> None:
+        """One control step. Safe to capture: no host sync and a fixed substep count."""
+        if self._terrain_collision is not None:
+            self._terrain_collision.collide(self.state)
+        elif not self.use_mujoco_contacts:
+            self.collision_pipeline.collide(self.state, self.contacts)
+        for _ in range(SUBSTEPS):
+            self.state.clear_forces()
+            self.solver.step(self.state, self.state_next, self.control, self.contacts, self.sim_dt)
+            self.state, self.state_next = self.state_next, self.state
+
+    def capture(self, viewer=None) -> None:
+        """Compile kernels once, then record ``simulate`` into a CUDA graph."""
+        self._viewer = viewer
+        self.simulate()
+        wp.synchronize()
+        with wp.ScopedCapture() as capture:
+            self.simulate()
+        self.graph = capture.graph
+
+    def step(self, sync: bool = True) -> tuple[float, float]:
+        """Advance one control step.
+
+        With a captured graph the returned pair is ``(0, step_s)``: collision and
+        the solver are one replay, so they are not timed separately. ``sync=False``
+        skips the device sync used by the profiler.
+        """
+        # The policy writes into the control buffer the graph already captured.
+        self.policy.apply(self.state, self.control)
+        if self.graph is not None:
+            t0 = time.perf_counter()
+            wp.capture_launch(self.graph)
+            if sync:
+                wp.synchronize()
+            elapsed_s = time.perf_counter() - t0
+            self.step_count += 1
+            return 0.0, elapsed_s
+
+        collide_s = 0.0
+        if not self.use_mujoco_contacts:
+            if sync:
+                wp.synchronize()  # Exclude work queued by the policy from collision timing.
+            t0 = time.perf_counter()
+            if self._terrain_collision is not None:
+                self._terrain_collision.collide(self.state)
+            else:
+                self.collision_pipeline.collide(self.state, self.contacts)
+            if sync:
+                wp.synchronize()
+            collide_s = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        for _ in range(SUBSTEPS):
+            self.state.clear_forces()
+            if self._viewer is not None:
+                self._viewer.apply_forces(self.state)
+            self.solver.step(self.state, self.state_next, self.control, self.contacts, self.sim_dt)
+            self.state, self.state_next = self.state_next, self.state
+        if sync:
+            wp.synchronize()
+        solve_s = time.perf_counter() - t0
+        self.step_count += 1
+        return collide_s, solve_s
+
+    def base_pose(self) -> np.ndarray:
+        body_q = self.state.body_q.numpy()
+        poses = [body_q[i, :3] for i, label in enumerate(self.model.body_label) if label.endswith("/base")]
+        if len(poses) != self.num_envs:
+            raise RuntimeError(f"expected {self.num_envs} bases, found {len(poses)}")
+        return np.asarray(poses, dtype=np.float64)
+
+
+def _open_viewer(kind: str):
+    """Open the window before Warp initializes CUDA.
+
+    On this hybrid laptop the X server's GLX connection is the Intel GPU.
+    Creating the pyglet context after CUDA has claimed the NVIDIA device
+    fails with a GL context error.
+    """
+    if kind == "gl":
+        viewer = newton.viewer.ViewerGL()
+        for _ in range(3):
+            viewer.begin_frame(0.0)
+            viewer.end_frame()
+        return viewer
+    if kind == "rtx":
+        return newton.viewer.ViewerRTX()
+    raise ValueError(f"unknown viewer {kind!r}")
+
+
+def _run_viewer(env: AnymalPlaneEnv, viewer, steps: int) -> None:
+    """Draw until the window closes. Simulation stops after ``steps`` frames."""
+    viewer.set_model(env.model)
+    if env.num_envs > 1:
+        viewer.set_world_offsets((2.0, 2.0, 0.0))
+    sim_time = 0.0
+    simulated = 0
+    while viewer.is_running():
+        if simulated < steps and not viewer.is_paused():
+            env.step(sync=False)
+            simulated += 1
+            sim_time += env.frame_dt
+        viewer.begin_frame(sim_time)
+        viewer.log_state(env.state)
+        viewer.end_frame()
+    viewer.close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--num-envs", type=int, default=4096)
+    parser.add_argument("--profile-memory", action="store_true", help="report peak Warp CUDA pool usage")
+    parser.add_argument("--contacts", choices=("newton", "mujoco", "newrl"), default="newton")
+    parser.add_argument("--steps", type=int, default=500)
+    parser.add_argument("--warmup", type=int, default=10)
+    parser.add_argument("--viewer", choices=("none", "gl", "rtx"), default="none")
+    parser.add_argument("--graph", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--terrain", choices=("plane", "mesh"), default="mesh")
+    parser.add_argument("--mesh-res", type=int, default=1, help="cells per side; 1 is two triangles")
+    parser.add_argument("--mesh-size", type=float, default=20.0, help="square side length in meters")
+    parser.add_argument("--mesh-thickness", type=float, default=1.0, help="slab depth below z=0, meters")
+    args = parser.parse_args()
+    if args.warmup < 0 or args.steps < 1:
+        raise SystemExit("--warmup must be >= 0 and --steps must be >= 1")
+
+    viewer = _open_viewer(args.viewer) if args.viewer != "none" else None
+    env = AnymalPlaneEnv(
+        num_envs=args.num_envs,
+        contacts=args.contacts,
+        terrain=args.terrain,
+        mesh_resolution=args.mesh_res,
+        mesh_size=args.mesh_size,
+        mesh_thickness=args.mesh_thickness,
+    )
+    if args.graph:
+        env.capture(viewer)
+    elif viewer is not None:
+        env._viewer = viewer
+    if viewer is not None:
+        _run_viewer(env, viewer, args.steps)
+        return
+
+    for _ in tqdm(range(args.warmup), desc="Warmup"):
+        env.step()
+    wp.synchronize()
+
+    collide_s = 0.0
+    solve_s = 0.0
+    t0 = time.perf_counter()
+    for _ in tqdm(range(args.steps), desc="Steps"):
+        step_collide_s, step_solve_s = env.step()
+        collide_s += step_collide_s
+        solve_s += step_solve_s
+    wp.synchronize()
+    elapsed_s = time.perf_counter() - t0
+    pose = env.base_pose()
+    height = pose[:, 2]
+    step_ms = 1.0e3 * elapsed_s / args.steps
+    timing = f"step_ms={step_ms:.2f} env_steps/s={env.num_envs * args.steps / elapsed_s:.0f}"
+    if args.profile_memory:
+        peak = wp.get_mempool_used_mem_high(env.device)
+        timing += f" warp_pool_peak_MiB={peak / 2**20:.1f}"
+    if not args.graph:
+        timing += (
+            f" collide_ms={1.0e3 * collide_s / args.steps:.2f}"
+            f" solve_ms={1.0e3 * solve_s / args.steps:.2f}"
+        )
+    print(
+        f"envs={env.num_envs} contacts={env.contacts_backend} "
+        f"terrain={env.terrain} triangles={env.triangle_count} "
+        f"warmup={args.warmup} steps={args.steps} graph={args.graph} "
+        f"{timing} "
+        f"base_height min={height.min():.3f} mean={height.mean():.3f} max={height.max():.3f} "
+        f"base_xy max_abs_x={np.abs(pose[:, 0]).max():.2f} max_abs_y={np.abs(pose[:, 1]).max():.2f}"
+    )
+
+
+if __name__ == "__main__":
+    main()

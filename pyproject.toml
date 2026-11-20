@@ -1,0 +1,22 @@
+[project]
+name = "newrl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "gitpython",
+    "imgui_bundle>=1.92.0",
+    "newton[sim,importers,onnx]",
+    "pyyaml>=6.0",
+    "ovrtx>=0.7.0.1794596436",
+    "ovstage>=0.4.0.1794520352",
+    "pyglet>=2.1.6,<3",
+    "tensordict>=0.15.6",
+    "torch>=2.15.0",
+    "tqdm>=4.70.1",
+]
+
+[tool.uv.sources]
+newton = { path = "../newton", editable = true }
+
