@@ -8,3 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local benchmark run history
+/benchmark-results/
+
+# Local UI settings and dependency lockfile
+/imgui.ini
+/uv.lock

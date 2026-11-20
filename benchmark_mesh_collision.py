@@ -21,74 +21,16 @@ import warp as wp
 from newton import JointTargetMode
 from tqdm import tqdm
 
+from newrl.terrain import flat_ground_mesh
 from terrain_collision import TerrainCollision
 from walk_policy import AnymalWalkPolicy
 
 FRAME_DT = 1.0 / 50.0
 SUBSTEPS = 4
+DEFAULT_JACOBIAN = "sparse"
 # Body-frame command (forward m/s, lateral m/s, yaw rad/s). The turning
 # radius is 0.5/0.4 = 1.25 m, so the path stays near the origin.
 WALK_COMMAND = (0.5, 0.0, 0.4)
-
-
-def flat_ground_mesh(resolution: int, size: float, thickness: float) -> newton.Mesh:
-    """A flat slab whose top is z=0 and whose bottom is ``thickness`` below.
-
-    The top is a ``resolution`` by ``resolution`` grid, ``2 * resolution**2``
-    triangles. ``resolution=1`` is two triangles. The bottom and each of the
-    four sides are two triangles, using only the slab corners, whatever the
-    top resolution is. Winding is counter-clockwise from the outside.
-    """
-    if resolution < 1:
-        raise ValueError(f"mesh resolution must be >= 1, got {resolution}")
-    if size <= 0.0:
-        raise ValueError(f"mesh size must be positive, got {size}")
-    if thickness <= 0.0:
-        raise ValueError(f"mesh thickness must be positive, got {thickness}")
-    n = resolution + 1
-    half = 0.5 * size
-    axis = np.linspace(-half, half, n, dtype=np.float32)
-    xs, ys = np.meshgrid(axis, axis, indexing="xy")
-    top = np.column_stack([xs.ravel(), ys.ravel(), np.zeros(n * n, dtype=np.float32)])
-    # Corner order: (-x,-y), (+x,-y), (-x,+y), (+x,+y).
-    bottom = np.array(
-        [
-            [-half, -half, -thickness],
-            [half, -half, -thickness],
-            [-half, half, -thickness],
-            [half, half, -thickness],
-        ],
-        dtype=np.float32,
-    )
-    vertices = np.vstack([top, bottom])
-    base = n * n
-    b00, b10, b01, b11 = base, base + 1, base + 2, base + 3
-    t00, t10, t01, t11 = 0, resolution, resolution * n, n * n - 1
-    faces = []
-    for j in range(resolution):
-        for i in range(resolution):
-            a = j * n + i
-            b = a + 1
-            c = a + n + 1
-            d = a + n
-            faces.append((a, b, c))
-            faces.append((a, c, d))
-    faces.extend(
-        [
-            (b00, b01, b11),
-            (b00, b11, b10),
-            (t10, b10, b11),
-            (t10, b11, t11),
-            (t00, t01, b01),
-            (t00, b01, b00),
-            (t01, t11, b11),
-            (t01, b11, b01),
-            (t00, b00, b10),
-            (t00, b10, t10),
-        ]
-    )
-    indices = np.asarray(faces, dtype=np.int32).reshape(-1)
-    return newton.Mesh(vertices, indices)
 
 
 class AnymalPlaneEnv:
@@ -102,6 +44,7 @@ class AnymalPlaneEnv:
         mesh_resolution: int = 1,
         mesh_size: float = 100.0,
         mesh_thickness: float = 1.0,
+        jacobian: str = DEFAULT_JACOBIAN,
     ) -> None:
         if num_envs < 1:
             raise ValueError(f"num_envs must be positive, got {num_envs}")
@@ -168,6 +111,7 @@ class AnymalPlaneEnv:
         self.model = builder.finalize()
         self.solver = newton.solvers.SolverMuJoCo(
             self.model,
+            jacobian=jacobian,
             cone="elliptic",
             impratio=100.0,
             iterations=20,
@@ -311,6 +255,7 @@ def main() -> None:
     parser.add_argument("--num-envs", type=int, default=4096)
     parser.add_argument("--profile-memory", action="store_true", help="report peak Warp CUDA pool usage")
     parser.add_argument("--contacts", choices=("newton", "mujoco", "newrl"), default="newton")
+    parser.add_argument("--jacobian", choices=("sparse", "dense", "auto"), default=DEFAULT_JACOBIAN)
     parser.add_argument("--steps", type=int, default=500)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--viewer", choices=("none", "gl", "rtx"), default="none")
@@ -331,6 +276,7 @@ def main() -> None:
         mesh_resolution=args.mesh_res,
         mesh_size=args.mesh_size,
         mesh_thickness=args.mesh_thickness,
+        jacobian=args.jacobian,
     )
     if args.graph:
         env.capture(viewer)
@@ -367,7 +313,7 @@ def main() -> None:
         )
     print(
         f"envs={env.num_envs} contacts={env.contacts_backend} "
-        f"terrain={env.terrain} triangles={env.triangle_count} "
+        f"terrain={env.terrain} triangles={env.triangle_count} jacobian={args.jacobian} "
         f"warmup={args.warmup} steps={args.steps} graph={args.graph} "
         f"{timing} "
         f"base_height min={height.min():.3f} mean={height.mean():.3f} max={height.max():.3f} "

@@ -1,0 +1,345 @@
+{
+  "schema_version": 1,
+  "benchmark": "anymal-environments",
+  "cases": [
+    {
+      "workload": {
+        "num_envs": 4,
+        "sim_dt": 0.005,
+        "substeps": 4,
+        "jacobian": "sparse",
+        "solver": "newton",
+        "integrator": "implicitfast",
+        "cone": "elliptic",
+        "impratio": 100.0,
+        "iterations": 20,
+        "ls_iterations": 40,
+        "nconmax": 80,
+        "njmax": 100,
+        "graph_capture": false,
+        "deterministic": false,
+        "ground_stiffness": 1000.0,
+        "ground_damping": 100.0,
+        "terrain": "plane",
+        "collision": "newton.CollisionPipeline",
+        "collision_updates": "every physics substep",
+        "seed": 0,
+        "action_pattern": "0.1 * sin(flat_action_index + 0.17 * (step % 16))",
+        "warmup_steps": 20,
+        "steps": 100,
+        "repeats": 3,
+        "reset_every_steps": 20,
+        "reset_schedule": "alternating even and odd world indices"
+      },
+      "throughput": {
+        "stateful": {
+          "samples_ms_per_step": [
+            15.959141720013577,
+            16.31233437998162,
+            17.846575749972544
+          ],
+          "median_ms_per_step": 16.31233437998162,
+          "median_env_steps_per_second": 245.21321760720963
+        },
+        "stateless": {
+          "samples_ms_per_step": [
+            16.28230103000533,
+            16.852716290013632,
+            16.52084893998108
+          ],
+          "median_ms_per_step": 16.52084893998108,
+          "median_env_steps_per_second": 242.11830847988983
+        }
+      }
+    },
+    {
+      "workload": {
+        "num_envs": 4,
+        "sim_dt": 0.005,
+        "substeps": 4,
+        "jacobian": "sparse",
+        "solver": "newton",
+        "integrator": "implicitfast",
+        "cone": "elliptic",
+        "impratio": 100.0,
+        "iterations": 20,
+        "ls_iterations": 40,
+        "nconmax": 80,
+        "njmax": 100,
+        "graph_capture": true,
+        "deterministic": false,
+        "ground_stiffness": 1000.0,
+        "ground_damping": 100.0,
+        "terrain": "plane",
+        "collision": "newton.CollisionPipeline",
+        "collision_updates": "every physics substep",
+        "seed": 0,
+        "action_pattern": "0.1 * sin(flat_action_index + 0.17 * (step % 16))",
+        "warmup_steps": 20,
+        "steps": 100,
+        "repeats": 3,
+        "reset_every_steps": 20,
+        "reset_schedule": "alternating even and odd world indices"
+      },
+      "throughput": {
+        "stateful": {
+          "samples_ms_per_step": [
+            2.8685806800058344,
+            2.410670739991474,
+            2.3651492400313145
+          ],
+          "median_ms_per_step": 2.410670739991474,
+          "median_env_steps_per_second": 1659.2892316825262
+        },
+        "stateless": {
+          "samples_ms_per_step": [
+            2.5263423299838905,
+            2.5574706900079036,
+            2.535882619995391
+          ],
+          "median_ms_per_step": 2.535882619995391,
+          "median_env_steps_per_second": 1577.3600751312654
+        }
+      }
+    },
+    {
+      "workload": {
+        "num_envs": 2048,
+        "sim_dt": 0.005,
+        "substeps": 4,
+        "jacobian": "sparse",
+        "solver": "newton",
+        "integrator": "implicitfast",
+        "cone": "elliptic",
+        "impratio": 100.0,
+        "iterations": 20,
+        "ls_iterations": 40,
+        "nconmax": 80,
+        "njmax": 100,
+        "graph_capture": false,
+        "deterministic": false,
+        "ground_stiffness": 1000.0,
+        "ground_damping": 100.0,
+        "terrain": "plane",
+        "collision": "newton.CollisionPipeline",
+        "collision_updates": "every physics substep",
+        "seed": 0,
+        "action_pattern": "0.1 * sin(flat_action_index + 0.17 * (step % 16))",
+        "warmup_steps": 20,
+        "steps": 100,
+        "repeats": 3,
+        "reset_every_steps": 20,
+        "reset_schedule": "alternating even and odd world indices"
+      },
+      "throughput": {
+        "stateful": {
+          "samples_ms_per_step": [
+            22.220429240005615,
+            22.095139020020724,
+            22.4801022900283
+          ],
+          "median_ms_per_step": 22.220429240005615,
+          "median_env_steps_per_second": 92167.4364558532
+        },
+        "stateless": {
+          "samples_ms_per_step": [
+            22.60974819000694,
+            22.20120717996906,
+            22.775003379974805
+          ],
+          "median_ms_per_step": 22.60974819000694,
+          "median_env_steps_per_second": 90580.39845420195
+        }
+      }
+    },
+    {
+      "workload": {
+        "num_envs": 2048,
+        "sim_dt": 0.005,
+        "substeps": 4,
+        "jacobian": "sparse",
+        "solver": "newton",
+        "integrator": "implicitfast",
+        "cone": "elliptic",
+        "impratio": 100.0,
+        "iterations": 20,
+        "ls_iterations": 40,
+        "nconmax": 80,
+        "njmax": 100,
+        "graph_capture": true,
+        "deterministic": false,
+        "ground_stiffness": 1000.0,
+        "ground_damping": 100.0,
+        "terrain": "plane",
+        "collision": "newton.CollisionPipeline",
+        "collision_updates": "every physics substep",
+        "seed": 0,
+        "action_pattern": "0.1 * sin(flat_action_index + 0.17 * (step % 16))",
+        "warmup_steps": 20,
+        "steps": 100,
+        "repeats": 3,
+        "reset_every_steps": 20,
+        "reset_schedule": "alternating even and odd world indices"
+      },
+      "throughput": {
+        "stateful": {
+          "samples_ms_per_step": [
+            6.975829100010742,
+            7.0538168100029,
+            7.060510510018503
+          ],
+          "median_ms_per_step": 7.0538168100029,
+          "median_env_steps_per_second": 290339.2666925749
+        },
+        "stateless": {
+          "samples_ms_per_step": [
+            7.16739958999824,
+            7.17441136999696,
+            7.223860819976835
+          ],
+          "median_ms_per_step": 7.17441136999696,
+          "median_env_steps_per_second": 285458.95884429436
+        }
+      }
+    },
+    {
+      "workload": {
+        "num_envs": 4096,
+        "sim_dt": 0.005,
+        "substeps": 4,
+        "jacobian": "sparse",
+        "solver": "newton",
+        "integrator": "implicitfast",
+        "cone": "elliptic",
+        "impratio": 100.0,
+        "iterations": 20,
+        "ls_iterations": 40,
+        "nconmax": 80,
+        "njmax": 100,
+        "graph_capture": false,
+        "deterministic": false,
+        "ground_stiffness": 1000.0,
+        "ground_damping": 100.0,
+        "terrain": "plane",
+        "collision": "newton.CollisionPipeline",
+        "collision_updates": "every physics substep",
+        "seed": 0,
+        "action_pattern": "0.1 * sin(flat_action_index + 0.17 * (step % 16))",
+        "warmup_steps": 20,
+        "steps": 100,
+        "repeats": 3,
+        "reset_every_steps": 20,
+        "reset_schedule": "alternating even and odd world indices"
+      },
+      "throughput": {
+        "stateful": {
+          "samples_ms_per_step": [
+            24.40380019001168,
+            23.861503769985575,
+            24.113498670012632
+          ],
+          "median_ms_per_step": 24.113498670012632,
+          "median_env_steps_per_second": 169863.36392129422
+        },
+        "stateless": {
+          "samples_ms_per_step": [
+            24.439852769974095,
+            23.94646188000479,
+            24.430537690022902
+          ],
+          "median_ms_per_step": 24.430537690022902,
+          "median_env_steps_per_second": 167659.01970601123
+        }
+      }
+    },
+    {
+      "workload": {
+        "num_envs": 4096,
+        "sim_dt": 0.005,
+        "substeps": 4,
+        "jacobian": "sparse",
+        "solver": "newton",
+        "integrator": "implicitfast",
+        "cone": "elliptic",
+        "impratio": 100.0,
+        "iterations": 20,
+        "ls_iterations": 40,
+        "nconmax": 80,
+        "njmax": 100,
+        "graph_capture": true,
+        "deterministic": false,
+        "ground_stiffness": 1000.0,
+        "ground_damping": 100.0,
+        "terrain": "plane",
+        "collision": "newton.CollisionPipeline",
+        "collision_updates": "every physics substep",
+        "seed": 0,
+        "action_pattern": "0.1 * sin(flat_action_index + 0.17 * (step % 16))",
+        "warmup_steps": 20,
+        "steps": 100,
+        "repeats": 3,
+        "reset_every_steps": 20,
+        "reset_schedule": "alternating even and odd world indices"
+      },
+      "throughput": {
+        "stateful": {
+          "samples_ms_per_step": [
+            10.85568851998687,
+            10.861593439985882,
+            10.817645550014277
+          ],
+          "median_ms_per_step": 10.85568851998687,
+          "median_env_steps_per_second": 377313.699859634
+        },
+        "stateless": {
+          "samples_ms_per_step": [
+            10.985532279992185,
+            11.113354519984568,
+            10.948707729985472
+          ],
+          "median_ms_per_step": 10.985532279992185,
+          "median_env_steps_per_second": 372854.03161210445
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "machine": {
+      "id": "runner-01",
+      "os": "Linux",
+      "architecture": "x86_64",
+      "cpu_model": "13th Gen Intel(R) Core(TM) i9-13980HX",
+      "gpu_model": "NVIDIA GeForce RTX 4080 Laptop GPU",
+      "gpu_memory_bytes": 12450922496,
+      "gpu_compute_capability": [
+        8,
+        9
+      ]
+    },
+    "software": {
+      "python": "3.13.7",
+      "torch_cuda": "13.2",
+      "cuda_driver_versions": [
+        "580.178.04"
+      ],
+      "packages": {
+        "newton": "1.9.0.dev0",
+        "warp-lang": "1.19.0",
+        "mujoco": null,
+        "mujoco-warp": "4.0.1",
+        "torch": "2.15.0",
+        "tensordict": "0.15.6"
+      }
+    },
+    "revisions": {
+      "newrl": {
+        "commit": "44d580ede0c68375affb86472f4d97eb448d52a4",
+        "dirty": true
+      },
+      "newton": {
+        "commit": "c96684ee8ffcf575ba16c5b7d88b1ada70501a33",
+        "dirty": false
+      }
+    }
+  }
+}
