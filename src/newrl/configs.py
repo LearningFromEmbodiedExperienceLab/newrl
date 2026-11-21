@@ -46,22 +46,29 @@ class EnvironmentConfig:
     )
     robots: dict[str, Callable[[], RobotConfig]] = field(default_factory=dict)
     mdp: MDP = field(default_factory=MDP)
+    physical_fields: tuple[tuple[str, str], ...] = ()
 
 
 def locomotion_mdp(mdp_type: type[MDP] = MDP) -> MDP:
     return mdp_type(
         observations={
-            "proprio": ObservationGroup({
-                "joint_pos": EntityField("robot", "joint_pos"),
-                "joint_vel": EntityField("robot", "joint_vel"),
-                "projected_gravity": ProjectedGravity("robot", "base"),
-                "previous_action": previous_action,
-                "root_ang_vel_b": BodyAngularVelocity("robot", "base", frame="body"),
-            }),
-            "privileged": ObservationGroup({
-                "root_lin_vel_b": BodyLinearVelocity("robot", "base", frame="body"),
-                "root_height": BodyHeight("robot", "base"),
-            }),
+            "proprio": ObservationGroup(
+                {
+                    "joint_pos": EntityField("robot", "joint_pos"),
+                    "joint_vel": EntityField("robot", "joint_vel"),
+                    "projected_gravity": ProjectedGravity("robot", "base"),
+                    "previous_action": previous_action,
+                    "root_ang_vel_b": BodyAngularVelocity(
+                        "robot", "base", frame="body"
+                    ),
+                }
+            ),
+            "privileged": ObservationGroup(
+                {
+                    "root_lin_vel_b": BodyLinearVelocity("robot", "base", frame="body"),
+                    "root_height": BodyHeight("robot", "base"),
+                }
+            ),
         },
         truncations={"timeout": Timeout(1000)},
     )
@@ -79,26 +86,30 @@ def AnymalLocomotion(**overrides) -> EnvironmentConfig:
         }
     )
     mdp.rewards = {
-        "tracking": RewardGroup({
-            "track_xy_velocity": TrackVelocity(
-                BodyLinearVelocity("robot", "base", frame="yaw"),
-                slice(0, 2),
-                weight=1.0,
-                sigma=0.5,
-            ),
-            "track_yaw_rate": TrackVelocity(
-                BodyAngularVelocity("robot", "base", frame="yaw"),
-                slice(2, 3),
-                weight=0.5,
-                sigma=0.5,
-            ),
-        }),
-        "regularization": RewardGroup({
-            "action_rate": ActionRate(weight=0.01),
-            "joint_energy1": JointEnergy1(weight=0.01),
-            "joint_acc2": JointAcc2(weight=0.00001),
-            "joint_vel2": JointVel2(weight=0.01),
-        })
+        "tracking": RewardGroup(
+            {
+                "track_xy_velocity": TrackVelocity(
+                    BodyLinearVelocity("robot", "base", frame="yaw"),
+                    slice(0, 2),
+                    weight=1.0,
+                    sigma=0.5,
+                ),
+                "track_yaw_rate": TrackVelocity(
+                    BodyAngularVelocity("robot", "base", frame="yaw"),
+                    slice(2, 3),
+                    weight=0.5,
+                    sigma=0.5,
+                ),
+            }
+        ),
+        "regularization": RewardGroup(
+            {
+                "action_rate": ActionRate(weight=0.01),
+                "joint_energy1": JointEnergy1(weight=0.01),
+                "joint_acc2": JointAcc2(weight=0.00001),
+                "joint_vel2": JointVel2(weight=0.01),
+            }
+        ),
     }
     mdp.terminations = {
         "fall": Fall(BodyHeight("robot", "base"), ProjectedGravity("robot", "base"))

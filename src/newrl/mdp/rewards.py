@@ -1,6 +1,7 @@
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from typing import ClassVar
 
 import torch
 
@@ -13,6 +14,7 @@ class ActionRate:
     """Penalize squared changes in normalized action per environment."""
 
     weight: float
+    physical_fields: ClassVar[frozenset] = frozenset()
 
     def __call__(
         self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
@@ -45,12 +47,20 @@ class _JointTerm:
     weight: float
     entity: str = "robot"
     joint_names: str | Sequence[str] = ".*"
-    _indices: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
+    _indices: torch.Tensor | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    @property
+    def physical_fields(self):
+        return frozenset({(self.entity, "joint_vel")})
 
     def _initialize(self, scene):
         entity = scene.entities[self.entity]
         bound = replace(self)
-        object.__setattr__(bound, "_indices", _resolve_joint_indices(entity, self.joint_names))
+        object.__setattr__(
+            bound, "_indices", _resolve_joint_indices(entity, self.joint_names)
+        )
         return bound
 
     def _select(self, values: torch.Tensor) -> torch.Tensor:
@@ -64,62 +74,48 @@ class _JointTerm:
 
 @dataclass(frozen=True)
 class JointEnergy1(_JointTerm):
-    """Penalize the L1 mechanical power of the position actuators.
+    """Penalize actuator power at the last physics substep.
 
-    Torque is the implicit PD law ``kp (q_target - q) - kd qdot``, with the
-    target taken from the action that was just applied.
+    Torque comes from MuJoCo's last force evaluation; joint velocity is the
+    successor velocity at the end of the control step.
     """
 
-    _stiffness: torch.Tensor | None = field(default=None, init=False, repr=False)
-    _damping: torch.Tensor | None = field(default=None, init=False, repr=False)
-    _default: torch.Tensor | None = field(default=None, init=False, repr=False)
-    _scale: float | None = field(default=None, init=False, repr=False)
-
-    def _initialize(self, scene):
-        import warp as wp
-
-        bound = super()._initialize(scene)
-        entity = scene.entities[self.entity]
-        object.__setattr__(
-            bound,
-            "_stiffness",
-            bound._select(wp.to_torch(scene.model.joint_target_ke)[entity.qd].detach().clone()),
-        )
-        object.__setattr__(
-            bound,
-            "_damping",
-            bound._select(wp.to_torch(scene.model.joint_target_kd)[entity.qd].detach().clone()),
-        )
-        object.__setattr__(
-            bound, "_default", bound._select(entity.default_position.detach().clone())
-        )
-        object.__setattr__(bound, "_scale", entity.action.scale)
-        return bound
+    @property
+    def physical_fields(self):
+        return super().physical_fields | {(self.entity, "joint_torque")}
 
     def __call__(
         self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
     ):
-        if self._stiffness is None or self._damping is None or self._default is None:
-            raise RuntimeError("Bind JointEnergy1 to a scene before evaluating it")
-        position = self._select(physical_state[self.entity, "joint_pos"])
+        torque = self._select(physical_state[self.entity, "joint_torque"])
         velocity = self._velocity(physical_state)
-        target = self._default + self._scale * self._select(mdp_state["action"])
-        torque = self._stiffness * (target - position) - self._damping * velocity
-        power = (torque * velocity).abs().sum(dim=-1, keepdim=True)
-        return -self.weight * power
+        return -self.weight * (torque * velocity).abs().sum(dim=-1, keepdim=True)
 
 
 @dataclass(frozen=True)
 class JointAcc2(_JointTerm):
-    """Penalize the squared change in joint velocity since the previous step.
+    """Penalize squared average joint acceleration over one control interval.
 
     The first step of an episode contributes nothing. The velocity used here is
     carried in ``mdp_state`` so a replayed checkpoint reproduces the same penalty.
     """
 
+    _control_dt: float | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    def _initialize(self, scene):
+        if scene.control_dt <= 0:
+            raise ValueError("control_dt must be positive")
+        bound = super()._initialize(scene)
+        object.__setattr__(bound, "_control_dt", float(scene.control_dt))
+        return bound
+
     def __call__(
         self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
     ):
+        if self._control_dt is None:
+            raise RuntimeError("Bind JointAcc2 to a scene before evaluating it")
         velocity = physical_state[self.entity, "joint_vel"]
         previous = mdp_state.get("previous_joint_vel", velocity)
         selected = self._select(velocity)
@@ -129,7 +125,8 @@ class JointAcc2(_JointTerm):
         )
         # Keep every joint so later selections read the same history.
         mdp_state["previous_joint_vel"] = velocity.detach().clone()
-        return -self.weight * delta.square().sum(dim=-1, keepdim=True)
+        acceleration = delta / self._control_dt
+        return -self.weight * acceleration.square().sum(dim=-1, keepdim=True)
 
 
 @dataclass(frozen=True)
@@ -151,6 +148,10 @@ class TrackVelocity:
     components: slice
     weight: float
     sigma: float
+
+    @property
+    def physical_fields(self):
+        return self.velocity.physical_fields
 
     def _initialize(self, scene):
         return replace(self, velocity=self.velocity._initialize(scene))

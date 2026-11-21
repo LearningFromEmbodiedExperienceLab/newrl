@@ -1,4 +1,5 @@
 from dataclasses import dataclass, replace
+from typing import ClassVar
 
 from .observations import BodyHeight, ProjectedGravity
 from .terms import StepFeatures
@@ -7,6 +8,7 @@ from .terms import StepFeatures
 @dataclass(frozen=True)
 class Timeout:
     steps: int
+    physical_fields: ClassVar[frozenset] = frozenset()
 
     def __call__(
         self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
@@ -20,6 +22,10 @@ class Fall:
     gravity: ProjectedGravity
     min_height: float = 0.35
     min_upright_cosine: float = 0.5
+
+    @property
+    def physical_fields(self):
+        return self.height.physical_fields | self.gravity.physical_fields
 
     def _initialize(self, scene):
         return replace(

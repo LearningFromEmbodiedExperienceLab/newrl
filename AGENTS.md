@@ -76,3 +76,9 @@ Keep local histories in the ignored `benchmark-results/` directory and add
 only selected shareable references under `benchmarks/reference/`. Use
 anonymous labels such as `runner-01`. Benchmark exports must omit usernames,
 hostnames, local paths, device identifiers, and environment variables.
+
+MDP terms may declare `physical_fields` as a set of `(entity, field)` pairs.
+The bound MDP unions these requirements across observation, reward, and episode-end
+terms. Terms without a declaration retain a full scene snapshot. Set
+`EnvironmentConfig.physical_fields` to request additional transition fields.
+Read-plan snapshots own their storage and remain valid after later steps.

@@ -16,11 +16,16 @@ class EntityField:
         default=None, init=False, repr=False, compare=False
     )
 
+    @property
+    def physical_fields(self):
+        return frozenset({(self.entity, self.field)})
+
     def _initialize(self, scene):
         entity = scene.entities[self.entity]
         shapes = {
             "joint_pos": entity.q.shape[1:],
             "joint_vel": entity.qd.shape[1:],
+            "joint_torque": entity.qd.shape[1:],
             "body_pose_w": torch.Size((len(entity.body_names), 7)),
             "body_twist_w": torch.Size((len(entity.body_names), 6)),
         }
@@ -45,6 +50,7 @@ class EntityField:
 
 @dataclass(frozen=True)
 class PreviousAction:
+    physical_fields: ClassVar[frozenset] = frozenset()
     _size: int | None = field(default=None, init=False, repr=False, compare=False)
 
     def _initialize(self, scene):
@@ -143,6 +149,13 @@ class _BodyVelocity(_BodyObservation):
         if self.frame not in ("world", "body", "yaw"):
             raise ValueError(f"Unknown velocity frame {self.frame!r}")
 
+    @property
+    def physical_fields(self):
+        fields = {(self.entity, "body_twist_w")}
+        if self.frame != "world":
+            fields.add((self.entity, "body_pose_w"))
+        return frozenset(fields)
+
     def _velocity(self, physical_state, components: slice) -> torch.Tensor:
         vector = self._read(physical_state, "body_twist_w")[..., components]
         if self.frame == "world":
@@ -175,6 +188,10 @@ class BodyAngularVelocity(_BodyVelocity):
 
 
 class _SharedBodyObservation(_BodyObservation):
+    @property
+    def physical_fields(self):
+        return frozenset({(self.entity, "body_pose_w")})
+
     def __call__(
         self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
     ):
@@ -208,6 +225,8 @@ def _inverse_rotate(quat: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
 
 @dataclass(frozen=True)
 class VelocityCommandObservation:
+    physical_fields: ClassVar[frozenset] = frozenset()
+
     @property
     def shape(self) -> torch.Size:
         return torch.Size((3,))

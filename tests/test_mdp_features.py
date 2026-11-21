@@ -8,9 +8,9 @@ import torch
 from tensordict import TensorDict
 
 from newrl.mdp.base import MDP, ObservationGroup, RewardGroup
-from newrl.mdp.rewards import JointAcc2, JointEnergy1, JointVel2, _JointTerm
 from newrl.mdp.episode_ends import Fall
 from newrl.mdp.observations import BodyHeight, ProjectedGravity
+from newrl.mdp.rewards import JointAcc2, JointEnergy1, JointVel2, _JointTerm
 
 
 class StepFeatureTests(unittest.TestCase):
@@ -103,9 +103,13 @@ def _bind_joints(term, names=("LF_HAA", "LF_KFE")):
         joint_names=tuple(f"robot/{name}" for name in names),
         qd=torch.zeros(1, len(names), dtype=torch.long),
     )
-    scene = SimpleNamespace(entities={"robot": entity})
+    scene = SimpleNamespace(entities={"robot": entity}, control_dt=0.02)
     # Resolve indices without the actuator-gain tensors owned by JointEnergy1.
-    return _JointTerm._initialize(term, scene)
+    return (
+        term._initialize(scene)
+        if isinstance(term, JointAcc2)
+        else _JointTerm._initialize(term, scene)
+    )
 
 
 class JointPenaltyTests(unittest.TestCase):
@@ -115,6 +119,7 @@ class JointPenaltyTests(unittest.TestCase):
                 "robot": {
                     "joint_pos": torch.zeros(1, 2),
                     "joint_vel": torch.tensor([[1.0, -2.0]]),
+                    "joint_torque": torch.tensor([[-1.0, 12.0]]),
                 }
             },
             batch_size=[1],
@@ -136,7 +141,7 @@ class JointPenaltyTests(unittest.TestCase):
 
         acceleration_penalty = _bind_joints(JointAcc2(weight=1.0))(physical, mdp_state)
         # Squared change is 0 and 4. The carried velocity becomes the current one.
-        torch.testing.assert_close(acceleration_penalty, torch.tensor([[-4.0]]))
+        torch.testing.assert_close(acceleration_penalty, torch.tensor([[-10000.0]]))
         torch.testing.assert_close(
             mdp_state["previous_joint_vel"], torch.tensor([[1.0, -2.0]])
         )
@@ -145,11 +150,5 @@ class JointPenaltyTests(unittest.TestCase):
         torch.testing.assert_close(opening, torch.zeros(1, 1))
 
         energy = _bind_joints(JointEnergy1(weight=1.0))
-        object.__setattr__(energy, "_stiffness", torch.tensor([[10.0, 10.0]]))
-        object.__setattr__(energy, "_damping", torch.tensor([[1.0, 1.0]]))
-        object.__setattr__(energy, "_default", torch.zeros(1, 2))
-        object.__setattr__(energy, "_scale", 0.5)
-        # target = [0, 1], torque = 10 * target - velocity = [ -1, 12 ]
-        # |torque * velocity| sums to 1 + 24.
         power = energy(physical, mdp_state)
         torch.testing.assert_close(power, torch.tensor([[-25.0]]))

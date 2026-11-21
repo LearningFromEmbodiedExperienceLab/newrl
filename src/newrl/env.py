@@ -27,6 +27,12 @@ class _EnvironmentCore:
         self.num_envs = config.num_envs
         self.scene = Scene(config)
         self.mdp = (mdp if mdp is not None else config.mdp)._initialize(self.scene)
+        self.scene.resolve_physical_fields(config.physical_fields)
+        required = self.mdp.physical_fields
+        requested = (
+            None if required is None else required | frozenset(config.physical_fields)
+        )
+        self.physical_read_plan = self.scene.resolve_physical_fields(requested)
         self.model = self.scene.model
         self.device = torch.device(wp.device_to_torch(self.model.device))
         self.sim = newton.solvers.SolverMuJoCo(
@@ -46,6 +52,14 @@ class _EnvironmentCore:
             if config.deterministic
             else None,
         )
+        needs_torque = any(
+            "joint_torque" in fields for fields in self.physical_read_plan.values()
+        )
+        self.observables = (
+            self.sim.observables({self.sim.ObservableKind.QFRC_ACTUATOR})
+            if needs_torque
+            else None
+        )
         self._solver_reset_defaults = {
             name: wp.to_torch(array).clone()
             for name in ("history", "mocap_pos", "mocap_quat")
@@ -64,7 +78,7 @@ class _EnvironmentCore:
             entity.q.shape[1] for entity in self.scene.entities.values()
         ]
         self.action_dim = sum(self.action_sizes)
-        self.control_dt = config.sim_dt * config.substeps
+        self.control_dt = self.scene.control_dt
         self.profiler: StageProfiler | None = None
 
     def _stream(self):
@@ -82,7 +96,12 @@ class _EnvironmentCore:
                 self.collision.collide(state, self.contacts)
             with self._profile_stage("solver") if profile else nullcontext():
                 self.sim.step(
-                    state, state_next, self.control, self.contacts, self.config.sim_dt
+                    state,
+                    state_next,
+                    self.control,
+                    self.contacts,
+                    self.config.sim_dt,
+                    observables=self.observables,
                 )
             state, state_next = state_next, state
         return state, state_next
@@ -129,6 +148,12 @@ class _EnvironmentCore:
         mask[:-1][ids] = True
         self.sim.reset(self.state, world_mask=wp.from_torch(mask, dtype=wp.bool))
         wp.to_torch(self.sim.mjw_data.time)[ids] = 0
+        if self.observables is not None:
+            joint_world = wp.to_torch(self.model.joint_world).long()
+            dof_starts = wp.to_torch(self.model.joint_qd_start).long()
+            dof_counts = dof_starts[1:] - dof_starts[:-1]
+            dof_world = torch.repeat_interleave(joint_world, dof_counts)
+            wp.to_torch(self.observables.qfrc_actuator)[mask[dof_world]] = 0
         for name, defaults in self._solver_reset_defaults.items():
             wp.to_torch(getattr(self.sim.mjw_data, name))[ids] = defaults[ids]
         joint_q = wp.to_torch(self.state.joint_q)
@@ -153,7 +178,9 @@ class _EnvironmentCore:
         targets = wp.to_torch(self.control.joint_target_q)
         for entity in self.scene.entities.values():
             targets[entity.targets[ids]] = entity.default_position[ids]
-        physical_state = self.scene.read(self.state)
+        physical_state = self.scene.read(
+            self.state, self.physical_read_plan, self.observables
+        )
         result = TensorDict(
             {"observation": self.mdp.observe(physical_state, next_mdp_state)},
             batch_size=[self.num_envs],
@@ -176,7 +203,9 @@ class _EnvironmentCore:
                 entity.write_action(self.control, values)
         self._advance()
         with self._profile_stage("state_read"):
-            physical_state = self.scene.read(self.state)
+            physical_state = self.scene.read(
+                self.state, self.physical_read_plan, self.observables
+            )
         with self._profile_stage("mdp"):
             next_mdp_state, result = self.mdp.advance(physical_state, mdp_state, action)
             transition = self._transition(physical_state, result)
@@ -238,6 +267,8 @@ class StatelessEnvironment(_EnvironmentCore):
                 if getattr(self.sim.mjw_data, name).size
             }
         )
+        if self.observables is not None:
+            arrays["qfrc_actuator"] = self.observables.qfrc_actuator
         return {
             name: wp.to_torch(array).reshape(self.num_envs, -1)
             for name, array in arrays.items()

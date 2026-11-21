@@ -1,12 +1,13 @@
 """Composable batched task terms evaluated on the simulator successor."""
 
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 
 import torch
 from tensordict import TensorDict
 
 from .terms import EpisodeEndTerm, ObservationTerm, RewardTerm, StepFeatures
-from functools import cached_property
+
 
 def _bind(term, scene):
     initialize = getattr(term, "_initialize", None)
@@ -37,7 +38,9 @@ class ObservationGroup:
         object.__setattr__(self, "terms", dict(self.terms))
 
     def _initialize(self, scene) -> "ObservationGroup":
-        return replace(self, terms={name: _bind(term, scene) for name, term in self.terms.items()})
+        return replace(
+            self, terms={name: _bind(term, scene) for name, term in self.terms.items()}
+        )
 
     @cached_property
     def shape(self) -> torch.Size:
@@ -80,7 +83,9 @@ class RewardGroup:
         object.__setattr__(self, "terms", dict(self.terms))
 
     def _initialize(self, scene) -> "RewardGroup":
-        return replace(self, terms={name: _bind(term, scene) for name, term in self.terms.items()})
+        return replace(
+            self, terms={name: _bind(term, scene) for name, term in self.terms.items()}
+        )
 
     @cached_property
     def keys(self) -> tuple[str, ...]:
@@ -138,11 +143,35 @@ class MDP:
         _require_groups(self.rewards, "reward", RewardGroup)
         return replace(
             self,
-            observations={name: _bind(group, scene) for name, group in self.observations.items()},
+            observations={
+                name: _bind(group, scene) for name, group in self.observations.items()
+            },
             rewards={name: _bind(group, scene) for name, group in self.rewards.items()},
-            terminations={name: _bind(term, scene) for name, term in self.terminations.items()},
-            truncations={name: _bind(term, scene) for name, term in self.truncations.items()},
+            terminations={
+                name: _bind(term, scene) for name, term in self.terminations.items()
+            },
+            truncations={
+                name: _bind(term, scene) for name, term in self.truncations.items()
+            },
         )
+
+    @property
+    def physical_fields(self) -> frozenset[tuple[str, str]] | None:
+        """Fields required by bound terms. None means an undeclared term needs a full snapshot."""
+        terms = [
+            term
+            for group in (*self.observations.values(), *self.rewards.values())
+            for term in group.terms.values()
+        ]
+        terms.extend(self.terminations.values())
+        terms.extend(self.truncations.values())
+        fields = set()
+        for term in terms:
+            required = getattr(term, "physical_fields", None)
+            if required is None:
+                return None
+            fields.update(required)
+        return frozenset(fields)
 
     def initial_state(
         self, num_envs: int, action_dim: int, device: torch.device
