@@ -178,3 +178,33 @@ class FootSlip:
         loaded = physical_state[self.sensor, "loaded"]
         speed_sq = velocity[..., :2].square().sum(-1)
         return -self.weight * (speed_sq * loaded).sum(-1, keepdim=True)
+
+
+@dataclass(frozen=True)
+class FeetAirTime:
+    """Reward the number of feet with current air time strictly inside a range.
+
+    This follows mjlab's velocity-task feet_air_time without command gating.
+    """
+
+    sensor: str
+    weight: float
+    threshold_min: float = 0.05
+    threshold_max: float = 0.5
+
+    def __post_init__(self):
+        if not 0.0 <= self.threshold_min < self.threshold_max:
+            raise ValueError("Air-time thresholds must satisfy 0 <= min < max")
+
+    @property
+    def physical_fields(self):
+        return frozenset({(self.sensor, "current_air_time")})
+
+    def _initialize(self, scene):
+        scene.resolve_physical_fields(self.physical_fields)
+        return self
+
+    def __call__(self, physical_state, mdp_state):
+        air = physical_state[self.sensor, "current_air_time"]
+        in_range = (air > self.threshold_min) & (air < self.threshold_max)
+        return self.weight * in_range.sum(dim=-1, keepdim=True).float()

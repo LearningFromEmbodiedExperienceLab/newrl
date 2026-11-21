@@ -89,9 +89,13 @@ class _EnvironmentCore:
         return nullcontext() if self.profiler is None else self.profiler.stage(name)
 
     def _simulate(self, state, state_next, *, profile=False):
+        for sensor in self._contact_sensors.values():
+            sensor.begin_step()
         for substep in range(self.config.substeps):
-            sample_contacts = (
-                bool(self._contact_sensors) and substep == self.config.substeps - 1
+            final = substep == self.config.substeps - 1
+            sample_contacts = any(
+                sensor.track_history or final
+                for sensor in self._contact_sensors.values()
             )
             with self._profile_stage("collision") if profile else nullcontext():
                 state.clear_forces()
@@ -110,7 +114,13 @@ class _EnvironmentCore:
                     self._profile_stage("contact_sensor") if profile else nullcontext()
                 ):
                     for sensor in self._contact_sensors.values():
-                        sensor.update(self.contacts, self._solver.contact_observables)
+                        if sensor.track_history or final:
+                            sensor.update(
+                                self.contacts,
+                                self._solver.contact_observables,
+                                state,
+                                self.config.sim_dt,
+                            )
             state, state_next = state_next, state
         return state, state_next
 
@@ -174,7 +184,7 @@ class _EnvironmentCore:
             dof_world = torch.repeat_interleave(joint_world, dof_counts)
             wp.to_torch(self.observables.qfrc_actuator)[mask[dof_world]] = 0
         for sensor in self._contact_sensors.values():
-            sensor.force_view()[ids] = 0
+            sensor.reset(ids)
         joint_q = wp.to_torch(self.state.joint_q)
         for name, pose in poses.items():
             entity = self.scene.entities[name]
@@ -286,8 +296,9 @@ class StatelessEnvironment(_EnvironmentCore):
         views.update(self._solver.checkpoint_views())
         views.update(
             {
-                f"contact_force:{name}": sensor.force_view()
+                f"contact_{field}:{name}": view
                 for name, sensor in self._contact_sensors.items()
+                for field, view in sensor.checkpoint_views().items()
             }
         )
         return views

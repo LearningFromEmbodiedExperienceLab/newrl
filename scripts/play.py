@@ -24,7 +24,7 @@ class PlayConfig:
             raise ValueError("episode_steps and steps must be positive")
 
 
-@main(PlayConfig)
+@main(PlayConfig, defaults=("task.num_envs=4",))
 def main(cfg: PlayConfig) -> None:
     viewer = newton.viewer.ViewerGL() if cfg.viewer else None
     try:

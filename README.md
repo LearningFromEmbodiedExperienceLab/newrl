@@ -31,4 +31,19 @@ For diagnostics, request `("feet_ground", "force_w")` or
 solved terrain force in world coordinates on the final physics substep.
 Immediately after reset, selected worlds report zero force until they step.
 
+`TerrainContactConfig` can enable `track_first_contact`, `track_air_time`, and
+`track_contact_position`. The sensor then samples every physics substep. A
+first-contact event records any unloaded-to-loaded transition during the
+control step, including contact on the first substep after reset. Air time
+accumulates while unloaded; the last completed duration is retained at
+touchdown. The last touchdown position is a force-weighted world-space contact
+midpoint, accompanied by `last_contact_pos_valid`, which is false until a
+touchdown has been observed since reset. These histories are checkpointed and
+cleared for selected worlds on reset.
+
+`FeetAirTime` rewards each foot whose current air time lies strictly between
+its configured thresholds, following mjlab's velocity task without command
+gating. `AnymalLocomotion(feet_air_time_weight=...)` enables the term and
+air-time tracking.
+
 See [environment benchmarks](benchmarks/README.md) for reproducible runs and reference results.

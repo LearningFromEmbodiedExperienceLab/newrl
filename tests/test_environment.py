@@ -9,6 +9,7 @@ import warp as wp
 from tensordict import TensorDict
 
 from newrl.configs import AnymalLocomotion
+from newrl.contact import TerrainContactConfig
 from newrl.env import StatefulEnvironment, StatelessEnvironment
 from newrl.mdp.episode_ends import Timeout
 from newrl.solver_adapters import MujocoSimConfig, SteelSimConfig
@@ -18,6 +19,82 @@ from newrl.terrain import FlatMeshTerrainConfig, PlaneTerrainConfig
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class EnvironmentTests(unittest.TestCase):
+    def test_contact_history_checkpoint_and_partial_reset(self):
+        for solver in (MujocoSimConfig(), SteelSimConfig()):
+            with self.subTest(solver=type(solver).__name__):
+                cfg = AnymalLocomotion(
+                    num_envs=2,
+                    solver=solver,
+                    graph_capture=True,
+                    substeps=3,
+                    deterministic=True,
+                    feet_air_time_weight=0.2,
+                    output_physical_fields=tuple(
+                        ("feet_ground", field)
+                        for field in (
+                            "first_contact",
+                            "current_air_time",
+                            "last_air_time",
+                            "last_contact_pos_w",
+                            "last_contact_pos_valid",
+                        )
+                    ),
+                )
+                cfg.contact_sensors["feet_ground"] = TerrainContactConfig(
+                    "robot",
+                    r"(LF|LH|RF|RH)_FOOT",
+                    track_air_time=True,
+                    track_first_contact=True,
+                    track_contact_position=True,
+                )
+                env = StatelessEnvironment(cfg)
+                stateful = StatefulEnvironment(cfg)
+                sim, mdp, initial = env.reset()
+                torch.testing.assert_close(
+                    stateful.reset(), initial, atol=2e-3, rtol=2e-3
+                )
+                self.assertFalse(
+                    initial[
+                        "physical_state", "feet_ground", "last_contact_pos_valid"
+                    ].any()
+                )
+                inputs = TensorDict(
+                    {"action": torch.zeros((2, env.action_dim), device=env.device)},
+                    batch_size=[2],
+                )
+                seen = torch.zeros((2, 4), dtype=torch.bool, device=env.device)
+                for _ in range(30):
+                    sim, mdp, transition = env.step(sim, mdp, inputs)
+                    actual = stateful.step(inputs["action"])
+                    torch.testing.assert_close(actual, transition, atol=2e-3, rtol=2e-3)
+                    seen |= transition["physical_state", "feet_ground", "first_contact"]
+                self.assertTrue(seen.any(dim=-1).all())
+                sensor = transition["physical_state", "feet_ground"]
+                self.assertTrue(sensor["last_contact_pos_valid"].any(dim=-1).all())
+                self.assertTrue(torch.isfinite(sensor["last_contact_pos_w"]).all())
+                air = sensor["current_air_time"]
+                expected_reward = 0.2 * ((air > 0.05) & (air < 0.5)).sum(
+                    -1, keepdim=True
+                )
+                torch.testing.assert_close(
+                    transition["reward_terms", "tracking", "feet_air_time"],
+                    expected_reward.float(),
+                )
+                next_sim, next_mdp, expected = env.step(sim, mdp, inputs)
+                env.step(next_sim, next_mdp, inputs)
+                _, _, replay = env.step(sim, mdp, inputs)
+                torch.testing.assert_close(replay, expected, atol=2e-3, rtol=2e-3)
+                reset_sim, _, reset = env.reset(sim, mdp, env_ids=torch.tensor([0]))
+                self.assertFalse(
+                    reset["physical_state", "feet_ground", "last_contact_pos_valid"][
+                        0
+                    ].any()
+                )
+                torch.testing.assert_close(reset_sim[1], sim[1], atol=0, rtol=0)
+                torch.testing.assert_close(
+                    reset["physical_state", "feet_ground"][1], sensor[1], atol=0, rtol=0
+                )
+
     def test_steel_torque_matches_single_joint_dynamics(self):
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         link = builder.add_link(mass=2.0, inertia=wp.mat33(1.0))

@@ -69,6 +69,9 @@ a partial reset.
   newtons) and `loaded` (force magnitude above the configured threshold).
   Reset clears selected sensor rows. Stateless checkpoints preserve reduced
   forces for unselected worlds without storing raw contact rows.
+  Optional first-contact, air-time, and touchdown-position tracking samples
+  every physics substep. Sensor history and control-step events are part of
+  the simulator checkpoint and are reset only for selected worlds.
 
 ## Validation and benchmarking
 

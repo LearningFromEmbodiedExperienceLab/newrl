@@ -208,7 +208,15 @@ class ContactObservation:
     _shape: torch.Size | None = field(
         default=None, init=False, repr=False, compare=False
     )
-    field: Literal["loaded", "force_w"] = "loaded"
+    field: Literal[
+        "loaded",
+        "force_w",
+        "first_contact",
+        "current_air_time",
+        "last_air_time",
+        "last_contact_pos_w",
+        "last_contact_pos_valid",
+    ] = "loaded"
 
     @property
     def physical_fields(self):
@@ -229,7 +237,11 @@ class ContactObservation:
         object.__setattr__(
             bound,
             "_shape",
-            torch.Size((count, 3) if self.field == "force_w" else (count,)),
+            torch.Size(
+                (count, 3)
+                if self.field in ("force_w", "last_contact_pos_w")
+                else (count,)
+            ),
         )
         return bound
 

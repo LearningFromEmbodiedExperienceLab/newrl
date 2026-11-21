@@ -164,11 +164,13 @@ def resolve(config_cls: type, argv: Sequence[str]) -> Any:
     return config
 
 
-def main(config_cls: type) -> Callable:
+def main(config_cls: type, *, defaults: Sequence[str] = ()) -> Callable:
     """Call ``fn(config)`` after resolving CLI overrides.
 
-    ``config_out=path`` is removed from the overrides and, when present, the
-    resolved dataclass is written there as tagged JSON.
+    ``defaults`` are applied before the command line, so an explicit
+    ``task.num_envs=1`` still replaces a play default of 4. ``config_out=path``
+    is removed from the overrides and, when present, the resolved dataclass is
+    written there as tagged JSON.
     """
 
     def decorate(fn: Callable) -> Callable:
@@ -182,7 +184,7 @@ def main(config_cls: type) -> Callable:
                     config_out = token.split("=", 1)[1]
                 else:
                     overrides.append(token)
-            config = resolve(config_cls, overrides)
+            config = resolve(config_cls, [*defaults, *overrides])
             if config_out:
                 save_config(config_out, config)
             return fn(config)

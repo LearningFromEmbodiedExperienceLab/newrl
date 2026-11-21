@@ -20,6 +20,7 @@ from .mdp.observations import (
 )
 from .mdp.rewards import (
     ActionRate,
+    FeetAirTime,
     FootSlip,
     JointAcc2,
     JointEnergy1,
@@ -80,7 +81,9 @@ def locomotion_mdp(mdp_type: type[MDP] = MDP) -> MDP:
 
 
 def AnymalLocomotion(
-    *, contact_observation: bool = False, foot_slip_weight: float = 0.0, **overrides
+    *,
+    contact_observation: bool = False,
+    **overrides,
 ) -> EnvironmentConfig:
     feet = r"(LF|LH|RF|RH)_FOOT"
     mdp = locomotion_mdp(VelocityMDP)
@@ -121,11 +124,8 @@ def AnymalLocomotion(
                 "joint_energy1": JointEnergy1(weight=0.01),
                 "joint_acc2": JointAcc2(weight=0.00001),
                 "joint_vel2": JointVel2(weight=0.01),
-                **(
-                    {"foot_slip": FootSlip("feet_ground", foot_slip_weight)}
-                    if foot_slip_weight
-                    else {}
-                ),
+                "feet_air_time": FeetAirTime(sensor="feet_ground", weight=1.0),
+                "foot_slip": FootSlip(sensor="feet_ground", weight=0.1),
             }
         ),
     }
@@ -136,7 +136,11 @@ def AnymalLocomotion(
     defaults = {
         "robots": {"robot": newton_anymal_c},
         "mdp": mdp,
-        "contact_sensors": {"feet_ground": TerrainContactConfig("robot", feet)},
+        "contact_sensors": {
+            "feet_ground": TerrainContactConfig(
+                "robot", feet, track_air_time=True
+            )
+        },
     }
     return EnvironmentConfig(**(defaults | overrides))
 

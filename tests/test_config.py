@@ -143,6 +143,21 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertFalse(called)
 
+    def test_default_override_yields_to_the_command_line(self):
+        @main(TrainConfig, defaults=("task.num_envs=4",))
+        def entry(cfg: TrainConfig):
+            return cfg
+
+        self.assertEqual(
+            entry(["task=anymal_loco_flat", "algo=ppo"]).task.num_envs, 4
+        )
+        self.assertEqual(
+            entry(
+                ["task=anymal_loco_flat", "algo=ppo", "task.num_envs=2"]
+            ).task.num_envs,
+            2,
+        )
+
     def test_disabled_logger_does_not_open_a_run(self):
         with patch("wandb.init") as init:
             logger = RunLogger(WandbConfig(), object())
