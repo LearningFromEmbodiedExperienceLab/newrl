@@ -1,15 +1,15 @@
 """Train a clipped PPO policy on a NewRL environment."""
 
+from dataclasses import dataclass, field
+
 import torch
-from dataclasses import dataclass
-from newrl.algos.ppo import PPO
+
+from newrl.algos.ppo import PPO, PPOConfig
 from newrl.algos.rollout import collect_rollout
+from newrl.configs import EnvironmentConfig
 from newrl.env import StatefulEnvironment
 from newrl.utils.config import main
-
-# Imported after ConfigStore exists so task and algo modules can register presets.
-from newrl.algos.ppo import PPOConfig  # noqa: E402
-from newrl.configs import EnvironmentConfig  # noqa: E402
+from newrl.utils.logging import RunLogger, WandbConfig
 
 
 @dataclass
@@ -18,6 +18,7 @@ class TrainConfig:
     algo: PPOConfig
     seed: int = 0
     iterations: int = 100
+    logger: WandbConfig = field(default_factory=WandbConfig)
 
 
 def _group_width(mdp, groups: tuple[str, ...]) -> int:
@@ -36,12 +37,17 @@ def main(cfg: TrainConfig) -> None:
         action_dim=env.action_dim,
     ).to(env.device)
     carry = env.reset()
-
-    for iteration in range(cfg.iterations):
-        batch, carry = collect_rollout(env, policy, cfg.algo.update_every, carry)
-        metrics = policy.train_op(batch)
-        summary = " ".join(f"{key}={value:.4f}" for key, value in metrics.items())
-        print(f"iter={iteration} {summary}", flush=True)
+    logger = RunLogger(cfg.logger, cfg)
+    try:
+        for iteration in range(cfg.iterations):
+            batch, carry = collect_rollout(env, policy, cfg.algo.update_every, carry)
+            metrics = policy.train_op(batch)
+            frames = (iteration + 1) * env.num_envs * cfg.algo.update_every
+            logger.log({**metrics, "env_frames": frames}, step=iteration)
+            summary = " ".join(f"{key}={value:.4f}" for key, value in metrics.items())
+            print(f"iter={iteration} env_frames={frames} {summary}", flush=True)
+    finally:
+        logger.finish()
 
 
 if __name__ == "__main__":

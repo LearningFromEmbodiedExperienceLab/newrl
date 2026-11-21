@@ -6,6 +6,8 @@ import torch
 import warp as wp
 from tensordict import TensorDict
 
+from newrl.utils.math import quat_from_yaw, quat_mul
+
 from .base import MDP
 
 
@@ -99,18 +101,8 @@ class VelocityMDP(MDP):
         next_mdp_state["reset_rng"][ids] = rng
         noise = 2 * noise - 1
         root[:, :2] += self.root_xy_noise * noise[:, :2]
-        half_yaw = 0.5 * self.root_yaw_noise * noise[:, 2]
-        sin_yaw, cos_yaw = half_yaw.sin(), half_yaw.cos()
-        x, y, z, w = root[:, 3:7].unbind(dim=-1)
-        root[:, 3:7] = torch.stack(
-            (
-                cos_yaw * x - sin_yaw * y,
-                sin_yaw * x + cos_yaw * y,
-                cos_yaw * z + sin_yaw * w,
-                cos_yaw * w - sin_yaw * z,
-            ),
-            dim=-1,
-        )
+        yaw = self.root_yaw_noise * noise[:, 2]
+        root[:, 3:7] = quat_mul(quat_from_yaw(yaw), root[:, 3:7])
         lower, upper = self._joint_limits
         pose["joint_pos"] = (joints + self.joint_position_noise * noise[:, 3:]).clamp(
             min=lower[ids], max=upper[ids]

@@ -43,6 +43,9 @@ class ConfigStore:
     def names(self, group: str) -> list[str]:
         return sorted(name for item_group, name in self._nodes if item_group == group)
 
+    def groups(self) -> list[str]:
+        return sorted({group for group, _name in self._nodes})
+
     def __contains__(self, key: tuple[str, str]) -> bool:
         return key in self._nodes
 

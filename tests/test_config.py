@@ -6,10 +6,12 @@ import unittest
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from unittest.mock import patch
 
 from newrl.configs import EnvironmentConfig
 from newrl.robots import newton_anymal_c
 from newrl.utils.config import cs, load_config, main, save_config
+from newrl.utils.logging import RunLogger, WandbConfig
 
 _SCRIPT = Path(__file__).parents[1] / "scripts" / "train_onpolicy.py"
 _train = importlib.util.spec_from_file_location("train_onpolicy", _SCRIPT)
@@ -101,6 +103,13 @@ class ConfigTests(unittest.TestCase):
             entry(["algo=ppo"])
         self.assertIn("task (choose from anymal_loco_flat)", str(caught.exception))
         self.assertFalse(called)
+
+    def test_disabled_logger_does_not_open_a_run(self):
+        with patch("wandb.init") as init:
+            logger = RunLogger(WandbConfig(), object())
+            logger.log({"actor/policy_loss": 1.0}, step=0)
+            logger.finish()
+        init.assert_not_called()
 
 
 if __name__ == "__main__":

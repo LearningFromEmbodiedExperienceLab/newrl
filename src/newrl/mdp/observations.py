@@ -1,9 +1,11 @@
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import ClassVar, Literal
 
 import torch
+
+from newrl.utils.math import quat_rotate_inverse, yaw_rotate
+from newrl.utils.string import resolve_scene_names
 
 
 @dataclass(frozen=True)
@@ -104,22 +106,13 @@ class _BodyObservation:
         )
         if not names:
             raise ValueError(f"Empty body selection for {self.entity!r}")
-
-        selected = set()
-        for name in names:
-            pattern = re.compile(name)
-            matches = [
-                i
-                for i, label in enumerate(entity.body_names)
-                if pattern.fullmatch(label)
-                or pattern.fullmatch(label.rsplit("/", 1)[-1])
-            ]
-            if not matches:
-                raise ValueError(f"No bodies match {name!r} on {self.entity!r}")
-            selected.update(matches)
+        try:
+            selected = resolve_scene_names(names, entity.body_names)
+        except ValueError as exc:
+            raise ValueError(f"No bodies match {names!r} on {self.entity!r}") from exc
 
         bound = replace(self)
-        body_indices = tuple(sorted(selected))
+        body_indices = tuple(selected)
         indices = torch.tensor(
             body_indices, device=entity.bodies.device, dtype=torch.long
         )
@@ -156,15 +149,10 @@ class _BodyVelocity(_BodyObservation):
             return vector
         quat = self._read(physical_state, "body_pose_w")[..., 3:7]
         if self.frame == "body":
-            return _inverse_rotate(quat, vector)
-
+            return quat_rotate_inverse(quat, vector)
         x, y, z, w = quat.unbind(dim=-1)
         yaw = torch.atan2(2 * (w * z + x * y), 1 - 2 * (y.square() + z.square()))
-        sin_yaw, cos_yaw = yaw.sin(), yaw.cos()
-        vx, vy, vz = vector.unbind(dim=-1)
-        return torch.stack(
-            (cos_yaw * vx + sin_yaw * vy, cos_yaw * vy - sin_yaw * vx, vz), dim=-1
-        )
+        return yaw_rotate(-yaw, vector)
 
 
 class BodyLinearVelocity(_BodyVelocity):
@@ -195,13 +183,6 @@ class BodyHeight(_BodyObservation):
 
     def __call__(self, physical_state, mdp_state):
         return self._read(physical_state, "body_pose_w")[..., 2]
-
-
-def _inverse_rotate(quat: torch.Tensor, vector: torch.Tensor) -> torch.Tensor:
-    # Newton quaternions use XYZW order.
-    axis = -quat[..., :3]
-    cross = 2.0 * torch.linalg.cross(axis, vector)
-    return vector + quat[..., 3:4] * cross + torch.linalg.cross(axis, cross)
 
 
 @dataclass(frozen=True)

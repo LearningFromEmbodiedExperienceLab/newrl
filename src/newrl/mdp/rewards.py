@@ -1,9 +1,10 @@
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import ClassVar
 
 import torch
+
+from newrl.utils.string import resolve_scene_names
 
 from .observations import BodyAngularVelocity, BodyLinearVelocity
 
@@ -22,21 +23,11 @@ class ActionRate:
 
 def _resolve_joint_indices(entity, joint_names: str | Sequence[str]) -> torch.Tensor:
     """Full-match joint labels, or their final path component, in scene order."""
-    names = (joint_names,) if isinstance(joint_names, str) else tuple(joint_names)
-    if not names:
-        raise ValueError("Joint selection must contain at least one pattern")
-    selected: set[int] = set()
-    for name in names:
-        pattern = re.compile(name)
-        matches = [
-            index
-            for index, label in enumerate(entity.joint_names)
-            if pattern.fullmatch(label) or pattern.fullmatch(label.rsplit("/", 1)[-1])
-        ]
-        if not matches:
-            raise ValueError(f"No joints match {name!r}")
-        selected.update(matches)
-    return torch.tensor(sorted(selected), device=entity.qd.device, dtype=torch.long)
+    try:
+        selected = resolve_scene_names(joint_names, entity.joint_names)
+    except ValueError as exc:
+        raise ValueError(f"No joints match {joint_names!r}") from exc
+    return torch.tensor(selected, device=entity.qd.device, dtype=torch.long)
 
 
 @dataclass(frozen=True)
