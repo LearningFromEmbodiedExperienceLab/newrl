@@ -118,7 +118,16 @@ class EnvironmentTests(unittest.TestCase):
         torch.testing.assert_close(gravity[1], gravity.new_tensor([0, 0, 1]))
 
     def test_actuator_torque_observable_reset_and_replay(self):
-        env = StatelessEnvironment(AnymalLocomotion(num_envs=2, graph_capture=True))
+        env = StatelessEnvironment(
+            AnymalLocomotion(
+                num_envs=2,
+                graph_capture=True,
+                output_physical_fields=(
+                    ("robot", "joint_torque"),
+                    ("robot", "joint_vel"),
+                ),
+            )
+        )
         sim, mdp, initial = env.reset()
         torque = initial["physical_state", "robot", "joint_torque"]
         torch.testing.assert_close(torque, torch.zeros_like(torque))
@@ -161,6 +170,7 @@ class EnvironmentTests(unittest.TestCase):
         cfg = AnymalLocomotion(
             num_envs=4,
             terrain=FlatMeshTerrainConfig(resolution=4, spawn_locations=anchors),
+            output_physical_fields=(("robot", "body_pose_w"),),
         )
         cfg.mdp = replace(cfg.mdp, root_xy_noise=0.0)
         env = StatelessEnvironment(cfg)
@@ -273,7 +283,12 @@ class EnvironmentTests(unittest.TestCase):
 
     def _check_checkpoint_replay_after_another_branch(self, backend):
         cfg = AnymalLocomotion(
-            num_envs=2, substeps=3, graph_capture=True, solver_backend=backend
+            num_envs=2,
+            substeps=3,
+            graph_capture=True,
+            solver_backend=backend,
+            output_physical_fields=(("robot", "joint_pos"),),
+            output_mdp_fields=("velocity_command",),
         )
         cfg.mdp = replace(cfg.mdp, hold_steps=25)
         env = StatelessEnvironment(cfg)
@@ -296,6 +311,7 @@ class EnvironmentTests(unittest.TestCase):
 
         next_sim, next_mdp, expected = env.step(sim, mdp, inputs)
         self.assertFalse(expected["done"].any())
+        self.assertEqual(expected["mdp_state", "episode_step"].tolist(), [[25], [25]])
         torch.testing.assert_close(
             expected["velocity_command"], mdp["velocity_command"]
         )
@@ -305,6 +321,9 @@ class EnvironmentTests(unittest.TestCase):
         torch.testing.assert_close(
             expected["observation", "command"],
             next_mdp["velocity_command"],
+        )
+        torch.testing.assert_close(
+            expected["mdp_state", "velocity_command"], next_mdp["velocity_command"]
         )
         other = TensorDict({"action": -action}, batch_size=[2])
         env.step(next_sim, next_mdp, other)
@@ -316,10 +335,14 @@ class EnvironmentTests(unittest.TestCase):
         torch.testing.assert_close(actual_mdp, next_mdp)
         torch.testing.assert_close(actual, expected, atol=2e-4, rtol=2e-4)
 
-        reset_sim, reset_mdp, _ = env.reset(
+        reset_sim, reset_mdp, reset_output = env.reset(
             next_sim, next_mdp, env_ids=torch.tensor([0])
         )
-        self.assertEqual(reset_mdp["episode_step"].tolist(), [0, 25])
+        self.assertEqual(reset_mdp["episode_step"].tolist(), [[0], [25]])
+        self.assertEqual(
+            reset_output["mdp_state", "episode_step"].tolist(), [[0], [25]]
+        )
+        self.assertEqual(expected["mdp_state", "episode_step"].tolist(), [[25], [25]])
         torch.testing.assert_close(reset_sim[1], next_sim[1], atol=0, rtol=0)
         torch.testing.assert_close(reset_mdp[1], next_mdp[1], atol=0, rtol=0)
         self.assertNotEqual(
@@ -328,16 +351,34 @@ class EnvironmentTests(unittest.TestCase):
 
     def test_stateful_step_returns_terminal_successor_without_reset(self):
         cfg = AnymalLocomotion(num_envs=2)
+        cfg.output_physical_fields = (("robot", "joint_pos"),)
+        cfg.output_mdp_fields = ("velocity_command",)
         cfg.mdp.truncations["timeout"] = Timeout(1)
         env = StatefulEnvironment(cfg)
-        env.reset()
+        initial = env.reset()
+        for name in (
+            "episode_step",
+            "command_rng",
+            "reset_rng",
+            "command_steps_left",
+            "spawn_height",
+        ):
+            self.assertEqual(env.mdp_state[name].shape, (2, 1))
+        self.assertEqual(
+            set(initial["mdp_state"].keys()), {"episode_step", "velocity_command"}
+        )
+        self.assertEqual(initial["mdp_state", "episode_step"].shape, (2, 1))
         action = torch.zeros((2, env.action_dim), device=env.device)
         transition = env.step(action)
         self.assertTrue(transition["done"].all())
-        self.assertEqual(env.mdp_state["episode_step"].tolist(), [1, 1])
+        self.assertEqual(env.mdp_state["episode_step"].tolist(), [[1], [1]])
+        self.assertEqual(transition["mdp_state", "episode_step"].tolist(), [[1], [1]])
 
         reset = env.reset(torch.tensor([0]))
-        self.assertEqual(env.mdp_state["episode_step"].tolist(), [0, 1])
+        self.assertEqual(env.mdp_state["episode_step"].tolist(), [[0], [1]])
+        self.assertEqual(reset["mdp_state", "episode_step"].tolist(), [[0], [1]])
+        self.assertEqual(transition["mdp_state", "episode_step"].tolist(), [[1], [1]])
+        self.assertEqual(initial["mdp_state", "episode_step"].tolist(), [[0], [0]])
         torch.testing.assert_close(
             reset["physical_state"][1], transition["physical_state"][1], atol=0, rtol=0
         )
@@ -354,6 +395,9 @@ class EnvironmentTests(unittest.TestCase):
         )
         env = StatefulEnvironment(cfg)
         self.assertEqual(env.physical_read_plan, {"robot": ("joint_pos",)})
+        self.assertNotIn("physical_state", env.reset())
+        cfg.output_physical_fields = (("robot", "joint_pos"),)
+        env = StatefulEnvironment(cfg)
         first = env.reset()["physical_state"]
         self.assertEqual(set(first["robot"].keys()), {"joint_pos"})
         saved = first.clone()
@@ -361,11 +405,14 @@ class EnvironmentTests(unittest.TestCase):
         result = env.step(action)
         self.assertEqual(set(result["physical_state", "robot"].keys()), {"joint_pos"})
         torch.testing.assert_close(first, saved, atol=0, rtol=0)
-        cfg.physical_fields = (("robot", "body_pose_w"),)
+        cfg.output_physical_fields = (("robot", "body_pose_w"),)
         extra_env = StatefulEnvironment(cfg)
         self.assertEqual(
+            set(extra_env.physical_read_plan["robot"]), {"joint_pos", "body_pose_w"}
+        )
+        self.assertEqual(
             set(extra_env.reset()["physical_state", "robot"].keys()),
-            {"joint_pos", "body_pose_w"},
+            {"body_pose_w"},
         )
         cfg.physical_fields = (("robot", "missing"),)
         with self.assertRaisesRegex(ValueError, "Unknown physical field"):
@@ -381,7 +428,7 @@ class EnvironmentTests(unittest.TestCase):
         cfg.mdp = MDP(rewards={"custom": RewardGroup({"term": custom})})
         env = StatefulEnvironment(cfg)
         self.assertEqual(
-            set(env.reset()["physical_state", "robot"].keys()),
+            set(env.physical_read_plan["robot"]),
             {
                 "joint_pos",
                 "joint_vel",
@@ -391,4 +438,5 @@ class EnvironmentTests(unittest.TestCase):
                 "projected_gravity",
             },
         )
+        self.assertNotIn("physical_state", env.reset())
         env.step(torch.zeros((1, env.action_dim), device=env.device))

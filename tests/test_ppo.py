@@ -70,21 +70,39 @@ class NormalizationTests(unittest.TestCase):
 class RolloutTests(unittest.TestCase):
     def test_successor_is_kept_when_a_world_resets(self):
         env = _ScriptedEnvironment()
-        batch, carry = collect_rollout(env, _ZeroPolicy(), steps=2)
+        batch, carry = collect_rollout(env, _RecordingPolicy(), 2, env.reset())
         self.assertEqual(tuple(batch.batch_size), (2, 2))
         self.assertTrue(
             torch.equal(batch["policy_observation"][:, 0], torch.tensor([[0.0], [0.0]]))
         )
         self.assertTrue(
-            torch.equal(batch["next_critic_observation"][:, 0], torch.tensor([[1.0], [1.0]]))
+            torch.equal(
+                batch["next_critic_observation"][:, 0],
+                torch.tensor([[1.0, 10.0], [1.0, 10.0]]),
+            )
         )
         self.assertTrue(
-            torch.equal(batch["policy_observation"][:, 1], torch.tensor([[50.0], [1.0]]))
+            torch.equal(
+                batch["policy_observation"][:, 1], torch.tensor([[50.0], [1.0]])
+            )
         )
-        self.assertTrue(torch.equal(carry[0], torch.tensor([[51.0], [2.0]])))
+        self.assertTrue(
+            torch.equal(carry["observation", "state"], torch.tensor([[51.0], [2.0]]))
+        )
+        self.assertEqual(
+            batch["mdp_state", "episode_step"].tolist(), [[[0], [0]], [[0], [1]]]
+        )
+        self.assertEqual(carry["mdp_state", "episode_step"].tolist(), [[1], [2]])
 
 
 class PPOTests(unittest.TestCase):
+    def test_rejects_scalar_batches_without_feature_dimension(self):
+        policy = PPO(PPOConfig(), policy_dim=3, critic_dim=3, action_dim=2)
+        batch = _random_batch(num_envs=4, steps=4, policy_dim=3, action_dim=2)
+        batch["action_log_prob"] = batch["action_log_prob"].squeeze(-1)
+        with self.assertRaisesRegex(ValueError, "action_log_prob.*shape"):
+            policy.train_op(batch)
+
     def test_reward_scale_and_update(self):
         torch.manual_seed(0)
         policy = PPO(
@@ -127,7 +145,9 @@ class PPOTests(unittest.TestCase):
         self.assertTrue(torch.equal(policy.policy_norm.count, before))
         self.assertGreater(float(policy.critic_norm.count), 0.0)
         self.assertFalse(torch.equal(policy.actor.mean.weight, actor_before))
-        self.assertTrue(all(torch.isfinite(torch.tensor(value)) for value in metrics.values()))
+        self.assertTrue(
+            all(torch.isfinite(torch.tensor(value)) for value in metrics.values())
+        )
         self.assertIn("actor/policy_loss", metrics)
 
     def test_std_stays_inside_its_bounds(self):
@@ -137,9 +157,24 @@ class PPOTests(unittest.TestCase):
         self.assertTrue(torch.all(scale < 0.4))
 
 
-class _ZeroPolicy:
-    def act(self, observation):
-        return torch.zeros(observation.shape[0], 2), torch.zeros(observation.shape[0], 1)
+class _RecordingPolicy:
+    """Write the same fields PPO would, without knowing about the collector."""
+
+    def act(self, tensordict):
+        observation = tensordict["observation"]
+        tensordict["policy_observation"] = observation["state"]
+        tensordict["critic_observation"] = torch.cat(
+            [observation["state"], observation["extra"]], dim=-1
+        )
+        tensordict["action"] = torch.zeros(tensordict.batch_size[0], 2)
+        tensordict["action_log_prob"] = torch.zeros(tensordict.batch_size[0], 1)
+        return tensordict
+
+    def record(self, tensordict, transition):
+        observation = transition["observation"]
+        tensordict["next_critic_observation"] = torch.cat(
+            [observation["state"], observation["extra"]], dim=-1
+        )
 
 
 class _ScriptedEnvironment:
@@ -147,16 +182,23 @@ class _ScriptedEnvironment:
         self.num_envs = 2
         self.device = torch.device("cpu")
         self._observation = torch.zeros(self.num_envs, 1)
+        self._episode_step = torch.zeros(self.num_envs, 1, dtype=torch.long)
 
     def reset(self, env_ids=None):
         if env_ids is None:
             self._observation[:] = 0
+            self._episode_step[:] = 0
         else:
             self._observation[env_ids] = 50
-        return self._transition(torch.zeros(self.num_envs, 1), torch.zeros(self.num_envs, 1, dtype=torch.bool))
+            self._episode_step[env_ids] = 0
+        return self._transition(
+            torch.zeros(self.num_envs, 1),
+            torch.zeros(self.num_envs, 1, dtype=torch.bool),
+        )
 
     def step(self, action):
         self._observation = self._observation + 1
+        self._episode_step += 1
         done = torch.zeros(self.num_envs, 1, dtype=torch.bool)
         done[0, 0] = bool(self._observation[0, 0] == 1)
         return self._transition(torch.ones(self.num_envs, 1), done)
@@ -164,8 +206,17 @@ class _ScriptedEnvironment:
     def _transition(self, reward, done):
         return TensorDict(
             {
-                "policy_observation": self._observation.clone(),
-                "critic_observation": self._observation.clone(),
+                "observation": TensorDict(
+                    {
+                        "state": self._observation.clone(),
+                        "extra": self._observation.clone() + 9,
+                    },
+                    batch_size=[self.num_envs],
+                ),
+                "mdp_state": TensorDict(
+                    {"episode_step": self._episode_step.clone()},
+                    batch_size=[self.num_envs],
+                ),
                 "reward": reward,
                 "terminated": torch.zeros_like(done),
                 "done": done,

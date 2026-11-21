@@ -30,9 +30,19 @@ class _EnvironmentCore:
         self.scene = Scene(config)
         self.mdp = (mdp if mdp is not None else config.mdp)._initialize(self.scene)
         self.scene.resolve_physical_fields(config.physical_fields)
+        self.output_physical_plan = self.scene.resolve_physical_fields(
+            config.output_physical_fields
+        )
+        self.output_mdp_fields = tuple(
+            dict.fromkeys(("episode_step", *config.output_mdp_fields))
+        )
         required = self.mdp.physical_fields
         requested = (
-            None if required is None else required | frozenset(config.physical_fields)
+            None
+            if required is None
+            else required
+            | frozenset(config.physical_fields)
+            | frozenset(config.output_physical_fields)
         )
         self.physical_read_plan = self.scene.resolve_physical_fields(requested)
         self.model = self.scene.model
@@ -195,8 +205,20 @@ class _EnvironmentCore:
         if self.config.substeps % 2:
             self.state, self.state_next = self.state_next, self.state
 
-    def _transition(self, physical_state, result):
-        result["physical_state"] = physical_state
+    def _transition(self, physical_state, mdp_state, result):
+        """Expose independent successor snapshots for the configured output fields."""
+        missing = [name for name in self.output_mdp_fields if name not in mdp_state]
+        if missing:
+            raise ValueError(f"Unknown output MDP fields: {missing}")
+        result["mdp_state"] = mdp_state.select(*self.output_mdp_fields).clone()
+        if self.output_physical_plan:
+            result["physical_state"] = physical_state.select(
+                *(
+                    (entity, field)
+                    for entity, fields in self.output_physical_plan.items()
+                    for field in fields
+                )
+            ).clone()
         return result
 
     def _reset(self, env_ids, mdp_state):
@@ -269,7 +291,7 @@ class _EnvironmentCore:
             batch_size=[self.num_envs],
             device=self.device,
         )
-        return next_mdp_state, self._transition(physical_state, result)
+        return next_mdp_state, self._transition(physical_state, next_mdp_state, result)
 
     def _step(self, action, mdp_state):
         if action.shape != (self.num_envs, self.action_dim):
@@ -291,12 +313,16 @@ class _EnvironmentCore:
             )
         with self._profile_stage("mdp"):
             next_mdp_state, result = self.mdp.advance(physical_state, mdp_state, action)
-            transition = self._transition(physical_state, result)
+            transition = self._transition(physical_state, next_mdp_state, result)
         return next_mdp_state, transition
 
 
 class StatefulEnvironment(_EnvironmentCore):
-    """Own live physics buffers and MDP state. Resets are always explicit."""
+    """Own live physics buffers and MDP state. Resets are always explicit.
+
+    Reset and step outputs include a snapshot of ``mdp_state.episode_step``
+    for the returned observation; other MDP and physical fields are opt-in.
+    """
 
     def __init__(self, config: EnvironmentConfig, mdp: MDP | None = None):
         super().__init__(config, mdp)

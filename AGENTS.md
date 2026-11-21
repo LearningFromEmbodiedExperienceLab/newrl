@@ -9,8 +9,8 @@ and the PPO implementation are still stubs.
 
 **The environment never auto-resets.** The outer loop consumes terminal
 transitions and explicitly resets the selected worlds. A step always returns
-the true successor physical state and observation, including on termination
-or truncation. Preserve the physics and MDP state of unselected worlds during
+the true successor observation, including on termination or truncation; any
+requested physical snapshot describes that same successor. Preserve the physics and MDP state of unselected worlds during
 a partial reset.
 
 - `StatefulEnvironment.step(action)` returns a transition and advances the
@@ -20,7 +20,7 @@ a partial reset.
 - `StatelessEnvironment.step(sim_state, mdp_state, sim_inputs)` returns
   `(next_sim_state, next_mdp_state, transition)`. The simulator checkpoint
   includes persistent solver buffers as well as Newton state. The
-  `physical_state` in the transition is an observation snapshot. Use the
+  optional `physical_state` in the transition is a physical snapshot. Use the
   explicit simulator checkpoint for branching or replay. A partial stateless
   reset requires both prior checkpoints and `env_ids`.
 - Keep both APIs on the shared transition implementation in
@@ -48,8 +48,11 @@ a partial reset.
   The scene supplies projected gravity when requested by the physical read plan.
 - Term interfaces live in [terms.py](src/newrl/mdp/terms.py). Resolve scene
   indices once in `_initialize(scene)`. Observation `shape` excludes the world dimension
-  and is available after scene binding for scene-dependent terms. Rewards
-  and episode-end flags have shape `[num_envs, 1]`, with boolean flags.
+  and is available after scene binding for scene-dependent terms. All batched
+  scalar tensor fields have shape `[*batch, 1]`, including episode steps,
+  individual rewards, episode-end flags, and task state such as RNG counters.
+  Episode-end flags are boolean. Indices and other unbatched or intermediate
+  tensors follow their own API requirements.
   An observation group concatenates its terms into one vector. A reward group
   keeps each named term under `reward_terms`, and `reward` is their sum.
 - The RL environment uses Newton's `CollisionPipeline`. The custom terrain
@@ -81,5 +84,9 @@ hostnames, local paths, device identifiers, and environment variables.
 MDP terms may declare `physical_fields` as a set of `(entity, field)` pairs.
 The bound MDP unions these requirements across observation, reward, and episode-end
 terms. Terms without a declaration retain a full scene snapshot. Set
-`EnvironmentConfig.physical_fields` to request additional transition fields.
-Read-plan snapshots own their storage and remain valid after later steps.
+`EnvironmentConfig.physical_fields` to request additional internal read fields.
+`output_physical_fields` controls which physical fields appear in outputs;
+`output_mdp_fields` requests additional MDP fields. Outputs always include
+`mdp_state.episode_step`, with shape `[num_envs, 1]`, describing the returned
+observation: zero on reset and the successor count on step. Output snapshots
+own their storage and remain valid after later steps and partial resets.

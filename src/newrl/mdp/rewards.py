@@ -112,7 +112,7 @@ class JointAcc2(_JointTerm):
         velocity = physical_state[self.entity, "joint_vel"]
         previous = mdp_state.get("previous_joint_vel", velocity)
         selected = self._select(velocity)
-        first_step = mdp_state["episode_step"].unsqueeze(-1) == 1
+        first_step = mdp_state["episode_step"] == 1
         delta = torch.where(
             first_step, torch.zeros_like(selected), selected - self._select(previous)
         )

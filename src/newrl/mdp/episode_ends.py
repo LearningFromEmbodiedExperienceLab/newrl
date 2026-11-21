@@ -10,7 +10,7 @@ class Timeout:
     physical_fields: ClassVar[frozenset] = frozenset()
 
     def __call__(self, physical_state, mdp_state):
-        return mdp_state["episode_step"].unsqueeze(-1) >= self.steps
+        return mdp_state["episode_step"] >= self.steps
 
 
 @dataclass(frozen=True)

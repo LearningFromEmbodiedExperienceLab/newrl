@@ -7,12 +7,27 @@ import torch
 from tensordict import TensorDict
 
 from newrl.mdp.base import MDP, ObservationGroup, RewardGroup
-from newrl.mdp.episode_ends import HeightTermination, TiltTermination
+from newrl.mdp.episode_ends import HeightTermination, TiltTermination, Timeout
 from newrl.mdp.observations import BodyHeight, ProjectedGravity
 from newrl.mdp.rewards import JointAcc2, JointEnergy1, JointVel2, _JointTerm
 
 
 class MDPTests(unittest.TestCase):
+    def test_scalar_shapes_for_multidimensional_batches(self):
+        mdp = MDP(truncations={"timeout": Timeout(3)})
+        state = TensorDict(
+            {
+                "episode_step": torch.tensor([[[2], [3], [4]], [[1], [2], [3]]]),
+                "previous_action": torch.zeros(2, 3, 2),
+            },
+            batch_size=[2, 3],
+        )
+        physical = TensorDict({}, batch_size=[2, 3])
+        result = mdp.step(physical, state)
+        for key in ("reward", "terminated", "truncated", "done"):
+            self.assertEqual(result[key].shape, (2, 3, 1))
+        torch.testing.assert_close(result["truncated"], state["episode_step"] >= 3)
+
     def test_fall_and_observations_share_only_current_physical_features(self):
         scene = SimpleNamespace(
             entities={
@@ -112,7 +127,7 @@ class JointPenaltyTests(unittest.TestCase):
         mdp_state = TensorDict(
             {
                 "action": torch.tensor([[0.0, 2.0]]),
-                "episode_step": torch.tensor([2]),
+                "episode_step": torch.tensor([[2]]),
                 "previous_joint_vel": torch.tensor([[1.0, 0.0]]),
             },
             batch_size=[1],
@@ -130,7 +145,7 @@ class JointPenaltyTests(unittest.TestCase):
         torch.testing.assert_close(
             mdp_state["previous_joint_vel"], torch.tensor([[1.0, -2.0]])
         )
-        mdp_state["episode_step"] = torch.tensor([1])
+        mdp_state["episode_step"] = torch.tensor([[1]])
         opening = _bind_joints(JointAcc2(weight=1.0))(physical, mdp_state)
         torch.testing.assert_close(opening, torch.zeros(1, 1))
 

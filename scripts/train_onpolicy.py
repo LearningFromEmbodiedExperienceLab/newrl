@@ -9,6 +9,14 @@ from newrl.algos.rollout import collect_rollout
 from newrl.configs import AnymalLocomotion
 from newrl.env import StatefulEnvironment
 
+# The actor sees the policy groups. The critic sees those plus privileged state.
+_POLICY_GROUPS = ("command", "proprio")
+_CRITIC_GROUPS = ("command", "proprio", "privileged")
+
+
+def _group_width(mdp, groups: tuple[str, ...]) -> int:
+    return sum(mdp.observations[name].shape.numel() for name in groups)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -21,28 +29,36 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
-    if min(args.num_envs, args.iterations, args.update_every, args.epochs, args.minibatches) < 1:
+    if (
+        min(
+            args.num_envs,
+            args.iterations,
+            args.update_every,
+            args.epochs,
+            args.minibatches,
+        )
+        < 1
+    ):
         parser.error("training sizes must be positive")
 
     torch.manual_seed(args.seed)
     config = AnymalLocomotion(num_envs=args.num_envs, device=args.device)
     config.mdp.seed = args.seed
     env = StatefulEnvironment(config)
-    # TODO: statically obtain observation dimensions
-    probe = env.reset()
     policy = PPO(
         PPOConfig(
             update_every=args.update_every,
             num_epochs=args.epochs,
             num_minibatches=args.minibatches,
             lr=args.lr,
+            policy_obs_keys=_POLICY_GROUPS,
+            critic_obs_keys=_CRITIC_GROUPS,
         ),
-        policy_dim=probe["policy_observation"].shape[-1],
-        critic_dim=probe["critic_observation"].shape[-1],
+        policy_dim=_group_width(env.mdp, _POLICY_GROUPS),
+        critic_dim=_group_width(env.mdp, _CRITIC_GROUPS),
         action_dim=env.action_dim,
     ).to(env.device)
-    # TODO: carry should be a tensordict for flexibility
-    carry = (probe["policy_observation"], probe["critic_observation"])
+    carry = env.reset()
 
     for iteration in range(args.iterations):
         batch, carry = collect_rollout(env, policy, args.update_every, carry)

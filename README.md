@@ -13,4 +13,14 @@ force can exceed the configured effort limit. It excludes passive damping and
 constraint forces. MuJoCo and Steel have different dynamics and contact models;
 their trajectories and actuator forces need not match.
 
+Stateful `reset()` and `step()` return observations and a projected `mdp_state`
+containing `episode_step` (shape `[num_envs, 1]`) by default. Step also returns
+rewards and episode-end flags. The count belongs to the returned observation:
+it is zero after reset and advances even on a terminal step. Reset explicitly
+after consuming a terminal transition. Use `output_mdp_fields` and
+`output_physical_fields` in the environment configuration to include additional
+snapshots. The internal physical read plan also includes fields required by MDP
+terms. The stateless API additionally returns complete simulator and MDP
+checkpoints for replay or branching.
+
 See [environment benchmarks](benchmarks/README.md) for reproducible runs and reference results.

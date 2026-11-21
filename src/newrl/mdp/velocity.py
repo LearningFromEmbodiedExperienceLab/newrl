@@ -56,7 +56,7 @@ class VelocityMDP(MDP):
 
     def initial_state(self, num_envs, action_dim, device):
         mdp_state = super().initial_state(num_envs, action_dim, device)
-        worlds = torch.arange(num_envs, device=device, dtype=torch.long)
+        worlds = torch.arange(num_envs, device=device, dtype=torch.long).unsqueeze(-1)
         mdp_state["command_rng"] = (
             (self.seed % 2147483646) + worlds * 104729
         ) % 2147483646 + 1
@@ -122,9 +122,7 @@ class VelocityMDP(MDP):
         transition["velocity_command"] = mdp_state["velocity_command"]
         steps_left = (mdp_state["command_steps_left"] - 1).clamp_min(0)
         mdp_state["command_steps_left"] = steps_left
-        self._sample_command(
-            mdp_state, (steps_left == 0) & ~transition["done"].squeeze(-1)
-        )
+        self._sample_command(mdp_state, (steps_left == 0) & ~transition["done"])
 
     def _sample_command(self, mdp_state, selected):
         previous = mdp_state["velocity_command"]
@@ -133,7 +131,7 @@ class VelocityMDP(MDP):
         hi = previous.new_tensor((self.vx[1], self.vy[1], self.yaw_rate[1]))
         mdp_state["command_rng"] = torch.where(selected, rng, mdp_state["command_rng"])
         mdp_state["velocity_command"] = torch.where(
-            selected[:, None], lo + (hi - lo) * samples, previous
+            selected, lo + (hi - lo) * samples, previous
         )
         mdp_state["command_steps_left"] = torch.where(
             selected, self.hold_steps, mdp_state["command_steps_left"]
@@ -147,4 +145,4 @@ class VelocityMDP(MDP):
         for _ in range(count):
             rng = (rng * 48271) % 2147483647
             samples.append((rng >> 7).to(dtype) * (1.0 / (1 << 24)))
-        return torch.stack(samples, dim=-1), rng
+        return torch.cat(samples, dim=-1), rng

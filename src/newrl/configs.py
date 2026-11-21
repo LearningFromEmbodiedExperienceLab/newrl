@@ -50,6 +50,8 @@ class EnvironmentConfig:
     robots: dict[str, Callable[[], RobotConfig]] = field(default_factory=dict)
     mdp: MDP = field(default_factory=MDP)
     physical_fields: tuple[tuple[str, str], ...] = ()
+    output_physical_fields: tuple[tuple[str, str], ...] = ()
+    output_mdp_fields: tuple[str, ...] = ()
 
 
 def locomotion_mdp(mdp_type: type[MDP] = MDP) -> MDP:

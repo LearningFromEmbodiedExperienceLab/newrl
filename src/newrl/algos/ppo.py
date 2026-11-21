@@ -7,8 +7,8 @@ the environment; ``scripts/train_onpolicy.py`` owns collection.
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
 from tensordict import TensorDict
+from torch import nn
 
 from .common.batch import (
     ACTION,
@@ -60,7 +60,9 @@ class PPOConfig:
 
     def __post_init__(self):
         if self.update_every < 1 or self.num_epochs < 1 or self.num_minibatches < 1:
-            raise ValueError("update_every, num_epochs, and num_minibatches must be positive")
+            raise ValueError(
+                "update_every, num_epochs, and num_minibatches must be positive"
+            )
         if not 0.0 <= self.gamma < 1.0 or not 0.0 <= self.lam <= 1.0:
             raise ValueError("gamma must be in [0, 1) and lam in [0, 1]")
         if self.activation not in _ACTIVATIONS:
@@ -68,6 +70,14 @@ class PPOConfig:
                 f"Unknown activation {self.activation!r}; expected one of {tuple(_ACTIVATIONS)}"
             )
         clip_bounds(self.clip_eps)
+
+
+def stack_groups(observation: TensorDict, groups: tuple[str, ...]) -> torch.Tensor:
+    """Concatenate observation groups in the given order."""
+    missing = [name for name in groups if name not in observation]
+    if missing:
+        raise KeyError(f"Observation is missing groups {missing}")
+    return torch.cat([observation[name] for name in groups], dim=-1)
 
 
 def clip_bounds(clip_eps: float | tuple[float, float]) -> tuple[float, float]:
@@ -78,7 +88,9 @@ def clip_bounds(clip_eps: float | tuple[float, float]) -> tuple[float, float]:
             raise ValueError(f"clip_eps must be a scalar or a pair, got {clip_eps!r}")
         lower, upper = float(clip_eps[0]), float(clip_eps[1])
     if lower < 0.0 or upper < 0.0:
-        raise ValueError(f"clip_eps values must be non-negative, got {(lower, upper)!r}")
+        raise ValueError(
+            f"clip_eps values must be non-negative, got {(lower, upper)!r}"
+        )
     return lower, upper
 
 
@@ -121,36 +133,59 @@ class PPO(nn.Module):
         return self.policy_norm.sum.device
 
     @torch.no_grad()
-    def act(
-        self, policy_observation: torch.Tensor, *, deterministic: bool = False
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Sample an action, or return the mean when ``deterministic`` is set.
+    def act(self, tensordict: TensorDict, *, deterministic: bool = False) -> TensorDict:
+        """Read observation groups and write the action and the stored features.
 
         Observation statistics update here. ``train_op`` freezes them.
         """
-        observation = self.policy_norm(policy_observation.to(self.device))
-        distribution = self.actor.distribution(observation)
+        observation = tensordict["observation"]
+        policy_observation = stack_groups(observation, self.cfg.policy_obs_keys)
+        critic_observation = stack_groups(observation, self.cfg.critic_obs_keys)
+        normalized = self.policy_norm(policy_observation.to(self.device))
+        distribution = self.actor.distribution(normalized)
         action = distribution.mean if deterministic else distribution.sample()
-        log_prob = distribution.log_prob(action).sum(-1, keepdim=True)
-        return action, log_prob
+        tensordict[POLICY_OBSERVATION] = policy_observation
+        tensordict[CRITIC_OBSERVATION] = critic_observation
+        tensordict[ACTION] = action
+        tensordict[ACTION_LOG_PROB] = distribution.log_prob(action).sum(
+            -1, keepdim=True
+        )
+        return tensordict
+
+    @torch.no_grad()
+    def record(self, tensordict: TensorDict, transition: TensorDict) -> None:
+        """Write the successor critic features from the true next observation."""
+        tensordict[NEXT_CRITIC_OBSERVATION] = stack_groups(
+            transition["observation"], self.cfg.critic_obs_keys
+        ).detach()
 
     def train_op(self, batch: TensorDict) -> dict[str, float]:
         missing = [key for key in BATCH_KEYS if key not in batch]
         if missing:
             raise KeyError(f"On-policy batch is missing {missing}")
+        scalar_shape = (*batch.batch_size, 1)
+        for key in (REWARD, TERMINATED, DONE, ACTION_LOG_PROB):
+            if batch[key].shape != scalar_shape:
+                raise ValueError(
+                    f"Expected {key!r} shape {scalar_shape}, got {tuple(batch[key].shape)}"
+                )
         batch = batch.to(self.device)
         reward = self._scaled_reward(batch)
         self.critic_norm.update(
-            torch.cat([batch[CRITIC_OBSERVATION], batch[NEXT_CRITIC_OBSERVATION]], dim=1)
+            torch.cat(
+                [batch[CRITIC_OBSERVATION], batch[NEXT_CRITIC_OBSERVATION]], dim=1
+            )
         )
         with self.policy_norm.freeze(), self.critic_norm.freeze():
             with torch.no_grad():
                 value = self.critic(self.critic_norm(batch[CRITIC_OBSERVATION]))
-                next_value = self.critic(self.critic_norm(batch[NEXT_CRITIC_OBSERVATION]))
+                next_value = self.critic(
+                    self.critic_norm(batch[NEXT_CRITIC_OBSERVATION])
+                )
                 advantage, returns = generalized_advantage(
                     reward,
-                    _as_column(batch[TERMINATED]),
-                    _as_column(batch[DONE]),
+                    batch[TERMINATED],
+                    batch[DONE],
                     value,
                     next_value,
                     gamma=self.cfg.gamma,
@@ -164,7 +199,7 @@ class PPO(nn.Module):
                     POLICY_OBSERVATION: batch[POLICY_OBSERVATION],
                     CRITIC_OBSERVATION: batch[CRITIC_OBSERVATION],
                     ACTION: batch[ACTION],
-                    ACTION_LOG_PROB: _as_column(batch[ACTION_LOG_PROB]),
+                    ACTION_LOG_PROB: batch[ACTION_LOG_PROB],
                     "adv": normalized,
                     "ret": returns,
                 },
@@ -180,7 +215,11 @@ class PPO(nn.Module):
                     epoch_info.append(info)
                     kl_values.append(info["actor/approx_kl"])
                 if self.cfg.desired_kl is not None:
-                    _adapt_actor_lr(self.optimizer, sum(kl_values) / len(kl_values), self.cfg.desired_kl)
+                    _adapt_actor_lr(
+                        self.optimizer,
+                        sum(kl_values) / len(kl_values),
+                        self.cfg.desired_kl,
+                    )
                 last_epoch = epoch_info
 
         metrics = _average(last_epoch)
@@ -191,7 +230,7 @@ class PPO(nn.Module):
             new_log_prob = self.actor.log_prob(
                 self.policy_norm(batch[POLICY_OBSERVATION]), batch[ACTION]
             )
-            log_ratio = new_log_prob - _as_column(batch[ACTION_LOG_PROB])
+            log_ratio = new_log_prob - batch[ACTION_LOG_PROB]
             metrics["actor/policy_gain"] = float((log_ratio * advantage).mean())
             predicted = self.critic(self.critic_norm(batch[CRITIC_OBSERVATION]))
             return_variance = returns.var().clamp_min(1e-7)
@@ -207,11 +246,11 @@ class PPO(nn.Module):
         ``(1 - gamma)`` is applied after that, once per call. Calling this with
         return normalization enabled advances the return statistics.
         """
-        reward = _as_column(batch[REWARD])
+        reward = batch[REWARD]
         if self.cfg.clamp_reward:
             reward = reward.clamp_min(0.0)
         if self.cfg.normalize_reward:
-            self.return_norm.update(reward, _as_column(batch[DONE]).bool())
+            self.return_norm.update(reward, batch[DONE])
             reward = reward / self.return_norm.scale()
         return reward * (1.0 - self.cfg.gamma)
 
@@ -228,12 +267,20 @@ class PPO(nn.Module):
         entropy = distribution.entropy().sum(-1, keepdim=True).mean()
         value = self.critic(self.critic_norm(batch[CRITIC_OBSERVATION]))
         value_loss = (value - batch["ret"]).square().mean()
-        loss = policy_loss + self.cfg.value_coef * value_loss - self.cfg.entropy_coef * entropy
+        loss = (
+            policy_loss
+            + self.cfg.value_coef * value_loss
+            - self.cfg.entropy_coef * entropy
+        )
 
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        actor_grad = torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.max_grad_norm)
-        critic_grad = torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.cfg.max_grad_norm)
+        actor_grad = torch.nn.utils.clip_grad_norm_(
+            self.actor.parameters(), self.cfg.max_grad_norm
+        )
+        critic_grad = torch.nn.utils.clip_grad_norm_(
+            self.critic.parameters(), self.cfg.max_grad_norm
+        )
         self.optimizer.step()
 
         detached_ratio = ratio.detach()
@@ -242,20 +289,14 @@ class PPO(nn.Module):
             "actor/policy_loss": float(policy_loss.detach()),
             "actor/entropy": float(entropy.detach()),
             "actor/grad_norm": float(actor_grad),
-            "actor/approx_kl": float(((detached_ratio - 1.0) - detached_log_ratio).mean()),
+            "actor/approx_kl": float(
+                ((detached_ratio - 1.0) - detached_log_ratio).mean()
+            ),
             "actor/clamp_pos": float((detached_ratio > 1.0 + upper).float().mean()),
             "actor/clamp_neg": float((detached_ratio < 1.0 - lower).float().mean()),
             "critic/value_loss": float(value_loss.detach()),
             "critic/grad_norm": float(critic_grad),
         }
-
-
-def _as_column(values: torch.Tensor) -> torch.Tensor:
-    if values.ndim == 2:
-        return values.unsqueeze(-1)
-    if values.ndim == 3 and values.shape[-1] == 1:
-        return values
-    raise ValueError(f"Expected shape [N, T] or [N, T, 1], got {tuple(values.shape)}")
 
 
 def _minibatches(batch: TensorDict, num_minibatches: int):
@@ -265,12 +306,16 @@ def _minibatches(batch: TensorDict, num_minibatches: int):
         raise ValueError(
             f"Batch of {flat.shape[0]} transitions is smaller than num_minibatches={num_minibatches}"
         )
-    permutation = torch.randperm(usable, device=flat.device).reshape(num_minibatches, -1)
+    permutation = torch.randperm(usable, device=flat.device).reshape(
+        num_minibatches, -1
+    )
     for index in permutation:
         yield flat[index]
 
 
-def _adapt_actor_lr(optimizer: torch.optim.Optimizer, approx_kl: float, desired_kl: float) -> None:
+def _adapt_actor_lr(
+    optimizer: torch.optim.Optimizer, approx_kl: float, desired_kl: float
+) -> None:
     group = optimizer.param_groups[0]
     learning_rate = group["lr"]
     if approx_kl > desired_kl * 2.0:

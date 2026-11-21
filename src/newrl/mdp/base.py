@@ -167,7 +167,9 @@ class MDP:
     ) -> TensorDict:
         return TensorDict(
             {
-                "episode_step": torch.zeros(num_envs, dtype=torch.long, device=device),
+                "episode_step": torch.zeros(
+                    (num_envs, 1), dtype=torch.long, device=device
+                ),
                 "previous_action": torch.zeros((num_envs, action_dim), device=device),
             },
             batch_size=[num_envs],
