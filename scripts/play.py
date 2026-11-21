@@ -1,47 +1,35 @@
-"""Run an ANYmal rollout with zero position offsets and optional visualization."""
+"""Roll out a zero-action policy with optional visualization."""
 
-import argparse
+from dataclasses import dataclass
 
 import newton
 import torch
 
-from newrl.configs import AnymalLocomotion
 from newrl.env import StatefulEnvironment
 from newrl.mdp.episode_ends import Timeout
+from newrl.utils.config import main
+
+from newrl.configs import EnvironmentConfig  # noqa: E402
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--num-envs", type=int, default=4)
-    parser.add_argument("--steps", type=int, help="stop after this many steps")
-    parser.add_argument("--episode-steps", type=int, default=1000)
-    parser.add_argument(
-        "--solver-backend", choices=("mujoco", "steel"), default="mujoco"
-    )
-    parser.add_argument(
-        "--viewer",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="open a Newton GL viewer",
-    )
-    parser.add_argument(
-        "--graph", action="store_true", help="capture the physics loop in a CUDA graph"
-    )
-    args = parser.parse_args()
-    if min(args.num_envs, args.episode_steps) < 1 or (
-        args.steps is not None and args.steps < 1
-    ):
-        parser.error("--num-envs, --steps, and --episode-steps must be positive")
+@dataclass
+class PlayConfig:
+    task: EnvironmentConfig
+    episode_steps: int = 1000
+    steps: int | None = None
+    viewer: bool = True
 
-    viewer = newton.viewer.ViewerGL() if args.viewer else None
+    def __post_init__(self):
+        if self.episode_steps < 1 or (self.steps is not None and self.steps < 1):
+            raise ValueError("episode_steps and steps must be positive")
+
+
+@main(PlayConfig)
+def main(cfg: PlayConfig) -> None:
+    viewer = newton.viewer.ViewerGL() if cfg.viewer else None
     try:
-        config = AnymalLocomotion(
-            num_envs=args.num_envs,
-            graph_capture=args.graph,
-            solver_backend=args.solver_backend,
-        )
-        config.mdp.truncations["timeout"] = Timeout(args.episode_steps)
-        env = StatefulEnvironment(config)
+        cfg.task.mdp.truncations["timeout"] = Timeout(cfg.episode_steps)
+        env = StatefulEnvironment(cfg.task)
         actions = torch.zeros((env.num_envs, env.action_dim), device=env.device)
         if viewer is not None:
             viewer.set_model(env.model)
@@ -49,7 +37,7 @@ def main() -> None:
                 viewer.set_world_offsets((2.0, 2.0, 0.0))
         env.reset()
         steps = resets = 0
-        while (args.steps is None or steps < args.steps) and (
+        while (cfg.steps is None or steps < cfg.steps) and (
             viewer is None or viewer.is_running()
         ):
             if viewer is None or not viewer.is_paused():

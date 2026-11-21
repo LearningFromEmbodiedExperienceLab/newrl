@@ -71,7 +71,7 @@ stateless parity, checkpoint replay, selective resets, and mesh spawn replay.
 ```sh
 uv run python -m unittest discover -s tests -v
 uv run python -m unittest -v test_terrain_collision
-uv run python scripts/play.py --no-viewer --steps 5 --episode-steps 2
+uv run python scripts/play.py task=anymal_loco_flat viewer=false steps=5 episode_steps=2 task.num_envs=4
 ```
 
 See the [benchmark guide](benchmarks/README.md) for throughput and stage

@@ -24,6 +24,7 @@ from .common.batch import (
 from .common.modules import NormalActor, Value
 from .common.normalization import EmpiricalNormalization, ReturnNormalization
 from .common.policy_evaluation import generalized_advantage
+from newrl.utils.config import cs  # noqa: E402
 
 _ACTIVATIONS = {
     "mish": nn.Mish,
@@ -93,6 +94,8 @@ def clip_bounds(clip_eps: float | tuple[float, float]) -> tuple[float, float]:
         )
     return lower, upper
 
+
+cs.store("ppo", PPOConfig(), group="algo")
 
 class PPO(nn.Module):
     def __init__(

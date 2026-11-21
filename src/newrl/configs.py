@@ -132,3 +132,8 @@ def SpotLocomotion(**overrides) -> EnvironmentConfig:
 def AS2Locomotion(**overrides) -> EnvironmentConfig:
     defaults = {"robots": {"robot": assetx_as2}, "mdp": locomotion_mdp()}
     return EnvironmentConfig(**(defaults | overrides))
+
+
+from newrl.utils.config import cs  # noqa: E402
+
+cs.store("anymal_loco_flat", AnymalLocomotion(num_envs=64), group="task")

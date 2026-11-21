@@ -1,6 +1,6 @@
 The environment defaults to Newton's MuJoCo Warp solver. Set
 `AnymalLocomotion(solver_backend="steel")` to use Newton's Steel solver, or
-run `uv run python scripts/play.py --solver-backend steel`. Steel uses augmented
+run `uv run python scripts/play.py task=anymal_loco_flat task.solver_backend=steel`. Steel uses augmented
 position drives, point friction and an updated mass matrix each physics step.
 Its iteration count and per-articulation constraint capacity are configurable
 with `steel_iterations` and `steel_articulation_constraint_max`. Newton warns
