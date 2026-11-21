@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 import newton
 
-from .mdp.base import MDP
+from .mdp.base import MDP, ObservationGroup, RewardGroup
 from .mdp.episode_ends import Fall, Timeout
 from .mdp.observations import (
     BodyAngularVelocity,
@@ -16,7 +16,7 @@ from .mdp.observations import (
     previous_action,
     velocity_command,
 )
-from .mdp.rewards import ActionRate, TrackVelocity
+from .mdp.rewards import ActionRate, JointAcc2, JointEnergy1, JointVel2, TrackVelocity
 from .mdp.velocity import VelocityMDP
 from .robots import RobotConfig, assetx_as2, assetx_spot, newton_anymal_c
 from .terrain import PlaneTerrainConfig, TerrainConfig
@@ -46,85 +46,72 @@ class EnvironmentConfig:
     )
     robots: dict[str, Callable[[], RobotConfig]] = field(default_factory=dict)
     mdp: MDP = field(default_factory=MDP)
-    policy_observation_keys: tuple[str, ...] = ()
-    critic_observation_keys: tuple[str, ...] = ()
 
 
 def locomotion_mdp(mdp_type: type[MDP] = MDP) -> MDP:
     return mdp_type(
         observations={
-            "root_lin_vel_b": BodyLinearVelocity("robot", "base", frame="body"),
-            "root_ang_vel_b": BodyAngularVelocity("robot", "base", frame="body"),
-            "projected_gravity": ProjectedGravity("robot", "base"),
-            "root_height": BodyHeight("robot", "base"),
-            "joint_pos": EntityField("robot", "joint_pos"),
-            "joint_vel": EntityField("robot", "joint_vel"),
-            "previous_action": previous_action,
+            "proprio": ObservationGroup({
+                "joint_pos": EntityField("robot", "joint_pos"),
+                "joint_vel": EntityField("robot", "joint_vel"),
+                "projected_gravity": ProjectedGravity("robot", "base"),
+                "previous_action": previous_action,
+                "root_ang_vel_b": BodyAngularVelocity("robot", "base", frame="body"),
+            }),
+            "privileged": ObservationGroup({
+                "root_lin_vel_b": BodyLinearVelocity("robot", "base", frame="body"),
+                "root_height": BodyHeight("robot", "base"),
+            }),
         },
         truncations={"timeout": Timeout(1000)},
     )
 
 
-_LOCOMOTION_OBSERVATIONS = (
-    "root_lin_vel_b",
-    "root_ang_vel_b",
-    "projected_gravity",
-    "root_height",
-    "joint_pos",
-    "joint_vel",
-    "previous_action",
-)
-
-
 def AnymalLocomotion(**overrides) -> EnvironmentConfig:
     mdp = locomotion_mdp(VelocityMDP)
-    mdp.observations["velocity_command"] = velocity_command
-    mdp.observations["feet_lin_vel_w"] = BodyLinearVelocity(
-        "robot", r"(LF|LH|RF|RH)_FOOT"
+    mdp.observations["command"] = ObservationGroup(
+        {"velocity_command": velocity_command}
+    )
+    mdp.observations["privileged"] = ObservationGroup(
+        {
+            **mdp.observations["privileged"].terms,
+            "feet_lin_vel_w": BodyLinearVelocity("robot", r"(LF|LH|RF|RH)_FOOT"),
+        }
     )
     mdp.rewards = {
-        "track_xy_velocity": TrackVelocity(
-            BodyLinearVelocity("robot", "base", frame="yaw"),
-            slice(0, 2),
-            weight=1.0,
-            sigma=0.5,
-        ),
-        "track_yaw_rate": TrackVelocity(
-            BodyAngularVelocity("robot", "base", frame="yaw"),
-            slice(2, 3),
-            weight=0.5,
-            sigma=0.5,
-        ),
-        "action_rate": ActionRate(weight=0.01),
+        "tracking": RewardGroup({
+            "track_xy_velocity": TrackVelocity(
+                BodyLinearVelocity("robot", "base", frame="yaw"),
+                slice(0, 2),
+                weight=1.0,
+                sigma=0.5,
+            ),
+            "track_yaw_rate": TrackVelocity(
+                BodyAngularVelocity("robot", "base", frame="yaw"),
+                slice(2, 3),
+                weight=0.5,
+                sigma=0.5,
+            ),
+        }),
+        "regularization": RewardGroup({
+            "action_rate": ActionRate(weight=0.01),
+            "joint_energy1": JointEnergy1(weight=0.01),
+            "joint_acc2": JointAcc2(weight=0.00001),
+            "joint_vel2": JointVel2(weight=0.01),
+        })
     }
     mdp.terminations = {
         "fall": Fall(BodyHeight("robot", "base"), ProjectedGravity("robot", "base"))
     }
-    observation_keys = (*_LOCOMOTION_OBSERVATIONS, "feet_lin_vel_w", "velocity_command")
-    defaults = {
-        "robots": {"robot": newton_anymal_c},
-        "mdp": mdp,
-        "policy_observation_keys": observation_keys,
-        "critic_observation_keys": observation_keys,
-    }
+    defaults = {"robots": {"robot": newton_anymal_c}, "mdp": mdp}
     return EnvironmentConfig(**(defaults | overrides))
 
 
 def SpotLocomotion(**overrides) -> EnvironmentConfig:
-    defaults = {
-        "robots": {"robot": assetx_spot},
-        "mdp": locomotion_mdp(),
-        "policy_observation_keys": _LOCOMOTION_OBSERVATIONS,
-        "critic_observation_keys": _LOCOMOTION_OBSERVATIONS,
-    }
+    defaults = {"robots": {"robot": assetx_spot}, "mdp": locomotion_mdp()}
     return EnvironmentConfig(**(defaults | overrides))
 
 
 def AS2Locomotion(**overrides) -> EnvironmentConfig:
-    defaults = {
-        "robots": {"robot": assetx_as2},
-        "mdp": locomotion_mdp(),
-        "policy_observation_keys": _LOCOMOTION_OBSERVATIONS,
-        "critic_observation_keys": _LOCOMOTION_OBSERVATIONS,
-    }
+    defaults = {"robots": {"robot": assetx_as2}, "mdp": locomotion_mdp()}
     return EnvironmentConfig(**(defaults | overrides))

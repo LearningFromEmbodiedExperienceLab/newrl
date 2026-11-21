@@ -35,7 +35,7 @@ class EnvironmentTests(unittest.TestCase):
         sim_state, mdp_state, transition = env.step(
             sim_state, mdp_state, TensorDict({"action": action}, batch_size=[4])
         )
-        self.assertTrue(torch.isfinite(transition["policy_observation"]).all())
+        self.assertTrue(torch.isfinite(transition["observation", "proprio"]).all())
         reset_sim, reset_mdp, _ = env.reset(
             sim_state, mdp_state, env_ids=torch.tensor([0, 2])
         )
@@ -78,9 +78,9 @@ class EnvironmentTests(unittest.TestCase):
 
         sim, mdp, expected = stateless.reset()
         compare(sim, mdp, stateful.reset(), expected)
-        for name, term in stateful.mdp.observations.items():
-            self.assertIsInstance(term.shape, torch.Size)
-            self.assertEqual(expected["observation", name].shape[1:], term.shape)
+        for name, group in stateful.mdp.observations.items():
+            self.assertIsInstance(group.shape, torch.Size)
+            self.assertEqual(expected["observation", name].shape[1:], group.shape)
         phase = torch.arange(3 * stateful.action_dim, device=stateful.device).reshape(
             3, stateful.action_dim
         )
@@ -93,8 +93,9 @@ class EnvironmentTests(unittest.TestCase):
             compare(sim, mdp, actual, expected)
             for key in ("reward", "terminated", "truncated", "done"):
                 self.assertEqual(actual[key].shape, torch.Size([3, 1]))
-            for reward in actual["reward_terms"].values():
-                self.assertEqual(reward.shape, torch.Size([3, 1]))
+            for group in actual["reward_terms"].values():
+                for reward in group.values():
+                    self.assertEqual(reward.shape, torch.Size([3, 1]))
             if step in (17, 27):
                 self.assertEqual(
                     actual["truncated"].squeeze(-1).tolist(),
@@ -137,7 +138,8 @@ class EnvironmentTests(unittest.TestCase):
             torch.equal(next_mdp["velocity_command"], mdp["velocity_command"])
         )
         torch.testing.assert_close(
-            expected["observation", "velocity_command"], next_mdp["velocity_command"]
+            expected["observation", "command"],
+            next_mdp["velocity_command"],
         )
         other = TensorDict({"action": -action}, batch_size=[2])
         env.step(next_sim, next_mdp, other)

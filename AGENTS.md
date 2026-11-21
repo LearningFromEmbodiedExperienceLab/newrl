@@ -52,8 +52,8 @@ a partial reset.
   `step_features` keyword. Observation `shape` excludes the world dimension
   and is available after scene binding for scene-dependent terms. Rewards
   and episode-end flags have shape `[num_envs, 1]`, with boolean flags.
-  The environment flattens and concatenates observations in the configured
-  policy and critic key order.
+  An observation group concatenates its terms into one vector. A reward group
+  keeps each named term under `reward_terms`, and `reward` is their sum.
 - The RL environment uses Newton's `CollisionPipeline`. The custom terrain
   collider is exercised by [benchmark_mesh_collision.py](benchmark_mesh_collision.py).
   Solver and timing defaults are configured in `EnvironmentConfig`.

@@ -7,7 +7,8 @@ from unittest.mock import patch
 import torch
 from tensordict import TensorDict
 
-from newrl.mdp.base import MDP
+from newrl.mdp.base import MDP, ObservationGroup, RewardGroup
+from newrl.mdp.rewards import JointAcc2, JointEnergy1, JointVel2, _JointTerm
 from newrl.mdp.episode_ends import Fall
 from newrl.mdp.observations import BodyHeight, ProjectedGravity
 
@@ -24,8 +25,12 @@ class StepFeatureTests(unittest.TestCase):
         )
         mdp = MDP(
             observations={
-                "height": BodyHeight("robot", "base"),
-                "gravity": ProjectedGravity("robot", "base"),
+                "state": ObservationGroup(
+                    {
+                        "height": BodyHeight("robot", "base"),
+                        "gravity": ProjectedGravity("robot", "base"),
+                    }
+                )
             },
             terminations={
                 "fall": Fall(
@@ -58,7 +63,7 @@ class StepFeatureTests(unittest.TestCase):
             _, second = mdp.advance(physical_state, next_mdp_state, action)
             self.assertTrue(second["terminated"].item())
             torch.testing.assert_close(
-                second["observation", "height"], torch.tensor([[0.2]])
+                second["observation", "state"][:, :1], torch.tensor([[0.2]])
             )
             self.assertEqual(height.call_count, 2)
             self.assertEqual(gravity.call_count, 2)
@@ -68,3 +73,83 @@ class StepFeatureTests(unittest.TestCase):
             self.assertTrue(third["terminated"].item())
             self.assertEqual(height.call_count, 3)
             self.assertEqual(gravity.call_count, 3)
+
+    def test_reward_groups_keep_terms_and_sum_them(self):
+        def reward(value):
+            def term(physical_state, mdp_state, *, step_features=None):
+                return torch.full((*mdp_state.batch_size, 1), value)
+
+            return term
+
+        mdp = MDP(
+            rewards={
+                "task": RewardGroup({"forward": reward(1.0), "yaw": reward(0.5)}),
+                "regularization": RewardGroup({"action_rate": reward(-0.25)}),
+            }
+        )._initialize(SimpleNamespace())
+        mdp_state = mdp.initial_state(2, 1, torch.device("cpu"))
+        physical_state = TensorDict({}, batch_size=[2])
+        _, transition = mdp.advance(physical_state, mdp_state, torch.zeros(2, 1))
+        torch.testing.assert_close(transition["reward"], torch.full((2, 1), 1.25))
+        torch.testing.assert_close(
+            transition["reward_terms", "task", "yaw"], torch.full((2, 1), 0.5)
+        )
+        with self.assertRaises(ValueError):
+            ObservationGroup({})
+
+
+def _bind_joints(term, names=("LF_HAA", "LF_KFE")):
+    entity = SimpleNamespace(
+        joint_names=tuple(f"robot/{name}" for name in names),
+        qd=torch.zeros(1, len(names), dtype=torch.long),
+    )
+    scene = SimpleNamespace(entities={"robot": entity})
+    # Resolve indices without the actuator-gain tensors owned by JointEnergy1.
+    return _JointTerm._initialize(term, scene)
+
+
+class JointPenaltyTests(unittest.TestCase):
+    def test_velocity_acceleration_and_actuator_power(self):
+        physical = TensorDict(
+            {
+                "robot": {
+                    "joint_pos": torch.zeros(1, 2),
+                    "joint_vel": torch.tensor([[1.0, -2.0]]),
+                }
+            },
+            batch_size=[1],
+        )
+        mdp_state = TensorDict(
+            {
+                "action": torch.tensor([[0.0, 2.0]]),
+                "episode_step": torch.tensor([2]),
+                "previous_joint_vel": torch.tensor([[1.0, 0.0]]),
+            },
+            batch_size=[1],
+        )
+        velocity_penalty = _bind_joints(JointVel2(weight=0.5))(physical, mdp_state)
+        torch.testing.assert_close(velocity_penalty, torch.tensor([[-2.5]]))
+        hip_only = _bind_joints(JointVel2(weight=0.5, joint_names=".*HAA"))(
+            physical, mdp_state
+        )
+        torch.testing.assert_close(hip_only, torch.tensor([[-0.5]]))
+
+        acceleration_penalty = _bind_joints(JointAcc2(weight=1.0))(physical, mdp_state)
+        # Squared change is 0 and 4. The carried velocity becomes the current one.
+        torch.testing.assert_close(acceleration_penalty, torch.tensor([[-4.0]]))
+        torch.testing.assert_close(
+            mdp_state["previous_joint_vel"], torch.tensor([[1.0, -2.0]])
+        )
+        mdp_state["episode_step"] = torch.tensor([1])
+        opening = _bind_joints(JointAcc2(weight=1.0))(physical, mdp_state)
+        torch.testing.assert_close(opening, torch.zeros(1, 1))
+
+        energy = _bind_joints(JointEnergy1(weight=1.0))
+        object.__setattr__(energy, "_stiffness", torch.tensor([[10.0, 10.0]]))
+        object.__setattr__(energy, "_damping", torch.tensor([[1.0, 1.0]]))
+        object.__setattr__(energy, "_default", torch.zeros(1, 2))
+        object.__setattr__(energy, "_scale", 0.5)
+        # target = [0, 1], torque = 10 * target - velocity = [ -1, 12 ]
+        # |torque * velocity| sums to 1 + 24.
+        power = energy(physical, mdp_state)
+        torch.testing.assert_close(power, torch.tensor([[-25.0]]))

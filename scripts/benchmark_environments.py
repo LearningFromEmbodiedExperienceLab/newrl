@@ -58,7 +58,7 @@ def main():
     parser.add_argument(
         "--reset-every",
         type=int,
-        default=20,
+        default=100,
         help="reset alternating halves every N steps, or use 0 for step-only timing",
     )
     parser.add_argument("--graph", choices=("both", "on", "off"), default="both")

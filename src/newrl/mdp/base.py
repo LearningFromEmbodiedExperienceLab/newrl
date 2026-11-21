@@ -6,31 +6,142 @@ import torch
 from tensordict import TensorDict
 
 from .terms import EpisodeEndTerm, ObservationTerm, RewardTerm, StepFeatures
+from functools import cached_property
+
+def _bind(term, scene):
+    initialize = getattr(term, "_initialize", None)
+    return term if initialize is None else initialize(scene)
+
+
+def _require_groups(groups: dict, kind: str, group_type: type) -> None:
+    for name, group in groups.items():
+        if not isinstance(group, group_type):
+            raise TypeError(
+                f"{kind} group {name!r} must be a {group_type.__name__}, got {type(group).__name__}"
+            )
+
+
+@dataclass(frozen=True)
+class ObservationGroup:
+    """Concatenate named observation terms in definition order.
+
+    ``shape`` is the flattened per-world width. ``__call__`` returns
+    ``[num_envs, *shape]``.
+    """
+
+    terms: dict[str, ObservationTerm]
+
+    def __post_init__(self):
+        if not self.terms:
+            raise ValueError("An observation group must contain at least one term")
+        object.__setattr__(self, "terms", dict(self.terms))
+
+    def _initialize(self, scene) -> "ObservationGroup":
+        return replace(self, terms={name: _bind(term, scene) for name, term in self.terms.items()})
+
+    @cached_property
+    def shape(self) -> torch.Size:
+        return torch.Size((sum(term.shape.numel() for term in self.terms.values()),))
+
+    @cached_property
+    def keys(self) -> tuple[str, ...]:
+        return tuple(self.terms.keys())
+
+    def __call__(
+        self,
+        physical_state: TensorDict,
+        mdp_state: TensorDict,
+        /,
+        *,
+        step_features: StepFeatures | None = None,
+    ) -> torch.Tensor:
+        parts = []
+        for name, term in self.terms.items():
+            value = term(physical_state, mdp_state, step_features=step_features)
+            flat = value.reshape(*mdp_state.batch_size, -1)
+            if flat.shape[-1] != term.shape.numel():
+                raise ValueError(
+                    f"Observation term {name!r} has shape {tuple(value.shape)} "
+                    f"but declares {tuple(term.shape)}"
+                )
+            parts.append(flat)
+        return torch.cat(parts, dim=-1)
+
+
+@dataclass(frozen=True)
+class RewardGroup:
+    """Named reward terms. The group total is their sum."""
+
+    terms: dict[str, RewardTerm]
+
+    def __post_init__(self):
+        if not self.terms:
+            raise ValueError("A reward group must contain at least one term")
+        object.__setattr__(self, "terms", dict(self.terms))
+
+    def _initialize(self, scene) -> "RewardGroup":
+        return replace(self, terms={name: _bind(term, scene) for name, term in self.terms.items()})
+
+    @cached_property
+    def keys(self) -> tuple[str, ...]:
+        return tuple(self.terms.keys())
+
+    def contributions(
+        self,
+        physical_state: TensorDict,
+        mdp_state: TensorDict,
+        /,
+        *,
+        step_features: StepFeatures | None = None,
+    ) -> dict[str, torch.Tensor]:
+        return {
+            name: term(physical_state, mdp_state, step_features=step_features)
+            for name, term in self.terms.items()
+        }
+
+    def __call__(
+        self,
+        physical_state: TensorDict,
+        mdp_state: TensorDict,
+        /,
+        *,
+        step_features: StepFeatures | None = None,
+    ) -> torch.Tensor:
+        values = list(
+            self.contributions(
+                physical_state, mdp_state, step_features=step_features
+            ).values()
+        )
+        total = values[0]
+        for value in values[1:]:
+            total = total + value
+        return total
 
 
 @dataclass
 class MDP:
-    observations: dict[str, ObservationTerm] = field(default_factory=dict)
-    rewards: dict[str, RewardTerm] = field(default_factory=dict)
+    """Task terms. Observations and rewards are groups; episode ends are flat.
+
+    An observation group evaluates to one concatenated vector at
+    ``observation[group]``. Reward terms stay named under
+    ``reward_terms[group][term]``, and ``reward`` is the sum of every term.
+    """
+
+    observations: dict[str, ObservationGroup] = field(default_factory=dict)
+    rewards: dict[str, RewardGroup] = field(default_factory=dict)
     terminations: dict[str, EpisodeEndTerm] = field(default_factory=dict)
     truncations: dict[str, EpisodeEndTerm] = field(default_factory=dict)
 
     def _initialize(self, scene):
         """Bind terms that supply a scene initialization hook."""
-
-        def bind(terms):
-            bound = {}
-            for name, term in terms.items():
-                initialize = getattr(term, "_initialize", None)
-                bound[name] = term if initialize is None else initialize(scene)
-            return bound
-
+        _require_groups(self.observations, "observation", ObservationGroup)
+        _require_groups(self.rewards, "reward", RewardGroup)
         return replace(
             self,
-            observations=bind(self.observations),
-            rewards=bind(self.rewards),
-            terminations=bind(self.terminations),
-            truncations=bind(self.truncations),
+            observations={name: _bind(group, scene) for name, group in self.observations.items()},
+            rewards={name: _bind(group, scene) for name, group in self.rewards.items()},
+            terminations={name: _bind(term, scene) for name, term in self.terminations.items()},
+            truncations={name: _bind(term, scene) for name, term in self.truncations.items()},
         )
 
     def initial_state(
@@ -80,8 +191,14 @@ class MDP:
         *,
         _features: StepFeatures | None = None,
     ) -> TensorDict:
-        return self._evaluate(
-            self.observations, _features or StepFeatures(physical_state), mdp_state
+        features = _features or StepFeatures(physical_state)
+        return TensorDict(
+            {
+                name: group(physical_state, mdp_state, step_features=features)
+                for name, group in self.observations.items()
+            },
+            batch_size=mdp_state.batch_size,
+            device=mdp_state.device,
         )
 
     def step(
@@ -92,12 +209,19 @@ class MDP:
         _features: StepFeatures | None = None,
     ) -> TensorDict:
         step_features = _features or StepFeatures(physical_state)
-        rewards = self._evaluate(self.rewards, step_features, mdp_state)
         column_shape = (*mdp_state.batch_size, 1)
-        self._check_column_shape(rewards, column_shape)
-        reward = sum(
-            rewards.values(), mdp_state["previous_action"].new_zeros(column_shape)
-        )
+        reward = mdp_state["previous_action"].new_zeros(column_shape)
+        reward_terms = {}
+        for name, group in self.rewards.items():
+            values = group.contributions(
+                physical_state, mdp_state, step_features=step_features
+            )
+            self._check_column_shape(values, column_shape)
+            for value in values.values():
+                reward = reward + value
+            reward_terms[name] = TensorDict(
+                values, batch_size=mdp_state.batch_size, device=mdp_state.device
+            )
         terminated = self._any(
             self._evaluate(self.terminations, step_features, mdp_state), mdp_state
         )
@@ -106,7 +230,11 @@ class MDP:
         )
         return TensorDict(
             {
-                "reward_terms": rewards,
+                "reward_terms": TensorDict(
+                    reward_terms,
+                    batch_size=mdp_state.batch_size,
+                    device=mdp_state.device,
+                ),
                 "reward": reward,
                 "terminated": terminated,
                 "truncated": truncated,

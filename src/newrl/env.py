@@ -110,15 +110,6 @@ class _EnvironmentCore:
 
     def _transition(self, physical_state, result):
         result["physical_state"] = physical_state
-        obs = result["observation"]
-        for group, keys in (
-            ("policy_observation", self.config.policy_observation_keys),
-            ("critic_observation", self.config.critic_observation_keys),
-        ):
-            if keys:
-                result[group] = torch.cat(
-                    [obs[key].reshape(self.num_envs, -1) for key in keys], dim=-1
-                )
         return result
 
     def _reset(self, env_ids, mdp_state):
