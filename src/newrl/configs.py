@@ -55,24 +55,24 @@ class EnvironmentConfig:
     contact_sensors: dict[str, TerrainContactConfig] = field(default_factory=dict)
 
 
-def locomotion_mdp(mdp_type: type[MDP] = MDP) -> MDP:
+def locomotion_mdp(mdp_type: type[MDP] = MDP, base: str = "base") -> MDP:
     return mdp_type(
         observations={
             "proprio": ObservationGroup(
                 {
                     "joint_pos": EntityField("robot", "joint_pos"),
                     "joint_vel": EntityField("robot", "joint_vel"),
-                    "projected_gravity": ProjectedGravity("robot", "base"),
+                    "projected_gravity": ProjectedGravity("robot", base),
                     "previous_action": previous_action,
                     "root_ang_vel_b": BodyAngularVelocity(
-                        "robot", "base", frame="body"
+                        "robot", base, frame="body"
                     ),
                 }
             ),
             "privileged": ObservationGroup(
                 {
-                    "root_lin_vel_b": BodyLinearVelocity("robot", "base", frame="body"),
-                    "root_height": BodyHeight("robot", "base"),
+                    "root_lin_vel_b": BodyLinearVelocity("robot", base, frame="body"),
+                    "root_height": BodyHeight("robot", base),
                 }
             ),
         },
@@ -83,10 +83,61 @@ def locomotion_mdp(mdp_type: type[MDP] = MDP) -> MDP:
 def AnymalLocomotion(
     *,
     contact_observation: bool = False,
+    foot_slip_weight: float = 0.1,
     **overrides,
 ) -> EnvironmentConfig:
-    feet = r"(LF|LH|RF|RH)_FOOT"
-    mdp = locomotion_mdp(VelocityMDP)
+    return _quadruped_locomotion(
+        newton_anymal_c,
+        base="base",
+        feet=r"(LF|LH|RF|RH)_FOOT",
+        contact_observation=contact_observation,
+        foot_slip_weight=foot_slip_weight,
+        **overrides,
+    )
+
+
+def SpotLocomotion(
+    *,
+    contact_observation: bool = False,
+    foot_slip_weight: float = 0.1,
+    **overrides,
+) -> EnvironmentConfig:
+    return _quadruped_locomotion(
+        assetx_spot,
+        base="base_link",
+        feet=".*_foot",
+        contact_observation=contact_observation,
+        foot_slip_weight=foot_slip_weight,
+        **overrides,
+    )
+
+
+def AS2Locomotion(
+    *,
+    contact_observation: bool = False,
+    foot_slip_weight: float = 0.1,
+    **overrides,
+) -> EnvironmentConfig:
+    return _quadruped_locomotion(
+        assetx_as2,
+        base="base_link",
+        feet=".*_foot",
+        contact_observation=contact_observation,
+        foot_slip_weight=foot_slip_weight,
+        **overrides,
+    )
+
+
+def _quadruped_locomotion(
+    robot: Callable[[], RobotConfig],
+    *,
+    base: str,
+    feet: str,
+    contact_observation: bool,
+    foot_slip_weight: float,
+    **overrides,
+) -> EnvironmentConfig:
+    mdp = locomotion_mdp(VelocityMDP, base)
     mdp.observations["command"] = ObservationGroup(
         {"velocity_command": velocity_command}
     )
@@ -105,13 +156,13 @@ def AnymalLocomotion(
         "tracking": RewardGroup(
             {
                 "track_xy_velocity": TrackVelocity(
-                    BodyLinearVelocity("robot", "base", frame="yaw"),
+                    BodyLinearVelocity("robot", base, frame="yaw"),
                     slice(0, 2),
                     weight=1.0,
                     sigma=0.5,
                 ),
                 "track_yaw_rate": TrackVelocity(
-                    BodyAngularVelocity("robot", "base", frame="yaw"),
+                    BodyAngularVelocity("robot", base, frame="yaw"),
                     slice(2, 3),
                     weight=0.5,
                     sigma=0.5,
@@ -125,42 +176,25 @@ def AnymalLocomotion(
                 "joint_acc2": JointAcc2(weight=0.00001),
                 "joint_vel2": JointVel2(weight=0.01),
                 "feet_air_time": FeetAirTime(sensor="feet_ground", weight=1.0),
-                "foot_slip": FootSlip(sensor="feet_ground", weight=0.1),
+                "foot_slip": FootSlip(sensor="feet_ground", weight=foot_slip_weight),
             }
         ),
     }
     mdp.terminations = {
-        "height": HeightTermination(BodyHeight("robot", "base")),
-        "tilt": TiltTermination(ProjectedGravity("robot", "base")),
+        "tilt": TiltTermination(ProjectedGravity("robot", base)),
     }
     defaults = {
-        "robots": {"robot": newton_anymal_c},
+        "robots": {"robot": robot},
         "mdp": mdp,
         "contact_sensors": {
-            "feet_ground": TerrainContactConfig(
-                "robot", feet, track_air_time=True
-            )
+            "feet_ground": TerrainContactConfig("robot", feet, track_air_time=True)
         },
     }
-    return EnvironmentConfig(**(defaults | overrides))
-
-
-def SpotLocomotion(**overrides) -> EnvironmentConfig:
-    defaults = {"robots": {"robot": assetx_spot}, "mdp": locomotion_mdp()}
-    return EnvironmentConfig(**(defaults | overrides))
-
-
-def AS2Locomotion(**overrides) -> EnvironmentConfig:
-    defaults = {"robots": {"robot": assetx_as2}, "mdp": locomotion_mdp()}
     return EnvironmentConfig(**(defaults | overrides))
 
 
 from newrl.utils.config import cs
 
 cs.store("anymal_loco_flat", AnymalLocomotion(num_envs=64), group="task")
-
-cs.store(
-    "anymal_loco_flat_contact",
-    AnymalLocomotion(num_envs=64, contact_observation=True, foot_slip_weight=0.1),
-    group="task",
-)
+cs.store("spot_loco_flat", SpotLocomotion(num_envs=64), group="task")
+cs.store("as2_loco_flat", AS2Locomotion(num_envs=64), group="task")

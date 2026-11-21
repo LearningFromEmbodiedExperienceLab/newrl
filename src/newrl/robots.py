@@ -1,5 +1,7 @@
 """Newton robot asset factories and position actuator configuration."""
 
+import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -7,16 +9,37 @@ import newton
 import warp as wp
 import yaml
 
+from .utils.string import resolve_scene_names
+
+ValueSpec = float | dict[str, float]
+
+
+@dataclass(frozen=True)
+class ActuatorGroup:
+    """Gains for the joints selected by ``joint_names``.
+
+    Patterns full-match a joint label or its final path component.
+    """
+
+    joint_names: tuple[str, ...]
+    stiffness: float
+    damping: float
+    armature: float
+    effort_limit: float | None = None
+    velocity_limit: float | None = None
+    friction: float | None = None
+
 
 @dataclass(frozen=True)
 class RobotConfig:
     asset: Path
     position: tuple[float, float, float]
-    joint_position: tuple[float, ...]
-    stiffness: tuple[float, ...]
-    damping: tuple[float, ...]
-    armature: tuple[float, ...]
-    action_scale: float
+    joint_position: tuple[float, ...] | dict[str, float]
+    action_scale: ValueSpec
+    stiffness: tuple[float, ...] | dict[str, float] | None = None
+    damping: tuple[float, ...] | dict[str, float] | None = None
+    armature: tuple[float, ...] | dict[str, float] | None = None
+    actuators: tuple[ActuatorGroup, ...] = ()
     default_armature: float = 0.1
     joint_limit_stiffness: float = 1.0e3
     joint_limit_damping: float = 1.0e1
@@ -24,6 +47,16 @@ class RobotConfig:
     contact_damping: float = 5.0e2
     contact_friction_stiffness: float = 1.0e3
     contact_friction: float = 0.75
+
+    def __post_init__(self):
+        if self.actuators and any(
+            value is not None for value in (self.stiffness, self.damping, self.armature)
+        ):
+            raise ValueError("Pass either actuators or per-joint gain sequences, not both")
+        if not self.actuators and any(
+            value is None for value in (self.stiffness, self.damping, self.armature)
+        ):
+            raise ValueError("Actuator gains require actuators or explicit sequences")
 
     def build(self) -> newton.ModelBuilder:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -37,6 +70,10 @@ class RobotConfig:
         builder.default_shape_cfg.kd = self.contact_damping
         builder.default_shape_cfg.kf = self.contact_friction_stiffness
         builder.default_shape_cfg.mu = self.contact_friction
+        if not self.asset.is_file():
+            raise FileNotFoundError(
+                f"Missing robot asset {self.asset}. Set ROBOT_MODEL_DIR or cook the bundle."
+            )
         builder.add_usd(
             str(self.asset),
             xform=wp.transform(wp.vec3(*self.position), wp.quat_identity()),
@@ -45,20 +82,87 @@ class RobotConfig:
             enable_self_collisions=False,
         )
         joints = scalar_joints(builder)
-        params = (self.joint_position, self.stiffness, self.damping, self.armature)
-        if any(len(values) != len(joints) for values in params):
-            raise ValueError(
-                f"Expected {len(joints)} position actuator settings for {self.asset}"
-            )
-        for joint, pos, ke, kd, armature in zip(joints, *params, strict=True):
+        labels = [builder.joint_label[joint] for joint in joints]
+        position = _resolve_values(self.joint_position, labels, "joint_position")
+        stiffness, damping, armature, effort, velocity, friction = self._gains(labels)
+        for joint, pos, ke, kd, arm, limit, speed, joint_friction in zip(
+            joints, position, stiffness, damping, armature, effort, velocity, friction, strict=True
+        ):
             q = builder.joint_q_start[joint]
             dof = builder.joint_qd_start[joint]
             builder.joint_q[q] = pos
             builder.joint_target_ke[dof] = ke
             builder.joint_target_kd[dof] = kd
-            builder.joint_armature[dof] = armature
+            builder.joint_armature[dof] = arm
             builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
+            if limit is not None:
+                builder.joint_effort_limit[dof] = limit
+            if speed is not None:
+                builder.joint_velocity_limit[dof] = speed
+            if joint_friction is not None:
+                builder.joint_friction[dof] = joint_friction
         return builder
+
+    def action_scales(self, labels: Sequence[str]) -> tuple[float, ...]:
+        return tuple(_resolve_values(self.action_scale, labels, "action_scale"))
+
+    def _gains(self, labels: Sequence[str]):
+        if not self.actuators:
+            return (
+                _resolve_values(self.stiffness, labels, "stiffness"),
+                _resolve_values(self.damping, labels, "damping"),
+                _resolve_values(self.armature, labels, "armature"),
+                [None] * len(labels),
+                [None] * len(labels),
+                [None] * len(labels),
+            )
+        stiffness = [None] * len(labels)
+        damping = [None] * len(labels)
+        armature = [None] * len(labels)
+        effort = [None] * len(labels)
+        velocity = [None] * len(labels)
+        friction = [None] * len(labels)
+        claimed = [None] * len(labels)
+        for group in self.actuators:
+            for index in resolve_scene_names(group.joint_names, labels):
+                if claimed[index] is not None:
+                    raise ValueError(
+                        f"Joint {labels[index]!r} matches both {claimed[index]!r} and {group.joint_names!r}"
+                    )
+                claimed[index] = group.joint_names
+                stiffness[index] = group.stiffness
+                damping[index] = group.damping
+                armature[index] = group.armature
+                effort[index] = group.effort_limit
+                velocity[index] = group.velocity_limit
+                friction[index] = group.friction
+        missing = [label for label, owner in zip(labels, claimed) if owner is None]
+        if missing:
+            raise ValueError(f"Actuator groups do not cover {missing}")
+        return stiffness, damping, armature, effort, velocity, friction
+
+
+def _resolve_values(spec: ValueSpec, labels: Sequence[str], name: str) -> list[float]:
+    if isinstance(spec, (int, float)):
+        return [float(spec)] * len(labels)
+    if isinstance(spec, tuple):
+        if len(spec) != len(labels):
+            raise ValueError(f"Expected {len(labels)} {name} values, got {len(spec)}")
+        return [float(value) for value in spec]
+    assigned = [None] * len(labels)
+    claimed = [None] * len(labels)
+    for pattern, value in spec.items():
+        for index in resolve_scene_names(pattern, labels):
+            if claimed[index] is not None:
+                raise ValueError(
+                    f"{name} pattern {pattern!r} overlaps {claimed[index]!r} on {labels[index]!r}"
+                )
+            claimed[index] = pattern
+            assigned[index] = float(value)
+    missing = [label for label, value in zip(labels, assigned) if value is None]
+    if missing:
+        raise ValueError(f"{name} patterns do not cover {missing}")
+    return assigned
 
 
 def scalar_joints(builder):
@@ -67,6 +171,22 @@ def scalar_joints(builder):
         for j, kind in enumerate(builder.joint_type)
         if kind in (newton.JointType.REVOLUTE, newton.JointType.PRISMATIC)
     ]
+
+
+def robot_model_dir() -> Path:
+    """Directory of cooked robot bundles.
+
+    ``ROBOT_MODEL_DIR`` wins. Otherwise use the active-adaptation asset cache
+    next to this repository.
+    """
+    if env := os.environ.get("ROBOT_MODEL_DIR"):
+        return Path(env)
+    return (
+        Path(__file__).resolve().parents[3]
+        / "active-adaptation"
+        / ".cache"
+        / "aa-robot-models"
+    )
 
 
 def newton_anymal_c() -> RobotConfig:
@@ -85,10 +205,75 @@ def newton_anymal_c() -> RobotConfig:
 
 
 def assetx_spot() -> RobotConfig:
-    raise NotImplementedError(
-        "The AssetX Spot asset and actuator settings are pending."
+    # Gains and pose match active-adaptation's Spot implicit actuators.
+    return RobotConfig(
+        asset=robot_model_dir() / "spot" / "usd" / "spot.usdc",
+        position=(0.0, 0.0, 0.60),
+        joint_position={".*_hx": 0.0, ".*_hy": 1.04, ".*_kn": -1.8},
+        actuators=(
+            ActuatorGroup(
+                (".*_hx", ".*_hy"),
+                stiffness=60.0,
+                damping=1.5,
+                armature=0.01,
+                effort_limit=45.0,
+                velocity_limit=20.0,
+                friction=0.01,
+            ),
+            ActuatorGroup(
+                (".*_kn",),
+                stiffness=60.0,
+                damping=1.5,
+                armature=0.01,
+                effort_limit=90.0,
+                velocity_limit=20.0,
+                friction=0.01,
+            ),
+        ),
+        action_scale=0.5,
     )
 
 
 def assetx_as2() -> RobotConfig:
-    raise NotImplementedError("The AssetX AS2 asset and actuator settings are pending.")
+    # Gains and pose match active-adaptation's AS2 implicit actuators.
+    return RobotConfig(
+        asset=robot_model_dir() / "as2" / "usd" / "as2.usdc",
+        position=(0.0, 0.0, 0.5),
+        joint_position={
+            ".*L_hip_joint": 0.1,
+            ".*R_hip_joint": -0.1,
+            "F[L,R]_thigh_joint": 0.7,
+            "R[L,R]_thigh_joint": 0.8,
+            ".*_calf_joint": -1.5,
+        },
+        actuators=(
+            ActuatorGroup(
+                (".*_hip_joint",),
+                stiffness=60.0,
+                damping=1.5,
+                armature=0.026,
+                effort_limit=60.0,
+                velocity_limit=20.0,
+                friction=0.01,
+            ),
+            ActuatorGroup(
+                (".*_thigh_joint",),
+                stiffness=60.0,
+                damping=1.5,
+                armature=0.026,
+                effort_limit=60.0,
+                velocity_limit=20.0,
+                friction=0.01,
+            ),
+            ActuatorGroup(
+                (".*_calf_joint",),
+                stiffness=60.0,
+                damping=1.5,
+                armature=0.038,
+                effort_limit=90.0,
+                velocity_limit=20.0,
+                friction=0.01,
+            ),
+        ),
+        action_scale={".*_joint": 0.4},
+    )

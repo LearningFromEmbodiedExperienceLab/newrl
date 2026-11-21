@@ -7,7 +7,7 @@ import torch
 class JointPositionAction:
     """Map normalized actions to offsets from the nominal joint pose."""
 
-    scale: float
+    scale: float | torch.Tensor
 
     def __call__(self, action: torch.Tensor, default: torch.Tensor) -> torch.Tensor:
         return default + self.scale * action

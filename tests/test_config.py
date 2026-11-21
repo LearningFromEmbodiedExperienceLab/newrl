@@ -137,10 +137,8 @@ class ConfigTests(unittest.TestCase):
 
         with self.assertRaises(ValueError) as caught:
             entry(["algo=ppo"])
-        self.assertIn(
-            "task (choose from anymal_loco_flat, anymal_loco_flat_contact)",
-            str(caught.exception),
-        )
+        self.assertIn("spot_loco_flat", str(caught.exception))
+        self.assertIn("as2_loco_flat", str(caught.exception))
         self.assertFalse(called)
 
     def test_default_override_yields_to_the_command_line(self):

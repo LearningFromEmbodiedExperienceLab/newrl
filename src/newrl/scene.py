@@ -85,8 +85,14 @@ class Scene:
                 for j, kind in enumerate(robot.joint_type)
                 if kind == newton.JointType.FREE
             ]
+            labels = [robot.joint_label[joint] for joint in scalar_joints(robot)]
             template.add_builder(robot, label_prefix=name)
-            layouts[name] = (joints, bodies, roots, robot_cfg.action_scale)
+            layouts[name] = (
+                joints,
+                bodies,
+                roots,
+                robot_cfg.action_scales(labels),
+            )
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         builder.replicate(template, copy_count=config.num_envs)
@@ -140,7 +146,9 @@ class Scene:
                 bodies=body_ids,
                 root_q=root_q,
                 default_position=wp.to_torch(model.joint_q)[q],
-                action=JointPositionAction(scale),
+                action=JointPositionAction(
+                    torch.tensor(scale, dtype=torch.float32, device=device)
+                ),
             )
 
         self.contact_sensors = {}

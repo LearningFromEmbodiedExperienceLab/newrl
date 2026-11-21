@@ -25,7 +25,7 @@ lines = [
 for group in cs.groups():
     names = cs.names(group)
     if names:
-        lines.append(f"_newrl_presets[{group}]={' '.join(names)}")
+        lines.append(f'_newrl_presets[{group}]="{" ".join(names)}"')
 lines.append(
     r"""
 _newrl_preset() {
