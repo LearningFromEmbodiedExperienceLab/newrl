@@ -54,7 +54,10 @@ a partial reset.
   keeps each named term under `reward_terms`, and `reward` is their sum.
 - The RL environment uses Newton's `CollisionPipeline`. The custom terrain
   collider is exercised by [benchmark_mesh_collision.py](benchmark_mesh_collision.py).
-  Solver and timing defaults are configured in `EnvironmentConfig`.
+  Solver and timing defaults are configured in `EnvironmentConfig`. MuJoCo Warp
+  is the default backend; Steel uses augmented drives and point friction so
+  its per-world checkpoints remain replayable. Its actuator torque is
+  reconstructed from the final substep's implicit drive dynamics.
 
 ## Validation and benchmarking
 

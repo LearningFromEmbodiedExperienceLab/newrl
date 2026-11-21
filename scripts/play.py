@@ -16,6 +16,9 @@ def main() -> None:
     parser.add_argument("--steps", type=int, help="stop after this many steps")
     parser.add_argument("--episode-steps", type=int, default=1000)
     parser.add_argument(
+        "--solver-backend", choices=("mujoco", "steel"), default="mujoco"
+    )
+    parser.add_argument(
         "--viewer",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -32,7 +35,11 @@ def main() -> None:
 
     viewer = newton.viewer.ViewerGL() if args.viewer else None
     try:
-        config = AnymalLocomotion(num_envs=args.num_envs, graph_capture=args.graph)
+        config = AnymalLocomotion(
+            num_envs=args.num_envs,
+            graph_capture=args.graph,
+            solver_backend=args.solver_backend,
+        )
         config.mdp.truncations["timeout"] = Timeout(args.episode_steps)
         env = StatefulEnvironment(config)
         actions = torch.zeros((env.num_envs, env.action_dim), device=env.device)

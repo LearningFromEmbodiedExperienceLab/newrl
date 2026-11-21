@@ -51,6 +51,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--num-envs", type=int, nargs="+", default=[4, 2048, 4096])
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--solver-backend", choices=("mujoco", "steel"), default="mujoco"
+    )
     parser.add_argument("--substeps", type=int, default=4)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--steps", type=int, default=100)
@@ -96,6 +99,7 @@ def main():
                 device=args.device,
                 substeps=args.substeps,
                 graph_capture=graph,
+                solver_backend=args.solver_backend,
             )
             envs = (StatefulEnvironment(cfg), StatelessEnvironment(cfg))
             device = envs[0].device
@@ -135,6 +139,9 @@ def main():
                         name: getattr(cfg, name)
                         for name in (
                             "num_envs",
+                            "solver_backend",
+                            "steel_iterations",
+                            "steel_articulation_constraint_max",
                             "sim_dt",
                             "substeps",
                             "jacobian",

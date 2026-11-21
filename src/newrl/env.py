@@ -1,6 +1,7 @@
 """Batched Newton environment with explicit reset and true successor states."""
 
 from contextlib import nullcontext
+from types import SimpleNamespace
 
 import newton
 import torch
@@ -10,6 +11,7 @@ from tensordict import TensorDict
 from .configs import EnvironmentConfig
 from .mdp.base import MDP
 from .scene import Scene
+from .steel import reconstruct_augmented_drive_torque
 from .utils.profiling import StageProfiler
 
 
@@ -22,7 +24,7 @@ class _EnvironmentCore:
         if not config.robots:
             raise ValueError("Configure at least one robot")
         if not wp.get_device(config.device).is_cuda:
-            raise ValueError("The batched MuJoCo Warp environment requires CUDA")
+            raise ValueError("The batched environment requires CUDA")
         self.config = config
         self.num_envs = config.num_envs
         self.scene = Scene(config)
@@ -35,40 +37,87 @@ class _EnvironmentCore:
         self.physical_read_plan = self.scene.resolve_physical_fields(requested)
         self.model = self.scene.model
         self.device = torch.device(wp.device_to_torch(self.model.device))
-        self.sim = newton.solvers.SolverMuJoCo(
-            self.model,
-            jacobian=config.jacobian,
-            solver=config.solver,
-            integrator=config.integrator,
-            cone=config.cone,
-            impratio=config.impratio,
-            iterations=config.iterations,
-            ls_iterations=config.ls_iterations,
-            nconmax=config.nconmax,
-            njmax=config.njmax,
-            use_mujoco_contacts=False,
-            enable_sleeping=False,
-            deterministic=wp.DeterministicMode.RUN_TO_RUN
-            if config.deterministic
-            else None,
-        )
-        needs_torque = any(
-            "joint_torque" in fields for fields in self.physical_read_plan.values()
-        )
-        self.observables = (
-            self.sim.observables({self.sim.ObservableKind.QFRC_ACTUATOR})
-            if needs_torque
-            else None
-        )
-        self._solver_reset_defaults = {
-            name: wp.to_torch(array).clone()
-            for name in ("history", "mocap_pos", "mocap_quat")
-            if (array := getattr(self.sim.mjw_data, name)).size
-        }
         self.collision = newton.CollisionPipeline(
             self.model, deterministic=config.deterministic
         )
         self.contacts = self.collision.contacts()
+        needs_torque = any(
+            "joint_torque" in fields for fields in self.physical_read_plan.values()
+        )
+        self._steel = config.solver_backend == "steel"
+        if self._steel:
+            # Point friction and an updated mass matrix every step avoid hidden
+            # friction-anchor and factorization history in stateless checkpoints.
+            self.model.rigid_contact_max = self.contacts.rigid_contact_max
+            self.sim = newton.solvers.SolverSteel(
+                self.model,
+                iterations=config.steel_iterations,
+                articulation_constraint_max=config.steel_articulation_constraint_max,
+                enable_joint_limits=True,
+                drive_mode="augmented",
+                friction_anchor_beta=0.0,
+                contact_warmstart=False,
+                update_mass_matrix_interval=1,
+                deterministic=wp.DeterministicMode.RUN_TO_RUN
+                if config.deterministic
+                else None,
+            )
+            self.observables = (
+                SimpleNamespace(
+                    qfrc_actuator=wp.zeros(
+                        self.model.joint_dof_count,
+                        dtype=wp.float32,
+                        device=self.model.device,
+                    )
+                )
+                if needs_torque
+                else None
+            )
+            self._solver_reset_defaults = {}
+            self._steel_indices = tuple(
+                wp.from_torch(
+                    torch.cat(
+                        [
+                            getattr(entity, name).reshape(-1)
+                            for entity in self.scene.entities.values()
+                        ]
+                    )
+                    .int()
+                    .contiguous(),
+                    dtype=wp.int32,
+                )
+                for name in ("q", "qd", "targets")
+            )
+        elif config.solver_backend == "mujoco":
+            self.sim = newton.solvers.SolverMuJoCo(
+                self.model,
+                jacobian=config.jacobian,
+                solver=config.solver,
+                integrator=config.integrator,
+                cone=config.cone,
+                impratio=config.impratio,
+                iterations=config.iterations,
+                ls_iterations=config.ls_iterations,
+                nconmax=config.nconmax,
+                njmax=config.njmax,
+                use_mujoco_contacts=False,
+                enable_sleeping=False,
+                deterministic=wp.DeterministicMode.RUN_TO_RUN
+                if config.deterministic
+                else None,
+            )
+            self.observables = (
+                self.sim.observables({self.sim.ObservableKind.QFRC_ACTUATOR})
+                if needs_torque
+                else None
+            )
+            self._solver_reset_defaults = {
+                name: wp.to_torch(array).clone()
+                for name in ("history", "mocap_pos", "mocap_quat")
+                if (array := getattr(self.sim.mjw_data, name)).size
+            }
+        else:
+            raise ValueError(f"Unknown solver backend {config.solver_backend!r}")
         self.state = self.model.state()
         self.state_next = self.model.state()
         self._physics_graphs = {}
@@ -101,7 +150,26 @@ class _EnvironmentCore:
                     self.control,
                     self.contacts,
                     self.config.sim_dt,
-                    observables=self.observables,
+                    observables=None if self._steel else self.observables,
+                )
+            if self._steel and self.observables is not None:
+                wp.launch(
+                    reconstruct_augmented_drive_torque,
+                    dim=self._steel_indices[0].size,
+                    inputs=[
+                        *self._steel_indices,
+                        state.joint_q,
+                        state.joint_qd,
+                        state_next.joint_qd,
+                        self.control.joint_target_q,
+                        self.control.joint_target_qd,
+                        self.model.joint_target_ke,
+                        self.model.joint_target_kd,
+                        self.model.joint_effort_limit,
+                        self.config.sim_dt,
+                        self.observables.qfrc_actuator,
+                    ],
+                    device=self.model.device,
                 )
             state, state_next = state_next, state
         return state, state_next
@@ -147,7 +215,22 @@ class _EnvironmentCore:
         mask = torch.zeros(self.num_envs + 1, dtype=torch.bool, device=self.device)
         mask[:-1][ids] = True
         self.sim.reset(self.state, world_mask=wp.from_torch(mask, dtype=wp.bool))
-        wp.to_torch(self.sim.mjw_data.time)[ids] = 0
+        if self._steel:
+            joint_world = wp.to_torch(self.model.joint_world).long()
+            for name, starts in (
+                ("joint_q", self.model.joint_q_start),
+                ("joint_qd", self.model.joint_qd_start),
+            ):
+                offsets = wp.to_torch(starts).long()
+                worlds = torch.repeat_interleave(
+                    joint_world, offsets[1:] - offsets[:-1]
+                )
+                target = wp.to_torch(getattr(self.state, name))
+                target[mask[worlds]] = wp.to_torch(getattr(self.model, name))[
+                    mask[worlds]
+                ]
+        else:
+            wp.to_torch(self.sim.mjw_data.time)[ids] = 0
         if self.observables is not None:
             joint_world = wp.to_torch(self.model.joint_world).long()
             dof_starts = wp.to_torch(self.model.joint_qd_start).long()
@@ -238,8 +321,9 @@ class StatelessEnvironment(_EnvironmentCore):
     """Use explicit checkpoints and private Newton working buffers.
 
     A checkpoint is tied to the environment's scene and batch layout. It carries
-    Newton's joint and body states and the persistent MuJoCo Warp integration
-    buffers. Collision and constraint work is rebuilt each step. Custom MDP
+    Newton's joint and body states and persistent solver integration buffers.
+    Steel uses point friction and recomputes its mass matrix each step, so its
+    collision and constraint work does not require additional checkpoint history. Custom MDP
     terms must derive their results from the supplied physical snapshot and MDP state.
     """
 
@@ -253,26 +337,32 @@ class StatelessEnvironment(_EnvironmentCore):
             name: getattr(self.state, name)
             for name in ("joint_q", "joint_qd", "body_q", "body_qd")
         }
-        arrays.update(
-            {
-                name: getattr(self.sim.mjw_data, name)
-                for name in (
-                    "qacc_warmstart",
-                    "act",
-                    "time",
-                    "history",
-                    "mocap_pos",
-                    "mocap_quat",
-                )
-                if getattr(self.sim.mjw_data, name).size
-            }
-        )
+        if not self._steel:
+            arrays.update(
+                {
+                    name: getattr(self.sim.mjw_data, name)
+                    for name in (
+                        "qacc_warmstart",
+                        "act",
+                        "time",
+                        "history",
+                        "mocap_pos",
+                        "mocap_quat",
+                    )
+                    if getattr(self.sim.mjw_data, name).size
+                }
+            )
         if self.observables is not None:
             arrays["qfrc_actuator"] = self.observables.qfrc_actuator
-        return {
+        views = {
             name: wp.to_torch(array).reshape(self.num_envs, -1)
             for name, array in arrays.items()
         }
+        if self._steel:
+            views["constraint_overflow"] = wp.to_torch(self.sim.constraint_overflow)[
+                : self.num_envs
+            ].reshape(self.num_envs, 1)
+        return views
 
     def _snapshot(self):
         return TensorDict(

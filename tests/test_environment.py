@@ -3,6 +3,7 @@
 import unittest
 from dataclasses import replace
 
+import newton
 import torch
 import warp as wp
 from tensordict import TensorDict
@@ -10,11 +11,96 @@ from tensordict import TensorDict
 from newrl.configs import AnymalLocomotion
 from newrl.env import StatefulEnvironment, StatelessEnvironment
 from newrl.mdp.episode_ends import Timeout
+from newrl.steel import reconstruct_augmented_drive_torque
 from newrl.terrain import FlatMeshTerrainConfig
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class EnvironmentTests(unittest.TestCase):
+    def test_steel_torque_matches_single_joint_dynamics(self):
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        link = builder.add_link(mass=2.0, inertia=wp.mat33(1.0))
+        joint = builder.add_joint_prismatic(
+            parent=-1,
+            child=link,
+            target_q=1.0,
+            target_ke=100.0,
+            target_kd=2.0,
+            damping=0.0,
+            armature=0.5,
+            effort_limit=5.0,
+        )
+        builder.add_articulation([joint])
+        model = builder.finalize(device="cuda:0")
+        solver = newton.solvers.SolverSteel(model, friction_anchor_beta=0.0)
+        state, next_state = model.state(), model.state()
+        wp.to_torch(state.joint_q)[0] = 0.2
+        wp.to_torch(state.joint_qd)[0] = 0.5
+        control = model.control()
+        solver.step(state, next_state, control, None, 0.01)
+        indices = wp.array([0], dtype=wp.int32, device=model.device)
+        torque = wp.zeros(1, dtype=wp.float32, device=model.device)
+        wp.launch(
+            reconstruct_augmented_drive_torque,
+            dim=1,
+            inputs=[
+                indices,
+                indices,
+                indices,
+                state.joint_q,
+                state.joint_qd,
+                next_state.joint_qd,
+                control.joint_target_q,
+                control.joint_target_qd,
+                model.joint_target_ke,
+                model.joint_target_kd,
+                model.joint_effort_limit,
+                0.01,
+                torque,
+            ],
+            device=model.device,
+        )
+        acceleration = (
+            wp.to_torch(next_state.joint_qd) - wp.to_torch(state.joint_qd)
+        ) / 0.01
+        torch.testing.assert_close(
+            wp.to_torch(torque), 2.5 * acceleration, atol=2e-4, rtol=2e-4
+        )
+
+    def test_steel_augmented_torque(self):
+        # The drive's explicit component is clamped before its implicit
+        # correction; the resulting force can therefore exceed the limit.
+        device = "cuda:0"
+        arrays = [
+            wp.array(values, dtype=wp.float32, device=device)
+            for values in (
+                [0.2, -0.4],
+                [0.5, -0.2],
+                [0.1, 0.8],
+                [1.0, -1.0],
+                [0.0, 0.3],
+                [100.0, 10.0],
+                [2.0, 1.0],
+                [5.0, 0.0],
+            )
+        ]
+        indices = wp.array([0, 1], dtype=wp.int32, device=device)
+        output = wp.zeros(2, dtype=wp.float32, device=device)
+        wp.launch(
+            reconstruct_augmented_drive_torque,
+            dim=2,
+            inputs=[indices, indices, indices, *arrays, 0.01, output],
+            device=device,
+        )
+        expected = torch.tensor(
+            [
+                5.0 - 3.0 * (0.1 - 0.5),
+                -(10.0 * (-0.4 + 1.0 + 0.01 * -0.2) + (-0.2 - 0.3)) - 1.1 * (0.8 + 0.2),
+            ],
+            device=device,
+        )
+        torch.testing.assert_close(wp.to_torch(output), expected)
+
     def test_scene_projected_gravity(self):
         env = StatefulEnvironment(AnymalLocomotion(num_envs=2))
         env.reset()
@@ -102,12 +188,18 @@ class EnvironmentTests(unittest.TestCase):
             with self.subTest(graph_capture=graph_capture, substeps=substeps):
                 self._check_rollout_parity(graph_capture, substeps)
 
-    def _check_rollout_parity(self, graph_capture, substeps):
+    def test_steel_rollout_parity(self):
+        for graph_capture, substeps in ((False, 4), (True, 4), (True, 3)):
+            with self.subTest(graph_capture=graph_capture, substeps=substeps):
+                self._check_rollout_parity(graph_capture, substeps, "steel")
+
+    def _check_rollout_parity(self, graph_capture, substeps, solver_backend="mujoco"):
         cfg = AnymalLocomotion(
             num_envs=3,
             graph_capture=graph_capture,
             substeps=substeps,
             deterministic=True,
+            solver_backend=solver_backend,
         )
         cfg.mdp = replace(cfg.mdp, hold_steps=4)
         cfg.mdp.truncations["timeout"] = Timeout(18)
@@ -122,11 +214,18 @@ class EnvironmentTests(unittest.TestCase):
             for name, value in sim.items():
                 source = getattr(stateful.state, name, None)
                 if source is None:
-                    source = (
-                        stateful.observables.qfrc_actuator
-                        if name == "qfrc_actuator"
-                        else getattr(stateful.sim.mjw_data, name)
-                    )
+                    if name == "qfrc_actuator":
+                        source = stateful.observables.qfrc_actuator
+                    elif name == "constraint_overflow":
+                        torch.testing.assert_close(
+                            wp.to_torch(stateful.sim.constraint_overflow)[
+                                :3
+                            ].reshape_as(value),
+                            value,
+                        )
+                        continue
+                    else:
+                        source = getattr(stateful.sim.mjw_data, name)
                 torch.testing.assert_close(
                     wp.to_torch(source).reshape_as(value),
                     value,
@@ -168,7 +267,14 @@ class EnvironmentTests(unittest.TestCase):
                 compare(sim, mdp, stateful.reset(ids), expected)
 
     def test_checkpoint_replay_after_another_branch(self):
-        cfg = AnymalLocomotion(num_envs=2, substeps=3, graph_capture=True)
+        for backend in ("mujoco", "steel"):
+            with self.subTest(solver_backend=backend):
+                self._check_checkpoint_replay_after_another_branch(backend)
+
+    def _check_checkpoint_replay_after_another_branch(self, backend):
+        cfg = AnymalLocomotion(
+            num_envs=2, substeps=3, graph_capture=True, solver_backend=backend
+        )
         cfg.mdp = replace(cfg.mdp, hold_steps=25)
         env = StatelessEnvironment(cfg)
         sim, mdp, initial = env.reset()

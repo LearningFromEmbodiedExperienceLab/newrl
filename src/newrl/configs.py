@@ -29,6 +29,9 @@ class EnvironmentConfig:
     sim_dt: float = 0.005
     substeps: int = 4
     jacobian: str = "sparse"
+    solver_backend: str = "mujoco"
+    steel_iterations: int = 12
+    steel_articulation_constraint_max: int = 128
     solver: str = "newton"
     integrator: str = "implicitfast"
     cone: str = "elliptic"

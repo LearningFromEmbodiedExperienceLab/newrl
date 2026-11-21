@@ -41,6 +41,7 @@ def main() -> None:
         critic_dim=probe["critic_observation"].shape[-1],
         action_dim=env.action_dim,
     ).to(env.device)
+    # TODO: carry should be a tensordict for flexibility
     carry = (probe["policy_observation"], probe["critic_observation"])
 
     for iteration in range(args.iterations):
