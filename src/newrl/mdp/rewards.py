@@ -6,7 +6,6 @@ from typing import ClassVar
 import torch
 
 from .observations import BodyAngularVelocity, BodyLinearVelocity
-from .terms import StepFeatures
 
 
 @dataclass(frozen=True)
@@ -16,9 +15,7 @@ class ActionRate:
     weight: float
     physical_fields: ClassVar[frozenset] = frozenset()
 
-    def __call__(
-        self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
-    ):
+    def __call__(self, physical_state, mdp_state):
         delta = mdp_state["action"] - mdp_state["previous_action"]
         return -self.weight * delta.square().sum(dim=-1, keepdim=True)
 
@@ -84,9 +81,7 @@ class JointEnergy1(_JointTerm):
     def physical_fields(self):
         return super().physical_fields | {(self.entity, "joint_torque")}
 
-    def __call__(
-        self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
-    ):
+    def __call__(self, physical_state, mdp_state):
         torque = self._select(physical_state[self.entity, "joint_torque"])
         velocity = self._velocity(physical_state)
         return -self.weight * (torque * velocity).abs().sum(dim=-1, keepdim=True)
@@ -111,9 +106,7 @@ class JointAcc2(_JointTerm):
         object.__setattr__(bound, "_control_dt", float(scene.control_dt))
         return bound
 
-    def __call__(
-        self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
-    ):
+    def __call__(self, physical_state, mdp_state):
         if self._control_dt is None:
             raise RuntimeError("Bind JointAcc2 to a scene before evaluating it")
         velocity = physical_state[self.entity, "joint_vel"]
@@ -133,9 +126,7 @@ class JointAcc2(_JointTerm):
 class JointVel2(_JointTerm):
     """Penalize the squared joint velocity."""
 
-    def __call__(
-        self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
-    ):
+    def __call__(self, physical_state, mdp_state):
         velocity = self._velocity(physical_state)
         return -self.weight * velocity.square().sum(dim=-1, keepdim=True)
 
@@ -156,12 +147,8 @@ class TrackVelocity:
     def _initialize(self, scene):
         return replace(self, velocity=self.velocity._initialize(scene))
 
-    def __call__(
-        self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
-    ):
-        measured = self.velocity(
-            physical_state, mdp_state, step_features=step_features
-        )[:, 0, self.components]
+    def __call__(self, physical_state, mdp_state):
+        measured = self.velocity(physical_state, mdp_state)[:, 0, self.components]
         target = mdp_state["velocity_command"][:, self.components]
         squared_error = (measured - target).square().sum(dim=-1, keepdim=True)
         return self.weight * (-squared_error / self.sigma**2).exp()

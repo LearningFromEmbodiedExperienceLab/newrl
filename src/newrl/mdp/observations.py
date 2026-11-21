@@ -5,8 +5,6 @@ from typing import ClassVar, Literal
 
 import torch
 
-from .terms import StepFeatures
-
 
 @dataclass(frozen=True)
 class EntityField:
@@ -42,9 +40,7 @@ class EntityField:
             )
         return self._shape
 
-    def __call__(
-        self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
-    ):
+    def __call__(self, physical_state, mdp_state):
         return physical_state[self.entity, self.field]
 
 
@@ -68,9 +64,7 @@ class PreviousAction:
             )
         return torch.Size((self._size,))
 
-    def __call__(
-        self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
-    ):
+    def __call__(self, physical_state, mdp_state):
         return mdp_state["previous_action"]
 
 
@@ -174,45 +168,32 @@ class _BodyVelocity(_BodyObservation):
 
 
 class BodyLinearVelocity(_BodyVelocity):
-    def __call__(
-        self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
-    ):
+    def __call__(self, physical_state, mdp_state):
         return self._velocity(physical_state, slice(0, 3))
 
 
 class BodyAngularVelocity(_BodyVelocity):
-    def __call__(
-        self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
-    ):
+    def __call__(self, physical_state, mdp_state):
         return self._velocity(physical_state, slice(3, 6))
 
 
-class _SharedBodyObservation(_BodyObservation):
+class ProjectedGravity(_BodyObservation):
+    @property
+    def physical_fields(self):
+        return frozenset({(self.entity, "projected_gravity")})
+
+    def __call__(self, physical_state, mdp_state):
+        return self._read(physical_state, "projected_gravity")
+
+
+class BodyHeight(_BodyObservation):
+    _components = ()
+
     @property
     def physical_fields(self):
         return frozenset({(self.entity, "body_pose_w")})
 
-    def __call__(
-        self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
-    ):
-        if step_features is None:
-            return self._compute(physical_state)
-        key = (type(self), self.entity, self._body_indices)
-        return step_features.get(key, self._compute)
-
-
-class ProjectedGravity(_SharedBodyObservation):
-    def _compute(self, physical_state):
-        quat = self._read(physical_state, "body_pose_w")[..., 3:7]
-        gravity = torch.zeros_like(quat[..., :3])
-        gravity[..., 2] = -1.0
-        return _inverse_rotate(quat, gravity)
-
-
-class BodyHeight(_SharedBodyObservation):
-    _components = ()
-
-    def _compute(self, physical_state):
+    def __call__(self, physical_state, mdp_state):
         return self._read(physical_state, "body_pose_w")[..., 2]
 
 
@@ -231,9 +212,7 @@ class VelocityCommandObservation:
     def shape(self) -> torch.Size:
         return torch.Size((3,))
 
-    def __call__(
-        self, physical_state, mdp_state, *, step_features: StepFeatures | None = None
-    ):
+    def __call__(self, physical_state, mdp_state):
         return mdp_state["velocity_command"]
 
 

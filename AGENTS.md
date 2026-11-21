@@ -45,11 +45,9 @@ a partial reset.
   `mdp_state` so partial resets and replay preserve the RNG streams.
 - Evaluate rewards against the command used to choose the action. Apply
   command changes after scoring and before building the next observation.
-  Use `step_features` only for values derived from the current physical
-  snapshot. Its lifetime is one MDP evaluation.
+  The scene supplies projected gravity when requested by the physical read plan.
 - Term interfaces live in [terms.py](src/newrl/mdp/terms.py). Resolve scene
-  indices once in `_initialize(scene)`. Terms accept the optional
-  `step_features` keyword. Observation `shape` excludes the world dimension
+  indices once in `_initialize(scene)`. Observation `shape` excludes the world dimension
   and is available after scene binding for scene-dependent terms. Rewards
   and episode-end flags have shape `[num_envs, 1]`, with boolean flags.
   An observation group concatenates its terms into one vector. A reward group

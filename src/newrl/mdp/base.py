@@ -6,7 +6,7 @@ from functools import cached_property
 import torch
 from tensordict import TensorDict
 
-from .terms import EpisodeEndTerm, ObservationTerm, RewardTerm, StepFeatures
+from .terms import EpisodeEndTerm, ObservationTerm, RewardTerm
 
 
 def _bind(term, scene):
@@ -55,12 +55,10 @@ class ObservationGroup:
         physical_state: TensorDict,
         mdp_state: TensorDict,
         /,
-        *,
-        step_features: StepFeatures | None = None,
     ) -> torch.Tensor:
         parts = []
         for name, term in self.terms.items():
-            value = term(physical_state, mdp_state, step_features=step_features)
+            value = term(physical_state, mdp_state)
             flat = value.reshape(*mdp_state.batch_size, -1)
             if flat.shape[-1] != term.shape.numel():
                 raise ValueError(
@@ -96,12 +94,9 @@ class RewardGroup:
         physical_state: TensorDict,
         mdp_state: TensorDict,
         /,
-        *,
-        step_features: StepFeatures | None = None,
     ) -> dict[str, torch.Tensor]:
         return {
-            name: term(physical_state, mdp_state, step_features=step_features)
-            for name, term in self.terms.items()
+            name: term(physical_state, mdp_state) for name, term in self.terms.items()
         }
 
     def __call__(
@@ -109,14 +104,8 @@ class RewardGroup:
         physical_state: TensorDict,
         mdp_state: TensorDict,
         /,
-        *,
-        step_features: StepFeatures | None = None,
     ) -> torch.Tensor:
-        values = list(
-            self.contributions(
-                physical_state, mdp_state, step_features=step_features
-            ).values()
-        )
+        values = list(self.contributions(physical_state, mdp_state).values())
         total = values[0]
         for value in values[1:]:
             total = total + value
@@ -200,14 +189,11 @@ class MDP:
         next_mdp_state = mdp_state.clone()
         next_mdp_state["episode_step"] += 1
         next_mdp_state["action"] = action
-        step_features = StepFeatures(physical_state)
-        transition = self.step(physical_state, next_mdp_state, _features=step_features)
+        transition = self.step(physical_state, next_mdp_state)
         self._after_step(next_mdp_state, transition)
         del next_mdp_state["action"]
         next_mdp_state["previous_action"] = action
-        transition["observation"] = self.observe(
-            physical_state, next_mdp_state, _features=step_features
-        )
+        transition["observation"] = self.observe(physical_state, next_mdp_state)
         return next_mdp_state, transition
 
     def _after_step(self, mdp_state: TensorDict, transition: TensorDict) -> None:
@@ -217,13 +203,10 @@ class MDP:
         self,
         physical_state: TensorDict,
         mdp_state: TensorDict,
-        *,
-        _features: StepFeatures | None = None,
     ) -> TensorDict:
-        features = _features or StepFeatures(physical_state)
         return TensorDict(
             {
-                name: group(physical_state, mdp_state, step_features=features)
+                name: group(physical_state, mdp_state)
                 for name, group in self.observations.items()
             },
             batch_size=mdp_state.batch_size,
@@ -234,17 +217,12 @@ class MDP:
         self,
         physical_state: TensorDict,
         mdp_state: TensorDict,
-        *,
-        _features: StepFeatures | None = None,
     ) -> TensorDict:
-        step_features = _features or StepFeatures(physical_state)
         column_shape = (*mdp_state.batch_size, 1)
         reward = mdp_state["previous_action"].new_zeros(column_shape)
         reward_terms = {}
         for name, group in self.rewards.items():
-            values = group.contributions(
-                physical_state, mdp_state, step_features=step_features
-            )
+            values = group.contributions(physical_state, mdp_state)
             self._check_column_shape(values, column_shape)
             for value in values.values():
                 reward = reward + value
@@ -252,10 +230,10 @@ class MDP:
                 values, batch_size=mdp_state.batch_size, device=mdp_state.device
             )
         terminated = self._any(
-            self._evaluate(self.terminations, step_features, mdp_state), mdp_state
+            self._evaluate(self.terminations, physical_state, mdp_state), mdp_state
         )
         truncated = self._any(
-            self._evaluate(self.truncations, step_features, mdp_state), mdp_state
+            self._evaluate(self.truncations, physical_state, mdp_state), mdp_state
         )
         return TensorDict(
             {
@@ -274,14 +252,9 @@ class MDP:
         )
 
     @staticmethod
-    def _evaluate(terms, step_features, mdp_state):
+    def _evaluate(terms, physical_state, mdp_state):
         return TensorDict(
-            {
-                name: term(
-                    step_features.physical_state, mdp_state, step_features=step_features
-                )
-                for name, term in terms.items()
-            },
+            {name: term(physical_state, mdp_state) for name, term in terms.items()},
             batch_size=mdp_state.batch_size,
             device=mdp_state.device,
         )

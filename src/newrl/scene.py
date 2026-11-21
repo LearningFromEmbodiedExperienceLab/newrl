@@ -32,6 +32,18 @@ class RobotEntity:
             "body_pose_w": (state.body_q, self.bodies),
             "body_twist_w": (state.body_qd, self.bodies),
         }
+        values = {}
+        if "projected_gravity" in fields:
+            pose = wp.to_torch(state.body_q)[self.bodies]
+            axis = -pose[..., 3:6]
+            gravity = torch.zeros_like(axis)
+            gravity[..., 2] = -1.0
+            cross = 2.0 * torch.linalg.cross(axis, gravity)
+            values["projected_gravity"] = (
+                gravity + pose[..., 6:7] * cross + torch.linalg.cross(axis, cross)
+            )
+            if "body_pose_w" in fields:
+                values["body_pose_w"] = pose
         if "joint_torque" in fields:
             if observables is None or observables.qfrc_actuator is None:
                 raise RuntimeError(
@@ -39,7 +51,12 @@ class RobotEntity:
                 )
             sources["joint_torque"] = (observables.qfrc_actuator, self.qd)
         return TensorDict(
-            {name: wp.to_torch(sources[name][0])[sources[name][1]] for name in fields},
+            {
+                name: values[name]
+                if name in values
+                else wp.to_torch(sources[name][0])[sources[name][1]]
+                for name in fields
+            },
             batch_size=[len(self.q)],
             device=self.q.device,
         )
@@ -131,6 +148,7 @@ class Scene:
             "body_pose_w",
             "body_twist_w",
             "joint_torque",
+            "projected_gravity",
         }
         if requested is None:
             return {name: tuple(sorted(supported)) for name in self.entities}

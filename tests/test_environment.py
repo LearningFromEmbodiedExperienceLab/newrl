@@ -15,6 +15,22 @@ from newrl.terrain import FlatMeshTerrainConfig
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class EnvironmentTests(unittest.TestCase):
+    def test_scene_projected_gravity(self):
+        env = StatefulEnvironment(AnymalLocomotion(num_envs=2))
+        env.reset()
+        pose = wp.to_torch(env.state.body_q)
+        indices = env.scene.entities["robot"].bodies[:, 0]
+        pose[indices, 3:7] = torch.tensor(
+            [[0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.0]], device=env.device
+        )
+        snapshot = env.scene.read(
+            env.state, {"robot": ("projected_gravity", "body_pose_w")}
+        )
+        gravity = snapshot["robot", "projected_gravity"][:, 0]
+        torch.testing.assert_close(gravity, gravity.new_tensor([[0, 0, -1], [0, 0, 1]]))
+        pose[indices, 3:7] = torch.tensor([0.0, 0.0, 0.0, 1.0], device=env.device)
+        torch.testing.assert_close(gravity[1], gravity.new_tensor([0, 0, 1]))
+
     def test_actuator_torque_observable_reset_and_replay(self):
         env = StatelessEnvironment(AnymalLocomotion(num_envs=2, graph_capture=True))
         sim, mdp, initial = env.reset()
@@ -252,7 +268,7 @@ class EnvironmentTests(unittest.TestCase):
     def test_undeclared_custom_term_keeps_complete_snapshot(self):
         from newrl.mdp.base import MDP, RewardGroup
 
-        def custom(physical_state, mdp_state, *, step_features=None):
+        def custom(physical_state, mdp_state):
             return physical_state["robot", "body_twist_w"][:, 0, :1] * 0
 
         cfg = AnymalLocomotion(num_envs=1)
@@ -260,6 +276,13 @@ class EnvironmentTests(unittest.TestCase):
         env = StatefulEnvironment(cfg)
         self.assertEqual(
             set(env.reset()["physical_state", "robot"].keys()),
-            {"joint_pos", "joint_vel", "body_pose_w", "body_twist_w", "joint_torque"},
+            {
+                "joint_pos",
+                "joint_vel",
+                "body_pose_w",
+                "body_twist_w",
+                "joint_torque",
+                "projected_gravity",
+            },
         )
         env.step(torch.zeros((1, env.action_dim), device=env.device))

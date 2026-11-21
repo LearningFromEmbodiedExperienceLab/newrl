@@ -1,19 +1,18 @@
-"""CPU regression for sharing physical features within an MDP transition."""
+"""CPU regression tests for MDP terms."""
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import torch
 from tensordict import TensorDict
 
 from newrl.mdp.base import MDP, ObservationGroup, RewardGroup
-from newrl.mdp.episode_ends import Fall
+from newrl.mdp.episode_ends import HeightTermination, TiltTermination
 from newrl.mdp.observations import BodyHeight, ProjectedGravity
 from newrl.mdp.rewards import JointAcc2, JointEnergy1, JointVel2, _JointTerm
 
 
-class StepFeatureTests(unittest.TestCase):
+class MDPTests(unittest.TestCase):
     def test_fall_and_observations_share_only_current_physical_features(self):
         scene = SimpleNamespace(
             entities={
@@ -33,50 +32,36 @@ class StepFeatureTests(unittest.TestCase):
                 )
             },
             terminations={
-                "fall": Fall(
-                    BodyHeight("robot", "robot/base"),
-                    ProjectedGravity("robot", "robot/base"),
-                )
+                "height": HeightTermination(BodyHeight("robot", "robot/base")),
+                "tilt": TiltTermination(ProjectedGravity("robot", "robot/base")),
             },
         )._initialize(scene)
         mdp_state = mdp.initial_state(1, 1, torch.device("cpu"))
         pose = torch.tensor([[[0.0, 0.0, 0.7, 0.0, 0.0, 0.0, 1.0]]])
-        physical_state = TensorDict({"robot": {"body_pose_w": pose}}, batch_size=[1])
+        gravity = torch.tensor([[[0.0, 0.0, -1.0]]])
+        physical_state = TensorDict(
+            {"robot": {"body_pose_w": pose, "projected_gravity": gravity}},
+            batch_size=[1],
+        )
         action = torch.zeros(1, 1)
-        with (
-            patch.object(
-                BodyHeight, "_compute", autospec=True, side_effect=BodyHeight._compute
-            ) as height,
-            patch.object(
-                ProjectedGravity,
-                "_compute",
-                autospec=True,
-                side_effect=ProjectedGravity._compute,
-            ) as gravity,
-        ):
-            next_mdp_state, first = mdp.advance(physical_state, mdp_state, action)
-            self.assertFalse(first["terminated"].item())
-            self.assertEqual(height.call_count, 1)
-            self.assertEqual(gravity.call_count, 1)
-
-            pose[..., 2] = 0.2
-            _, second = mdp.advance(physical_state, next_mdp_state, action)
-            self.assertTrue(second["terminated"].item())
-            torch.testing.assert_close(
-                second["observation", "state"][:, :1], torch.tensor([[0.2]])
-            )
-            self.assertEqual(height.call_count, 2)
-            self.assertEqual(gravity.call_count, 2)
-
-            mdp.observations.clear()
-            _, third = mdp.advance(physical_state, next_mdp_state, action)
-            self.assertTrue(third["terminated"].item())
-            self.assertEqual(height.call_count, 3)
-            self.assertEqual(gravity.call_count, 3)
+        next_mdp_state, first = mdp.advance(physical_state, mdp_state, action)
+        self.assertFalse(first["terminated"].item())
+        pose[..., 2] = 0.2
+        _, second = mdp.advance(physical_state, next_mdp_state, action)
+        self.assertTrue(second["terminated"].item())
+        torch.testing.assert_close(
+            second["observation", "state"][:, :1], torch.tensor([[0.2]])
+        )
+        pose[..., 2] = 0.7
+        gravity[..., 2] = 1.0
+        self.assertFalse(mdp.terminations["height"](physical_state, mdp_state).item())
+        self.assertTrue(mdp.terminations["tilt"](physical_state, mdp_state).item())
+        mdp_state["spawn_height"] = torch.tensor([[0.5]])
+        self.assertTrue(mdp.terminations["height"](physical_state, mdp_state).item())
 
     def test_reward_groups_keep_terms_and_sum_them(self):
         def reward(value):
-            def term(physical_state, mdp_state, *, step_features=None):
+            def term(physical_state, mdp_state):
                 return torch.full((*mdp_state.batch_size, 1), value)
 
             return term

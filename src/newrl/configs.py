@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 import newton
 
 from .mdp.base import MDP, ObservationGroup, RewardGroup
-from .mdp.episode_ends import Fall, Timeout
+from .mdp.episode_ends import HeightTermination, TiltTermination, Timeout
 from .mdp.observations import (
     BodyAngularVelocity,
     BodyHeight,
@@ -112,7 +112,8 @@ def AnymalLocomotion(**overrides) -> EnvironmentConfig:
         ),
     }
     mdp.terminations = {
-        "fall": Fall(BodyHeight("robot", "base"), ProjectedGravity("robot", "base"))
+        "height": HeightTermination(BodyHeight("robot", "base")),
+        "tilt": TiltTermination(ProjectedGravity("robot", "base")),
     }
     defaults = {"robots": {"robot": newton_anymal_c}, "mdp": mdp}
     return EnvironmentConfig(**(defaults | overrides))
