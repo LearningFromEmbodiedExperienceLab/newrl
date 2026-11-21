@@ -61,6 +61,14 @@ a partial reset.
   is the default backend; Steel uses augmented drives and point friction so
   its per-world checkpoints remain replayable. Its actuator torque is
   reconstructed from the final substep's implicit drive dynamics.
+  `EnvironmentConfig.solver` is a backend-specific solver config; choose a
+  registered config with `task.solver=mujoco` or `task.solver=steel`.
+- Terrain contact sensors bind named robot bodies and terrain shape IDs at
+  initialization. The physical read plan enables solved-force export on the
+  final physics substep when needed. Sensor fields are `force_w` (net force in
+  newtons) and `loaded` (force magnitude above the configured threshold).
+  Reset clears selected sensor rows. Stateless checkpoints preserve reduced
+  forces for unselected worlds without storing raw contact rows.
 
 ## Validation and benchmarking
 

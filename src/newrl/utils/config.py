@@ -78,7 +78,10 @@ def dump(value: Any) -> Any:
     if isinstance(value, dict):
         if any(not isinstance(key, str) for key in value):
             raise TypeError("Config dict keys must be strings")
-        return {"__type__": "dict", "value": {key: dump(item) for key, item in value.items()}}
+        return {
+            "__type__": "dict",
+            "value": {key: dump(item) for key, item in value.items()},
+        }
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         fields = {
             field.name: dump(getattr(value, field.name))
@@ -110,7 +113,9 @@ def load(value: Any) -> Any:
             return {key: load(item) for key, item in value["value"].items()}
         if kind == "callable":
             return _import(value["value"])
-        return _import(kind)(**{key: load(item) for key, item in value["fields"].items()})
+        return _import(kind)(
+            **{key: load(item) for key, item in value["fields"].items()}
+        )
     return value
 
 
@@ -145,8 +150,15 @@ def resolve(config_cls: type, argv: Sequence[str]) -> Any:
                 details.append(name)
         raise ValueError(f"Missing config values: {'; '.join(details)}")
     config = config_cls(**selected)
-    for key, raw in assignments:
+    for key, raw in sorted(assignments, key=lambda item: item[0].count(".")):
         if key in consumed:
+            continue
+        group = key.rsplit(".", 1)[-1]
+        if "." in key and (group, raw) in cs:
+            config = _assign(config, key.split("."), raw, selection=cs.get(group, raw))
+    for key, raw in assignments:
+        group = key.rsplit(".", 1)[-1]
+        if key in consumed or ("." in key and (group, raw) in cs):
             continue
         config = _assign(config, key.split("."), raw)
     return config
@@ -180,13 +192,19 @@ def main(config_cls: type) -> Callable:
     return decorate
 
 
-def _assign(obj: Any, parts: list[str], raw: str) -> Any:
+def _assign(obj: Any, parts: list[str], raw: str, *, selection: Any = _MISSING) -> Any:
     head, *rest = parts
     if isinstance(obj, dict):
         if head not in obj:
             raise KeyError(f"Unknown config key {head!r}")
         updated = dict(obj)
-        updated[head] = _assign(obj[head], rest, raw) if rest else _parse_like(obj[head], raw)
+        updated[head] = (
+            _assign(obj[head], rest, raw, selection=selection)
+            if rest
+            else (
+                selection if selection is not _MISSING else _parse_like(obj[head], raw)
+            )
+        )
         return updated
     if not dataclasses.is_dataclass(obj):
         raise KeyError(f"Cannot override {head!r} on {type(obj).__name__}")
@@ -194,8 +212,11 @@ def _assign(obj: Any, parts: list[str], raw: str) -> Any:
     if head not in hints:
         raise KeyError(f"{type(obj).__name__} has no field {head!r}")
     if rest:
-        return dataclasses.replace(obj, **{head: _assign(getattr(obj, head), rest, raw)})
-    return dataclasses.replace(obj, **{head: coerce(parse_literal(raw), hints[head])})
+        return dataclasses.replace(
+            obj, **{head: _assign(getattr(obj, head), rest, raw, selection=selection)}
+        )
+    value = selection if selection is not _MISSING else parse_literal(raw)
+    return dataclasses.replace(obj, **{head: coerce(value, hints[head])})
 
 
 def _parse_like(existing: Any, raw: str) -> Any:
@@ -216,7 +237,11 @@ def coerce(value: Any, hint: Any) -> Any:
             except (TypeError, ValueError):
                 continue
         raise TypeError(f"Cannot coerce {value!r} to {hint}")
-    if hint is float and isinstance(value, (int, float)) and not isinstance(value, bool):
+    if (
+        hint is float
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+    ):
         return float(value)
     if hint is int and isinstance(value, int) and not isinstance(value, bool):
         return value
@@ -233,7 +258,9 @@ def coerce(value: Any, hint: Any) -> Any:
         if len(args) == 2 and args[1] is Ellipsis:
             return tuple(coerce(item, args[0]) for item in value)
         if args and len(args) == len(value):
-            return tuple(coerce(item, arg) for item, arg in zip(value, args, strict=True))
+            return tuple(
+                coerce(item, arg) for item, arg in zip(value, args, strict=True)
+            )
         if not args:
             return tuple(value)
         raise TypeError(f"Expected {len(args)} items for {hint}, got {len(value)}")
@@ -246,7 +273,10 @@ def coerce(value: Any, hint: Any) -> Any:
         if not isinstance(value, dict):
             raise TypeError(f"Expected a dict for {hint}, got {value!r}")
         key_type, value_type = get_args(hint) or (Any, Any)
-        return {coerce(key, key_type): coerce(item, value_type) for key, item in value.items()}
+        return {
+            coerce(key, key_type): coerce(item, value_type)
+            for key, item in value.items()
+        }
     if isinstance(value, hint):
         return value
     raise TypeError(f"Cannot coerce {value!r} to {hint}")
@@ -335,4 +365,3 @@ def _import(path: str) -> Any:
             obj = getattr(obj, name)
         return obj
     raise ImportError(f"Cannot import {path}")
-

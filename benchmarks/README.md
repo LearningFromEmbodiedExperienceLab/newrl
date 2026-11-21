@@ -15,6 +15,11 @@ file for each run. Add `--profile` to include stage timings from a separate
 instrumented pass. Throughput samples exclude that pass. Use `--reset-every 0`
 to measure stepping alone.
 
+Add `--contact-observation` to include ANYmal's terrain contact sensor and
+privileged load flags. With `--graph off --profile`, `contact_sensor` measures
+the reduction, while force export is timed in `solver`. With graphs enabled,
+both are included in `physics_graph`.
+
 Compare revisions on the same runner with the same workload and power mode.
 Use the individual trial samples to judge run-to-run variation. Cross-machine
 results show hardware scaling. Keep the full history in a separate results

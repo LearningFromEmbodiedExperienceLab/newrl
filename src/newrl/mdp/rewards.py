@@ -143,3 +143,38 @@ class TrackVelocity:
         target = mdp_state["velocity_command"][:, self.components]
         squared_error = (measured - target).square().sum(dim=-1, keepdim=True)
         return self.weight * (-squared_error / self.sigma**2).exp()
+
+
+@dataclass(frozen=True)
+class FootSlip:
+    """Penalize horizontal foot body velocity while the foot carries load."""
+
+    sensor: str
+    weight: float
+    _velocity: BodyLinearVelocity | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    @property
+    def physical_fields(self):
+        fields = frozenset({(self.sensor, "loaded")})
+        return (
+            fields
+            if self._velocity is None
+            else fields | self._velocity.physical_fields
+        )
+
+    def _initialize(self, scene):
+        config = scene.contact_sensors[self.sensor].config
+        velocity = BodyLinearVelocity(config.entity, config.body_names)._initialize(
+            scene
+        )
+        bound = replace(self)
+        object.__setattr__(bound, "_velocity", velocity)
+        return bound
+
+    def __call__(self, physical_state, mdp_state):
+        velocity = self._velocity(physical_state, mdp_state)
+        loaded = physical_state[self.sensor, "loaded"]
+        speed_sq = velocity[..., :2].square().sum(-1)
+        return -self.weight * (speed_sq * loaded).sum(-1, keepdim=True)

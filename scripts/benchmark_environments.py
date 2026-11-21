@@ -3,6 +3,7 @@
 import argparse
 import json
 import re
+from dataclasses import asdict
 from pathlib import Path
 from statistics import median
 from time import perf_counter
@@ -13,6 +14,7 @@ from tensordict import TensorDict
 
 from newrl.configs import AnymalLocomotion
 from newrl.env import StatefulEnvironment, StatelessEnvironment
+from newrl.solver_adapters import MujocoSimConfig, SteelSimConfig
 from newrl.utils.profiling import StageProfiler
 
 
@@ -54,6 +56,7 @@ def main():
     parser.add_argument(
         "--solver-backend", choices=("mujoco", "steel"), default="mujoco"
     )
+    parser.add_argument("--contact-observation", action="store_true")
     parser.add_argument("--substeps", type=int, default=4)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--steps", type=int, default=100)
@@ -99,7 +102,10 @@ def main():
                 device=args.device,
                 substeps=args.substeps,
                 graph_capture=graph,
-                solver_backend=args.solver_backend,
+                solver=SteelSimConfig()
+                if args.solver_backend == "steel"
+                else MujocoSimConfig(),
+                contact_observation=args.contact_observation,
             )
             envs = (StatefulEnvironment(cfg), StatelessEnvironment(cfg))
             device = envs[0].device
@@ -139,27 +145,18 @@ def main():
                         name: getattr(cfg, name)
                         for name in (
                             "num_envs",
-                            "solver_backend",
-                            "steel_iterations",
-                            "steel_articulation_constraint_max",
                             "sim_dt",
                             "substeps",
-                            "jacobian",
-                            "solver",
-                            "integrator",
-                            "cone",
-                            "impratio",
-                            "iterations",
-                            "ls_iterations",
-                            "nconmax",
-                            "njmax",
                             "graph_capture",
                             "deterministic",
                             "ground_stiffness",
                             "ground_damping",
                         )
                     },
+                    "solver_backend": args.solver_backend,
+                    "solver_config": asdict(cfg.solver),
                     "terrain": "plane",
+                    "contact_observation": args.contact_observation,
                     "collision": "newton.CollisionPipeline",
                     "collision_updates": "every physics substep",
                     "seed": cfg.mdp.seed,

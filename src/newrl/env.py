@@ -1,7 +1,6 @@
 """Batched Newton environment with explicit reset and true successor states."""
 
 from contextlib import nullcontext
-from types import SimpleNamespace
 
 import newton
 import torch
@@ -11,7 +10,6 @@ from tensordict import TensorDict
 from .configs import EnvironmentConfig
 from .mdp.base import MDP
 from .scene import Scene
-from .steel import reconstruct_augmented_drive_torque
 from .utils.profiling import StageProfiler
 
 
@@ -54,80 +52,22 @@ class _EnvironmentCore:
         needs_torque = any(
             "joint_torque" in fields for fields in self.physical_read_plan.values()
         )
-        self._steel = config.solver_backend == "steel"
-        if self._steel:
-            # Point friction and an updated mass matrix every step avoid hidden
-            # friction-anchor and factorization history in stateless checkpoints.
-            self.model.rigid_contact_max = self.contacts.rigid_contact_max
-            self.sim = newton.solvers.SolverSteel(
-                self.model,
-                iterations=config.steel_iterations,
-                articulation_constraint_max=config.steel_articulation_constraint_max,
-                enable_joint_limits=True,
-                drive_mode="augmented",
-                friction_anchor_beta=0.0,
-                contact_warmstart=False,
-                update_mass_matrix_interval=1,
-                deterministic=wp.DeterministicMode.RUN_TO_RUN
-                if config.deterministic
-                else None,
-            )
-            self.observables = (
-                SimpleNamespace(
-                    qfrc_actuator=wp.zeros(
-                        self.model.joint_dof_count,
-                        dtype=wp.float32,
-                        device=self.model.device,
-                    )
-                )
-                if needs_torque
-                else None
-            )
-            self._solver_reset_defaults = {}
-            self._steel_indices = tuple(
-                wp.from_torch(
-                    torch.cat(
-                        [
-                            getattr(entity, name).reshape(-1)
-                            for entity in self.scene.entities.values()
-                        ]
-                    )
-                    .int()
-                    .contiguous(),
-                    dtype=wp.int32,
-                )
-                for name in ("q", "qd", "targets")
-            )
-        elif config.solver_backend == "mujoco":
-            self.sim = newton.solvers.SolverMuJoCo(
-                self.model,
-                jacobian=config.jacobian,
-                solver=config.solver,
-                integrator=config.integrator,
-                cone=config.cone,
-                impratio=config.impratio,
-                iterations=config.iterations,
-                ls_iterations=config.ls_iterations,
-                nconmax=config.nconmax,
-                njmax=config.njmax,
-                use_mujoco_contacts=False,
-                enable_sleeping=False,
-                deterministic=wp.DeterministicMode.RUN_TO_RUN
-                if config.deterministic
-                else None,
-            )
-            self.observables = (
-                self.sim.observables({self.sim.ObservableKind.QFRC_ACTUATOR})
-                if needs_torque
-                else None
-            )
-            self._solver_reset_defaults = {
-                name: wp.to_torch(array).clone()
-                for name in ("history", "mocap_pos", "mocap_quat")
-                if (array := getattr(self.sim.mjw_data, name)).size
-            }
-        else:
-            raise ValueError(f"Unknown solver backend {config.solver_backend!r}")
+        self._contact_sensors = {
+            name: sensor
+            for name, sensor in self.scene.contact_sensors.items()
+            if name in self.physical_read_plan
+        }
+        for sensor in self._contact_sensors.values():
+            sensor.initialize(self.model, self.scene.terrain_shapes)
+        self._solver = config.solver.build(
+            self.scene,
+            self.contacts,
+            needs_torque,
+            bool(self._contact_sensors),
+            deterministic=config.deterministic,
+        )
+        self.sim = self._solver.solver
+        self.observables = self._solver.observables
         self.state = self.model.state()
         self.state_next = self.model.state()
         self._physics_graphs = {}
@@ -149,38 +89,28 @@ class _EnvironmentCore:
         return nullcontext() if self.profiler is None else self.profiler.stage(name)
 
     def _simulate(self, state, state_next, *, profile=False):
-        for _ in range(self.config.substeps):
+        for substep in range(self.config.substeps):
+            sample_contacts = (
+                bool(self._contact_sensors) and substep == self.config.substeps - 1
+            )
             with self._profile_stage("collision") if profile else nullcontext():
                 state.clear_forces()
                 self.collision.collide(state, self.contacts)
             with self._profile_stage("solver") if profile else nullcontext():
-                self.sim.step(
+                self._solver.step(
                     state,
                     state_next,
                     self.control,
                     self.contacts,
                     self.config.sim_dt,
-                    observables=None if self._steel else self.observables,
+                    sample_contacts=sample_contacts,
                 )
-            if self._steel and self.observables is not None:
-                wp.launch(
-                    reconstruct_augmented_drive_torque,
-                    dim=self._steel_indices[0].size,
-                    inputs=[
-                        *self._steel_indices,
-                        state.joint_q,
-                        state.joint_qd,
-                        state_next.joint_qd,
-                        self.control.joint_target_q,
-                        self.control.joint_target_qd,
-                        self.model.joint_target_ke,
-                        self.model.joint_target_kd,
-                        self.model.joint_effort_limit,
-                        self.config.sim_dt,
-                        self.observables.qfrc_actuator,
-                    ],
-                    device=self.model.device,
-                )
+            if sample_contacts:
+                with (
+                    self._profile_stage("contact_sensor") if profile else nullcontext()
+                ):
+                    for sensor in self._contact_sensors.values():
+                        sensor.update(self.contacts, self._solver.contact_observables)
             state, state_next = state_next, state
         return state, state_next
 
@@ -236,31 +166,15 @@ class _EnvironmentCore:
         next_mdp_state, poses = self.mdp.reset(mdp_state, ids)
         mask = torch.zeros(self.num_envs + 1, dtype=torch.bool, device=self.device)
         mask[:-1][ids] = True
-        self.sim.reset(self.state, world_mask=wp.from_torch(mask, dtype=wp.bool))
-        if self._steel:
-            joint_world = wp.to_torch(self.model.joint_world).long()
-            for name, starts in (
-                ("joint_q", self.model.joint_q_start),
-                ("joint_qd", self.model.joint_qd_start),
-            ):
-                offsets = wp.to_torch(starts).long()
-                worlds = torch.repeat_interleave(
-                    joint_world, offsets[1:] - offsets[:-1]
-                )
-                target = wp.to_torch(getattr(self.state, name))
-                target[mask[worlds]] = wp.to_torch(getattr(self.model, name))[
-                    mask[worlds]
-                ]
-        else:
-            wp.to_torch(self.sim.mjw_data.time)[ids] = 0
+        self._solver.reset(self.state, ids, mask)
         if self.observables is not None:
             joint_world = wp.to_torch(self.model.joint_world).long()
             dof_starts = wp.to_torch(self.model.joint_qd_start).long()
             dof_counts = dof_starts[1:] - dof_starts[:-1]
             dof_world = torch.repeat_interleave(joint_world, dof_counts)
             wp.to_torch(self.observables.qfrc_actuator)[mask[dof_world]] = 0
-        for name, defaults in self._solver_reset_defaults.items():
-            wp.to_torch(getattr(self.sim.mjw_data, name))[ids] = defaults[ids]
+        for sensor in self._contact_sensors.values():
+            sensor.force_view()[ids] = 0
         joint_q = wp.to_torch(self.state.joint_q)
         for name, pose in poses.items():
             entity = self.scene.entities[name]
@@ -363,31 +277,19 @@ class StatelessEnvironment(_EnvironmentCore):
             name: getattr(self.state, name)
             for name in ("joint_q", "joint_qd", "body_q", "body_qd")
         }
-        if not self._steel:
-            arrays.update(
-                {
-                    name: getattr(self.sim.mjw_data, name)
-                    for name in (
-                        "qacc_warmstart",
-                        "act",
-                        "time",
-                        "history",
-                        "mocap_pos",
-                        "mocap_quat",
-                    )
-                    if getattr(self.sim.mjw_data, name).size
-                }
-            )
         if self.observables is not None:
             arrays["qfrc_actuator"] = self.observables.qfrc_actuator
         views = {
             name: wp.to_torch(array).reshape(self.num_envs, -1)
             for name, array in arrays.items()
         }
-        if self._steel:
-            views["constraint_overflow"] = wp.to_torch(self.sim.constraint_overflow)[
-                : self.num_envs
-            ].reshape(self.num_envs, 1)
+        views.update(self._solver.checkpoint_views())
+        views.update(
+            {
+                f"contact_force:{name}": sensor.force_view()
+                for name, sensor in self._contact_sensors.items()
+            }
+        )
         return views
 
     def _snapshot(self):

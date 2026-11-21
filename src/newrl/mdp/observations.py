@@ -198,3 +198,40 @@ class VelocityCommandObservation:
 
 
 velocity_command = VelocityCommandObservation()
+
+
+@dataclass(frozen=True)
+class ContactObservation:
+    """Read a configured contact sensor field as floating-point features."""
+
+    sensor: str
+    _shape: torch.Size | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    field: Literal["loaded", "force_w"] = "loaded"
+
+    @property
+    def physical_fields(self):
+        return frozenset({(self.sensor, self.field)})
+
+    @property
+    def shape(self) -> torch.Size:
+        if self._shape is None:
+            raise RuntimeError(
+                "Bind the contact observation to a scene before reading its shape"
+            )
+        return self._shape
+
+    def _initialize(self, scene):
+        scene.resolve_physical_fields(self.physical_fields)
+        count = scene.contact_sensors[self.sensor].body_ids.shape[1]
+        bound = replace(self)
+        object.__setattr__(
+            bound,
+            "_shape",
+            torch.Size((count, 3) if self.field == "force_w" else (count,)),
+        )
+        return bound
+
+    def __call__(self, physical_state, mdp_state):
+        return physical_state[self.sensor, self.field].float()

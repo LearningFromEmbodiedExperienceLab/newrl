@@ -1,9 +1,9 @@
 The environment defaults to Newton's MuJoCo Warp solver. Set
-`AnymalLocomotion(solver_backend="steel")` to use Newton's Steel solver, or
-run `uv run python scripts/play.py task=anymal_loco_flat task.solver_backend=steel`. Steel uses augmented
+`AnymalLocomotion(solver=SteelSimConfig())` to use Newton's Steel solver, or
+run `uv run python scripts/play.py task=anymal_loco_flat task.solver=steel`. Steel uses augmented
 position drives, point friction and an updated mass matrix each physics step.
 Its iteration count and per-articulation constraint capacity are configurable
-with `steel_iterations` and `steel_articulation_constraint_max`. Newton warns
+with `iterations` and `articulation_constraint_max` in `SteelSimConfig`. Newton warns
 if the constraint capacity is exceeded.
 
 When joint torque is requested, the Steel backend reconstructs the actuator
@@ -22,5 +22,13 @@ after consuming a terminal transition. Use `output_mdp_fields` and
 snapshots. The internal physical read plan also includes fields required by MDP
 terms. The stateless API additionally returns complete simulator and MDP
 checkpoints for replay or branching.
+
+Use `task=anymal_loco_flat_contact` to add privileged foot load flags and a
+horizontal foot slip penalty to ANYmal locomotion. In Python, use
+`AnymalLocomotion(contact_observation=True, foot_slip_weight=0.1)`.
+For diagnostics, request `("feet_ground", "force_w")` or
+`("feet_ground", "loaded")` in `output_physical_fields`. These fields report
+solved terrain force in world coordinates on the final physics substep.
+Immediately after reset, selected worlds report zero force until they step.
 
 See [environment benchmarks](benchmarks/README.md) for reproducible runs and reference results.

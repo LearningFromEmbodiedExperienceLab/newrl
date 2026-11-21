@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from newrl.configs import EnvironmentConfig
 from newrl.robots import newton_anymal_c
+from newrl.solver_adapters import MujocoSimConfig, SteelSimConfig
 from newrl.utils.config import cs, load_config, main, save_config
 from newrl.utils.logging import RunLogger, WandbConfig
 
@@ -35,6 +36,41 @@ class _Holder:
 
 
 class ConfigTests(unittest.TestCase):
+    def test_nested_solver_selection_and_round_trip(self):
+        from newrl.utils.config import resolve
+
+        for overrides in (
+            [
+                "task=anymal_loco_flat",
+                "algo=ppo",
+                "task.solver=steel",
+                "task.solver.iterations=7",
+            ],
+            [
+                "task.solver.iterations=7",
+                "task.solver=steel",
+                "algo=ppo",
+                "task=anymal_loco_flat",
+            ],
+        ):
+            config = resolve(TrainConfig, overrides)
+            self.assertIsInstance(config.task.solver, SteelSimConfig)
+            self.assertEqual(config.task.solver.iterations, 7)
+            self.assertFalse(hasattr(config.task.solver, "jacobian"))
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                save_config(path, config.task)
+                loaded = load_config(path)
+            self.assertEqual(loaded.solver, config.task.solver)
+        default = resolve(TrainConfig, ["task=anymal_loco_flat", "algo=ppo"])
+        self.assertIsInstance(default.task.solver, MujocoSimConfig)
+        self.assertFalse(hasattr(default.task.solver, "articulation_constraint_max"))
+        with self.assertRaises((TypeError, ValueError, KeyError)):
+            resolve(
+                TrainConfig,
+                ["task=anymal_loco_flat", "algo=ppo", "task.solver=missing"],
+            )
+
     @classmethod
     def setUpClass(cls):
         if ("widget", "base") not in cs:
@@ -101,7 +137,10 @@ class ConfigTests(unittest.TestCase):
 
         with self.assertRaises(ValueError) as caught:
             entry(["algo=ppo"])
-        self.assertIn("task (choose from anymal_loco_flat)", str(caught.exception))
+        self.assertIn(
+            "task (choose from anymal_loco_flat, anymal_loco_flat_contact)",
+            str(caught.exception),
+        )
         self.assertFalse(called)
 
     def test_disabled_logger_does_not_open_a_run(self):

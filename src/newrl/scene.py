@@ -7,6 +7,7 @@ import torch
 import warp as wp
 from tensordict import TensorDict
 
+from .contact import TerrainContact
 from .mdp.actions import JointPositionAction
 from .robots import scalar_joints
 from .terrain import TerrainConfig
@@ -91,6 +92,7 @@ class Scene:
         builder.replicate(template, copy_count=config.num_envs)
         builder.default_shape_cfg.ke = config.ground_stiffness
         builder.default_shape_cfg.kd = config.ground_damping
+        terrain_start = builder.shape_count
         if isinstance(config.terrain, TerrainConfig):
             config.terrain.build(builder)
         elif callable(config.terrain):
@@ -102,6 +104,7 @@ class Scene:
                 "terrain must be a TerrainConfig, 'plane', or a Newton builder callback"
             )
 
+        self.terrain_shapes = list(range(terrain_start, builder.shape_count))
         model = self.model = builder.finalize(device=config.device)
         device = wp.device_to_torch(model.device)
         self.spawn_locations = torch.as_tensor(
@@ -140,6 +143,14 @@ class Scene:
                 action=JointPositionAction(scale),
             )
 
+        self.contact_sensors = {}
+        for name, sensor in config.contact_sensors.items():
+            if name in self.entities:
+                raise ValueError(f"Contact sensor name conflicts with entity {name!r}")
+            self.contact_sensors[name] = TerrainContact(
+                sensor, self.entities[sensor.entity]
+            )
+
     def resolve_physical_fields(self, requested):
         """Validate entity fields and group them into a stable per-entity read plan."""
         supported = {
@@ -150,13 +161,17 @@ class Scene:
             "joint_torque",
             "projected_gravity",
         }
+        fields_by_name = {name: tuple(sorted(supported)) for name in self.entities}
+        fields_by_name.update(
+            {name: sensor.fields for name, sensor in self.contact_sensors.items()}
+        )
         if requested is None:
-            return {name: tuple(sorted(supported)) for name in self.entities}
+            return fields_by_name
         plan = {}
         for entity, field in sorted(requested):
-            if entity not in self.entities:
+            if entity not in fields_by_name:
                 raise ValueError(f"Unknown physical entity {entity!r}")
-            if field not in supported:
+            if field not in fields_by_name[entity]:
                 raise ValueError(
                     f"Unknown physical field {field!r} for entity {entity!r}"
                 )
@@ -165,7 +180,11 @@ class Scene:
 
     def read(self, state, plan=None, observables=None) -> TensorDict:
         if plan is None:
-            plan = self.resolve_physical_fields(None)
+            plan = {
+                name: fields
+                for name, fields in self.resolve_physical_fields(None).items()
+                if name in self.entities or self.contact_sensors[name].force is not None
+            }
             if observables is None:
                 plan = {
                     name: tuple(field for field in fields if field != "joint_torque")
@@ -174,6 +193,8 @@ class Scene:
         return TensorDict(
             {
                 name: self.entities[name].read(state, fields, observables)
+                if name in self.entities
+                else self.contact_sensors[name].read(fields)
                 for name, fields in plan.items()
             },
             batch_size=[self.model.world_count],

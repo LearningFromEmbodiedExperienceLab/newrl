@@ -11,8 +11,9 @@ from tensordict import TensorDict
 from newrl.configs import AnymalLocomotion
 from newrl.env import StatefulEnvironment, StatelessEnvironment
 from newrl.mdp.episode_ends import Timeout
+from newrl.solver_adapters import MujocoSimConfig, SteelSimConfig
 from newrl.steel import reconstruct_augmented_drive_torque
-from newrl.terrain import FlatMeshTerrainConfig
+from newrl.terrain import FlatMeshTerrainConfig, PlaneTerrainConfig
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
@@ -100,6 +101,61 @@ class EnvironmentTests(unittest.TestCase):
             device=device,
         )
         torch.testing.assert_close(wp.to_torch(output), expected)
+
+    def test_terrain_contact_sensor_and_slip(self):
+        for backend, terrain in (
+            ("mujoco", PlaneTerrainConfig()),
+            ("steel", FlatMeshTerrainConfig(resolution=4)),
+        ):
+            with self.subTest(backend=backend, terrain=type(terrain).__name__):
+                cfg = AnymalLocomotion(
+                    num_envs=2,
+                    graph_capture=True,
+                    substeps=3,
+                    deterministic=True,
+                    solver=SteelSimConfig()
+                    if backend == "steel"
+                    else MujocoSimConfig(),
+                    terrain=terrain,
+                    contact_observation=True,
+                    foot_slip_weight=0.5,
+                    output_physical_fields=(
+                        ("feet_ground", "force_w"),
+                        ("feet_ground", "loaded"),
+                    ),
+                )
+                env = StatelessEnvironment(cfg)
+                sim, mdp, first = env.reset()
+                self.assertFalse(first["physical_state", "feet_ground", "loaded"].any())
+                action = torch.zeros(2, env.action_dim, device=env.device)
+                inputs = TensorDict({"action": action}, batch_size=[2])
+                for _ in range(30):
+                    sim, mdp, transition = env.step(sim, mdp, inputs)
+                force = transition["physical_state", "feet_ground", "force_w"]
+                loaded = transition["physical_state", "feet_ground", "loaded"]
+                self.assertEqual(force.shape, (2, 4, 3))
+                self.assertTrue(loaded.any(dim=-1).all())
+                self.assertTrue((force[..., 2][loaded] > 0).all())
+                privileged = transition["observation", "privileged"]
+                torch.testing.assert_close(privileged[:, -4:], loaded.float())
+                feet_xy = privileged[:, -16:-4].reshape(2, 4, 3)[..., :2]
+                torch.testing.assert_close(
+                    transition["reward_terms", "regularization", "foot_slip"],
+                    -0.5 * (feet_xy.square().sum(-1) * loaded).sum(-1, keepdim=True),
+                )
+                next_sim, next_mdp, expected = env.step(sim, mdp, inputs)
+                env.step(next_sim, next_mdp, inputs)
+                _, _, replay = env.step(sim, mdp, inputs)
+                torch.testing.assert_close(
+                    replay["physical_state", "feet_ground", "force_w"],
+                    expected["physical_state", "feet_ground", "force_w"],
+                    atol=2e-3,
+                    rtol=2e-3,
+                )
+                _, _, reset = env.reset(sim, mdp, env_ids=torch.tensor([0]))
+                reset_force = reset["physical_state", "feet_ground", "force_w"]
+                torch.testing.assert_close(reset_force[0], torch.zeros_like(force[0]))
+                torch.testing.assert_close(reset_force[1], force[1], atol=0, rtol=0)
 
     def test_scene_projected_gravity(self):
         env = StatefulEnvironment(AnymalLocomotion(num_envs=2))
@@ -209,7 +265,7 @@ class EnvironmentTests(unittest.TestCase):
             graph_capture=graph_capture,
             substeps=substeps,
             deterministic=True,
-            solver_backend=solver_backend,
+            solver=SteelSimConfig() if solver_backend == "steel" else MujocoSimConfig(),
         )
         cfg.mdp = replace(cfg.mdp, hold_steps=4)
         cfg.mdp.truncations["timeout"] = Timeout(18)
@@ -286,7 +342,7 @@ class EnvironmentTests(unittest.TestCase):
             num_envs=2,
             substeps=3,
             graph_capture=True,
-            solver_backend=backend,
+            solver=SteelSimConfig() if backend == "steel" else MujocoSimConfig(),
             output_physical_fields=(("robot", "joint_pos"),),
             output_mdp_fields=("velocity_command",),
         )

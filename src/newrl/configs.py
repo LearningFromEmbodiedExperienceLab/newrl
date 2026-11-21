@@ -5,20 +5,30 @@ from dataclasses import dataclass, field
 
 import newton
 
+from .contact import TerrainContactConfig
 from .mdp.base import MDP, ObservationGroup, RewardGroup
 from .mdp.episode_ends import HeightTermination, TiltTermination, Timeout
 from .mdp.observations import (
     BodyAngularVelocity,
     BodyHeight,
     BodyLinearVelocity,
+    ContactObservation,
     EntityField,
     ProjectedGravity,
     previous_action,
     velocity_command,
 )
-from .mdp.rewards import ActionRate, JointAcc2, JointEnergy1, JointVel2, TrackVelocity
+from .mdp.rewards import (
+    ActionRate,
+    FootSlip,
+    JointAcc2,
+    JointEnergy1,
+    JointVel2,
+    TrackVelocity,
+)
 from .mdp.velocity import VelocityMDP
 from .robots import RobotConfig, assetx_as2, assetx_spot, newton_anymal_c
+from .solver_adapters import MujocoSimConfig, SteelSimConfig
 from .terrain import PlaneTerrainConfig, TerrainConfig
 
 
@@ -28,18 +38,7 @@ class EnvironmentConfig:
     device: str = "cuda:0"
     sim_dt: float = 0.005
     substeps: int = 4
-    jacobian: str = "sparse"
-    solver_backend: str = "mujoco"
-    steel_iterations: int = 12
-    steel_articulation_constraint_max: int = 128
-    solver: str = "newton"
-    integrator: str = "implicitfast"
-    cone: str = "elliptic"
-    impratio: float = 100.0
-    iterations: int = 20
-    ls_iterations: int = 40
-    nconmax: int = 80
-    njmax: int = 100
+    solver: MujocoSimConfig | SteelSimConfig = field(default_factory=MujocoSimConfig)
     ground_stiffness: float = 1.0e3
     ground_damping: float = 1.0e2
     graph_capture: bool = False
@@ -52,6 +51,7 @@ class EnvironmentConfig:
     physical_fields: tuple[tuple[str, str], ...] = ()
     output_physical_fields: tuple[tuple[str, str], ...] = ()
     output_mdp_fields: tuple[str, ...] = ()
+    contact_sensors: dict[str, TerrainContactConfig] = field(default_factory=dict)
 
 
 def locomotion_mdp(mdp_type: type[MDP] = MDP) -> MDP:
@@ -79,7 +79,10 @@ def locomotion_mdp(mdp_type: type[MDP] = MDP) -> MDP:
     )
 
 
-def AnymalLocomotion(**overrides) -> EnvironmentConfig:
+def AnymalLocomotion(
+    *, contact_observation: bool = False, foot_slip_weight: float = 0.0, **overrides
+) -> EnvironmentConfig:
+    feet = r"(LF|LH|RF|RH)_FOOT"
     mdp = locomotion_mdp(VelocityMDP)
     mdp.observations["command"] = ObservationGroup(
         {"velocity_command": velocity_command}
@@ -87,7 +90,12 @@ def AnymalLocomotion(**overrides) -> EnvironmentConfig:
     mdp.observations["privileged"] = ObservationGroup(
         {
             **mdp.observations["privileged"].terms,
-            "feet_lin_vel_w": BodyLinearVelocity("robot", r"(LF|LH|RF|RH)_FOOT"),
+            "feet_lin_vel_w": BodyLinearVelocity("robot", feet),
+            **(
+                {"feet_loaded": ContactObservation("feet_ground")}
+                if contact_observation
+                else {}
+            ),
         }
     )
     mdp.rewards = {
@@ -113,6 +121,11 @@ def AnymalLocomotion(**overrides) -> EnvironmentConfig:
                 "joint_energy1": JointEnergy1(weight=0.01),
                 "joint_acc2": JointAcc2(weight=0.00001),
                 "joint_vel2": JointVel2(weight=0.01),
+                **(
+                    {"foot_slip": FootSlip("feet_ground", foot_slip_weight)}
+                    if foot_slip_weight
+                    else {}
+                ),
             }
         ),
     }
@@ -120,7 +133,11 @@ def AnymalLocomotion(**overrides) -> EnvironmentConfig:
         "height": HeightTermination(BodyHeight("robot", "base")),
         "tilt": TiltTermination(ProjectedGravity("robot", "base")),
     }
-    defaults = {"robots": {"robot": newton_anymal_c}, "mdp": mdp}
+    defaults = {
+        "robots": {"robot": newton_anymal_c},
+        "mdp": mdp,
+        "contact_sensors": {"feet_ground": TerrainContactConfig("robot", feet)},
+    }
     return EnvironmentConfig(**(defaults | overrides))
 
 
@@ -134,6 +151,12 @@ def AS2Locomotion(**overrides) -> EnvironmentConfig:
     return EnvironmentConfig(**(defaults | overrides))
 
 
-from newrl.utils.config import cs  # noqa: E402
+from newrl.utils.config import cs
 
 cs.store("anymal_loco_flat", AnymalLocomotion(num_envs=64), group="task")
+
+cs.store(
+    "anymal_loco_flat_contact",
+    AnymalLocomotion(num_envs=64, contact_observation=True, foot_slip_weight=0.1),
+    group="task",
+)
