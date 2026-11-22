@@ -1,4 +1,4 @@
-"""Train a clipped PPO policy on a NewRL environment."""
+"""Train an on-policy learner on a NewRL environment."""
 
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -9,6 +9,7 @@ from time import perf_counter
 import torch
 from tensordict import TensorDict
 
+from newrl.algos.genpo import GenPO, GenPOConfig
 from newrl.algos.ppo import PPO, PPOConfig
 from newrl.algos.rollout import collect_rollout
 from newrl.configs import EnvironmentConfig
@@ -23,7 +24,7 @@ TRAIN_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs_train"
 @dataclass
 class TrainConfig:
     task: EnvironmentConfig
-    algo: PPOConfig
+    algo: PPOConfig | GenPOConfig
     seed: int = 0
     iterations: int = 2000
     logger: WandbConfig = field(default_factory=WandbConfig)
@@ -67,7 +68,7 @@ def _make_logger(cfg: TrainConfig, *, run_id: str | None = None) -> RunLogger:
 
 
 def _save_checkpoint(
-    directory: Path, policy: PPO, cfg: TrainConfig, iteration: int, frames: int
+    directory: Path, policy: PPO | GenPO, cfg: TrainConfig, iteration: int, frames: int
 ) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / f"checkpoint_{iteration:06d}.pt"
@@ -158,7 +159,8 @@ def main(cfg: TrainConfig) -> None:
     torch.manual_seed(cfg.seed)
     cfg.task.mdp.seed = cfg.seed
     env = StatefulEnvironment(cfg.task)
-    policy = PPO(
+    learner = GenPO if isinstance(cfg.algo, GenPOConfig) else PPO
+    policy = learner(
         cfg.algo,
         policy_dim=_group_width(env.mdp, cfg.algo.policy_obs_keys),
         critic_dim=_group_width(env.mdp, cfg.algo.critic_obs_keys),
@@ -193,6 +195,7 @@ def main(cfg: TrainConfig) -> None:
             completed = iteration + 1
             if checkpoint_dir is not None and completed % cfg.checkpoint_interval == 0:
                 path = _save_checkpoint(checkpoint_dir, policy, cfg, completed, frames)
+                logger.save_checkpoint(path)
                 print(f"Saved checkpoint {path}", flush=True)
     finally:
         logger.finish()

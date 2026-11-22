@@ -2,6 +2,7 @@
 
 import io
 import unittest
+from unittest.mock import patch
 
 import torch
 from tensordict import TensorDict
@@ -10,7 +11,7 @@ from newrl.algos.common.modules import NormalActor
 from newrl.algos.common.normalization import EmpiricalNormalization, ReturnNormalization
 from newrl.algos.common.optimizer import MuonAdamW
 from newrl.algos.common.policy_evaluation import generalized_advantage
-from newrl.algos.ppo import PPO, PPOConfig, _aggregate_reward
+from newrl.algos.ppo import PPO, PPOConfig
 from newrl.algos.rollout import collect_rollout
 
 
@@ -203,32 +204,20 @@ class PPOTests(unittest.TestCase):
             action_dim=2,
         )
         batch = _random_batch(num_envs=4, steps=4, policy_dim=3, action_dim=2)
-        raw = _aggregate_reward(batch)
         expected = batch["reward", "tracking"].sum(-1, keepdim=True)
         expected = expected + batch["reward", "regularization"]
-        torch.testing.assert_close(raw, expected)
-        scaled = policy._scaled_reward(raw, batch["done"])
-        torch.testing.assert_close(scaled, expected.clamp_min(0) * 0.5)
         policy.critic.head.weight.data.zero_()
         policy.critic.head.bias.data.zero_()
         with torch.no_grad():
             value = policy.critic(batch["critic_observation"])
-            next_value = policy.critic(batch["next_critic_observation"])
         self.assertTrue(torch.allclose(value, torch.zeros_like(value)))
-        advantage, _ = generalized_advantage(
-            scaled,
-            batch["terminated"],
-            batch["done"],
-            value,
-            next_value,
-            gamma=0.5,
-            lam=1.0,
-        )
-        self.assertEqual(tuple(advantage.shape), (4, 4, 1))
-
         before = policy.policy_norm.count.clone()
         actor_before = policy.actor.mean.weight.detach().clone()
-        metrics = policy.train_op(batch)
+        with patch(
+            "newrl.algos.ppo.generalized_advantage", wraps=generalized_advantage
+        ) as gae:
+            metrics = policy.train_op(batch)
+        torch.testing.assert_close(gae.call_args.args[0], expected.clamp_min(0) * 0.5)
         self.assertTrue(torch.equal(policy.policy_norm.count, before))
         self.assertGreater(float(policy.critic_norm.count), 0.0)
         self.assertFalse(torch.equal(policy.actor.mean.weight, actor_before))
@@ -236,7 +225,9 @@ class PPOTests(unittest.TestCase):
             all(torch.isfinite(torch.tensor(value)) for value in metrics.values())
         )
         self.assertIn("actor/policy_loss", metrics)
-        self.assertEqual(metrics["critic/neg_rew_ratio"], float((raw <= 0).float().mean()))
+        self.assertEqual(
+            metrics["critic/neg_rew_ratio"], float((expected <= 0).float().mean())
+        )
 
     def test_std_stays_inside_its_bounds(self):
         actor = NormalActor(4, 3, hidden=(8,), min_std=0.05, max_std=0.4)

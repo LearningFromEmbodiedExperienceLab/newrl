@@ -46,3 +46,17 @@ def generalized_advantage(
         advantage = delta + discount * trace_decay * not_done[:, step] * advantage
         advantages[:, step] = advantage
     return advantages, advantages + value
+
+
+def clip_bounds(clip_eps: float | tuple[float, float]) -> tuple[float, float]:
+    if isinstance(clip_eps, (int, float)):
+        lower = upper = float(clip_eps)
+    else:
+        if len(clip_eps) != 2:
+            raise ValueError(f"clip_eps must be a scalar or a pair, got {clip_eps!r}")
+        lower, upper = float(clip_eps[0]), float(clip_eps[1])
+    if lower < 0.0 or upper < 0.0:
+        raise ValueError(
+            f"clip_eps values must be non-negative, got {(lower, upper)!r}"
+        )
+    return lower, upper

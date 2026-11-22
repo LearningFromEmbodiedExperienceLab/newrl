@@ -2,8 +2,19 @@
 
 NewRL is a batched robot-learning environment built on Newton, MuJoCo Warp,
 and PyTorch. Newton builds and replicates the scene and provides entity I/O.
-The runnable task is ANYmal C velocity tracking. Spot and AS2 asset factories
-and the PPO implementation are still stubs.
+The locomotion tasks use velocity tracking. The on-policy learners are Gaussian
+PPO and GenPO++.
+
+## Algorithm implementation
+
+- Prefer simple, self-contained implementations. Keep each algorithm, its
+  configuration, and its algorithm-specific update logic together in one file.
+- Keep learners and their configs independent. Use shared primitives such as
+  batch utilities, GAE, and optimizers directly instead of inheriting from
+  another algorithm or introducing a learner base class.
+- Keep single-use logic at its call site. Extract a method when it gives a
+  substantial operation a clear boundary or makes that operation independently
+  testable.
 
 ## Environment lifecycle
 

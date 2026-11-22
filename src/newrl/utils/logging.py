@@ -20,7 +20,7 @@ class WandbConfig:
 
 
 class RunLogger:
-    """Log scalar metrics when enabled. A disabled logger does not contact wandb."""
+    """Log training metrics and checkpoints to W&B when enabled."""
 
     def __init__(
         self,
@@ -50,6 +50,10 @@ class RunLogger:
     def log(self, metrics: dict[str, float], step: int) -> None:
         if self._run is not None:
             self._run.log(metrics, step=step)
+
+    def save_checkpoint(self, path: Path) -> None:
+        if self._run is not None:
+            self._run.save(path, base_path=path.parent, policy="now", glob=False)
 
     def finish(self) -> None:
         if self._run is not None:

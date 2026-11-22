@@ -52,8 +52,35 @@ groups them by task in W&B, and stores logs under the repository's
 `outputs_train/<task>/wandb/` directory. Use `logger.name` or `logger.group`
 to override the W&B display name or group.
 
-The trainer saves a local PPO checkpoint every 250 completed updates under
+The trainer saves a local checkpoint every 250 completed updates under
 `outputs_train/<task>/checkpoints/<run-id>/`. Set `checkpoint_interval=<updates>`
 to change the cadence or `checkpoint_interval=0` to disable saves.
+
+Select Gaussian PPO with `algo=ppo` or the GenPO++ flow policy with
+`algo=genpo`. GenPO adapts the actor learning rate toward `algo.desired_kl`
+using augmented KL.
+
+Play a trained PPO or GenPO++ policy with the task saved in its checkpoint.
+
+```sh
+uv run python scripts/play.py checkpoint=path/to/checkpoint.pt
+```
+
+Playback defaults to four worlds and deterministic actions. Use `num_envs=1`
+for a single world, `deterministic=false` to sample actions, or
+`viewer=false steps=100` for a headless run.
+
+With online W&B logging enabled (`logger.enabled=true`), the trainer queues
+each checkpoint for upload as soon as it is saved. On another machine with
+access to the run, pull the latest uploaded checkpoint at playback startup.
+
+```sh
+uv run python scripts/play.py algo=ppo "checkpoint=run:$wandb_run_path"
+```
+
+Set `wandb_run_path` to `entity/project/run_id`. Append `:250` to pin
+checkpoint 250. You can omit `algo` to infer it from the checkpoint. Playback
+checks W&B on each launch and reuses downloaded files from
+`.cache/wandb-checkpoints/`.
 
 See [environment benchmarks](benchmarks/README.md) for reproducible runs and reference results.

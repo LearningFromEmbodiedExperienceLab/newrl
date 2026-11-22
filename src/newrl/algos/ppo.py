@@ -19,13 +19,15 @@ from .common.batch import (
     DONE,
     NEXT_CRITIC_OBSERVATION,
     POLICY_OBSERVATION,
-    REWARD,
     TERMINATED,
+    aggregate_reward,
+    minibatches,
+    stack_groups,
 )
 from .common.modules import NormalActor, Value
 from .common.normalization import EmpiricalNormalization, ReturnNormalization
 from .common.optimizer import make_optimizer
-from .common.policy_evaluation import generalized_advantage
+from .common.policy_evaluation import clip_bounds, generalized_advantage
 from newrl.utils.config import cs  # noqa: E402
 from newrl.utils.profiling import StageProfiler
 
@@ -78,29 +80,8 @@ class PPOConfig:
         clip_bounds(self.clip_eps)
 
 
-def stack_groups(observation: TensorDict, groups: tuple[str, ...]) -> torch.Tensor:
-    """Concatenate observation groups in the given order."""
-    missing = [name for name in groups if name not in observation]
-    if missing:
-        raise KeyError(f"Observation is missing groups {missing}")
-    return torch.cat([observation[name] for name in groups], dim=-1)
-
-
-def clip_bounds(clip_eps: float | tuple[float, float]) -> tuple[float, float]:
-    if isinstance(clip_eps, (int, float)):
-        lower = upper = float(clip_eps)
-    else:
-        if len(clip_eps) != 2:
-            raise ValueError(f"clip_eps must be a scalar or a pair, got {clip_eps!r}")
-        lower, upper = float(clip_eps[0]), float(clip_eps[1])
-    if lower < 0.0 or upper < 0.0:
-        raise ValueError(
-            f"clip_eps values must be non-negative, got {(lower, upper)!r}"
-        )
-    return lower, upper
-
-
 cs.store("ppo", PPOConfig(), group="algo")
+
 
 class PPO(nn.Module):
     def __init__(
@@ -188,8 +169,12 @@ class PPO(nn.Module):
                 )
         batch = batch.to(self.device)
         profiler = StageProfiler(self.device) if self.cfg.profile else None
-        raw_reward = _aggregate_reward(batch)
-        reward = self._scaled_reward(raw_reward, batch[DONE])
+        raw_reward = aggregate_reward(batch)
+        reward = raw_reward.clamp_min(0.0) if self.cfg.clamp_reward else raw_reward
+        if self.cfg.normalize_reward:
+            self.return_norm.update(reward, batch[DONE])
+            reward = reward / self.return_norm.scale()
+        reward = reward * (1.0 - self.cfg.gamma)
         self.critic_norm.update(
             torch.cat(
                 [batch[CRITIC_OBSERVATION], batch[NEXT_CRITIC_OBSERVATION]], dim=1
@@ -229,10 +214,13 @@ class PPO(nn.Module):
             for _ in range(self.cfg.num_epochs):
                 last_epoch = [
                     self._update(minibatch, profiler=profiler)
-                    for minibatch in _minibatches(training, self.cfg.num_minibatches)
+                    for minibatch in minibatches(training, self.cfg.num_minibatches)
                 ]
 
-        metrics = _average(last_epoch)
+        metrics = {
+            key: sum(info[key] for info in last_epoch) / len(last_epoch)
+            for key in last_epoch[0]
+        }
         metrics["critic/neg_rew_ratio"] = float((raw_reward <= 0).float().mean())
         metrics["actor/lr"] = self.optimizer.param_groups[0]["lr"]
         metrics["critic/adv_mean"] = float(advantage_mean)
@@ -256,20 +244,6 @@ class PPO(nn.Module):
                 if self.device.type == "cuda":
                     metrics[f"{prefix}/stream_ms"] = stream_ms
         return dict(sorted(metrics.items()))
-
-    def _scaled_reward(self, reward: torch.Tensor, done: torch.Tensor) -> torch.Tensor:
-        """Return rewards ready for GAE.
-
-        Optional return normalization is applied to the raw reward. The factor
-        ``(1 - gamma)`` is applied after that, once per call. Calling this with
-        return normalization enabled advances the return statistics.
-        """
-        if self.cfg.clamp_reward:
-            reward = reward.clamp_min(0.0)
-        if self.cfg.normalize_reward:
-            self.return_norm.update(reward, done)
-            reward = reward / self.return_norm.scale()
-        return reward * (1.0 - self.cfg.gamma)
 
     def _update(
         self, batch: TensorDict, *, profiler: StageProfiler | None = None
@@ -321,41 +295,3 @@ class PPO(nn.Module):
                 "critic/value_mean": float(value.mean().detach()),
                 "critic/grad_norm": float(critic_grad),
             }
-
-
-def _aggregate_reward(batch: TensorDict) -> torch.Tensor:
-    groups = batch[REWARD]
-    scalar_shape = (*batch.batch_size, 1)
-    if isinstance(groups, torch.Tensor):
-        if groups.shape != scalar_shape:
-            raise ValueError(
-                f"Expected reward shape {scalar_shape}, got {tuple(groups.shape)}"
-            )
-        return groups
-    parts = []
-    for name, values in groups.items():
-        if values.ndim != batch.ndim + 1 or values.shape[:-1] != batch.batch_size:
-            raise ValueError(f"Expected one reward feature dimension for group {name!r}")
-        parts.append(values)
-    if not parts:
-        return batch[DONE].new_zeros(scalar_shape, dtype=torch.float32)
-    return torch.cat(parts, dim=-1).sum(dim=-1, keepdim=True)
-
-
-def _minibatches(batch: TensorDict, num_minibatches: int):
-    flat = batch.reshape(-1)
-    usable = (flat.shape[0] // num_minibatches) * num_minibatches
-    if usable == 0:
-        raise ValueError(
-            f"Batch of {flat.shape[0]} transitions is smaller than num_minibatches={num_minibatches}"
-        )
-    permutation = torch.randperm(usable, device=flat.device).reshape(
-        num_minibatches, -1
-    )
-    for index in permutation:
-        yield flat[index]
-
-
-def _average(infos: list[dict[str, float]]) -> dict[str, float]:
-    keys = infos[0]
-    return {key: sum(info[key] for info in infos) / len(infos) for key in keys}

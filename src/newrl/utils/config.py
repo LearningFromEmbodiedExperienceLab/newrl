@@ -129,8 +129,17 @@ def resolve(config_cls: type, argv: Sequence[str]) -> Any:
         if "." in key:
             continue
         hint = hints.get(key)
-        if hint is not None and dataclasses.is_dataclass(hint) and (key, raw) in cs:
-            selected[key] = cs.get(key, raw)
+        options = (hint,)
+        if get_origin(hint) in (Union, types.UnionType):
+            options = get_args(hint)
+        candidates = tuple(
+            option for option in options if dataclasses.is_dataclass(option)
+        )
+        if candidates and (key, raw) in cs:
+            preset = cs.get(key, raw)
+            if not isinstance(preset, candidates):
+                raise TypeError(f"Preset {key}={raw} is incompatible with {hint}")
+            selected[key] = preset
             consumed.add(key)
     missing = [
         field.name
