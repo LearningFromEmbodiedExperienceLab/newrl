@@ -195,6 +195,6 @@ def _quadruped_locomotion(
 
 from newrl.utils.config import cs
 
-cs.store("anymal_loco_flat", AnymalLocomotion(num_envs=64), group="task")
-cs.store("spot_loco_flat", SpotLocomotion(num_envs=64), group="task")
-cs.store("as2_loco_flat", AS2Locomotion(num_envs=64), group="task")
+cs.store("anymal_loco_flat", AnymalLocomotion(num_envs=2048), group="task")
+cs.store("spot_loco_flat", SpotLocomotion(num_envs=2048), group="task")
+cs.store("as2_loco_flat", AS2Locomotion(num_envs=2048), group="task")

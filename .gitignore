@@ -12,6 +12,9 @@ wheels/
 # Local benchmark run history
 /benchmark-results/
 
+# Cooked robot bundles and other local caches
+/.cache/
+
 # Local UI settings and dependency lockfile
 /imgui.ini
 /uv.lock

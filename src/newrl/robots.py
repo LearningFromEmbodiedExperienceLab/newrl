@@ -9,6 +9,7 @@ import newton
 import warp as wp
 import yaml
 
+from .assets import cooked_robot, cooked_usd
 from .utils.string import resolve_scene_names
 
 ValueSpec = float | dict[str, float]
@@ -71,9 +72,7 @@ class RobotConfig:
         builder.default_shape_cfg.kf = self.contact_friction_stiffness
         builder.default_shape_cfg.mu = self.contact_friction
         if not self.asset.is_file():
-            raise FileNotFoundError(
-                f"Missing robot asset {self.asset}. Set ROBOT_MODEL_DIR or cook the bundle."
-            )
+            raise FileNotFoundError(f"Missing robot asset {self.asset}")
         builder.add_usd(
             str(self.asset),
             xform=wp.transform(wp.vec3(*self.position), wp.quat_identity()),
@@ -174,19 +173,13 @@ def scalar_joints(builder):
 
 
 def robot_model_dir() -> Path:
-    """Directory of cooked robot bundles.
+    """Cooked robot bundles for this repository.
 
-    ``ROBOT_MODEL_DIR`` wins. Otherwise use the active-adaptation asset cache
-    next to this repository.
+    ``ROBOT_MODEL_DIR`` overrides the default ``<repo>/.cache/robots``.
     """
     if env := os.environ.get("ROBOT_MODEL_DIR"):
         return Path(env)
-    return (
-        Path(__file__).resolve().parents[3]
-        / "active-adaptation"
-        / ".cache"
-        / "aa-robot-models"
-    )
+    return Path(__file__).resolve().parents[2] / ".cache" / "robots"
 
 
 def newton_anymal_c() -> RobotConfig:
@@ -205,9 +198,10 @@ def newton_anymal_c() -> RobotConfig:
 
 
 def assetx_spot() -> RobotConfig:
-    # Gains and pose match active-adaptation's Spot implicit actuators.
+    # Gains and pose match the usual Spot implicit actuators.
+    bundle = cooked_robot("spot", robot_model_dir())
     return RobotConfig(
-        asset=robot_model_dir() / "spot" / "usd" / "spot.usdc",
+        asset=cooked_usd(bundle),
         position=(0.0, 0.0, 0.60),
         joint_position={".*_hx": 0.0, ".*_hy": 1.04, ".*_kn": -1.8},
         actuators=(
@@ -235,9 +229,10 @@ def assetx_spot() -> RobotConfig:
 
 
 def assetx_as2() -> RobotConfig:
-    # Gains and pose match active-adaptation's AS2 implicit actuators.
+    # Gains and pose match the usual AS2 implicit actuators.
+    bundle = cooked_robot("as2", robot_model_dir())
     return RobotConfig(
-        asset=robot_model_dir() / "as2" / "usd" / "as2.usdc",
+        asset=cooked_usd(bundle),
         position=(0.0, 0.0, 0.5),
         joint_position={
             ".*L_hip_joint": 0.1,

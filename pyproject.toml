@@ -16,8 +16,10 @@ dependencies = [
     "torch>=2.15.0",
     "tqdm>=4.70.1",
     "wandb>=0.31.2",
+    "assetx",
 ]
 
 [tool.uv.sources]
 newton = { path = "../newton", editable = true }
+assetx = { git = "https://github.com/btx0424/assetx.git", branch = "main" }
 
