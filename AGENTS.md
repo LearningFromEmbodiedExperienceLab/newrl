@@ -18,6 +18,17 @@ PPO and GenPO++.
   substantial operation a clear boundary or makes that operation independently
   testable.
 
+## Research projects
+
+- Keep project dependencies and package sources in the project repository.
+  Resolve them in that project's environment and keep `uv.lock` out of
+  version control so machines can use different package indexes.
+- Register project presets through a `newrl.projects` entry point with a
+  `register(store, project)` callback. Use the project name as the preset
+  namespace, such as `task=foo_project:AnymalLocoFlat`.
+- Projects own custom training and playback scripts. Use NewRL's built-in
+  commands when they fit the experiment.
+
 ## Environment lifecycle
 
 **The environment never auto-resets.** The outer loop consumes terminal

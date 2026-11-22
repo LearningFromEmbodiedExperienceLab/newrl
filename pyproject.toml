@@ -23,6 +23,9 @@ dependencies = [
     "assetx",
 ]
 
+[project.scripts]
+newrl = "newrl.cli:main"
+
 [tool.uv.sources]
 newton = { path = "../newton", editable = true }
 assetx = { git = "https://github.com/btx0424/assetx.git", branch = "main" }

@@ -5,10 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from newrl.commands.play import PlayConfig
 from newrl.utils.config import resolve
 from newrl.utils.logging import RunLogger, WandbConfig
 from newrl.utils.wandb import resolve_checkpoint
-from scripts.play import PlayConfig
 
 
 class WandbCheckpointTests(unittest.TestCase):

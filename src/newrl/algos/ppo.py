@@ -1,7 +1,6 @@
 """Clipped PPO over a collected rollout.
 
-The batch schema lives in ``algos.common.batch``. This module does not step
-the environment; ``scripts/train_onpolicy.py`` owns collection.
+The batch schema lives in ``algos.common.batch``. The trainer owns collection.
 """
 
 from contextlib import nullcontext

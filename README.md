@@ -48,9 +48,9 @@ air-time tracking.
 
 Enable W&B with `logger.enabled=true`, or add `logger.mode=offline` to
 record locally. The trainer names runs `<run-id>-<task>-<algo>-<UTC timestamp>`,
-groups them by task in W&B, and stores logs under the repository's
-`outputs_train/<task>/wandb/` directory. Use `logger.name` or `logger.group`
-to override the W&B display name or group.
+groups them by task in W&B, and stores logs under `outputs_train/<task>/wandb/`
+relative to the working directory. Use `logger.name` or `logger.group` to
+override the W&B display name or group.
 
 The trainer saves a local checkpoint every 250 completed updates under
 `outputs_train/<task>/checkpoints/<run-id>/`. Set `checkpoint_interval=<updates>`
@@ -82,5 +82,37 @@ Set `wandb_run_path` to `entity/project/run_id`. Append `:250` to pin
 checkpoint 250. You can omit `algo` to infer it from the checkpoint. Playback
 checks W&B on each launch and reuses downloaded files from
 `.cache/wandb-checkpoints/`.
+
+## Research projects
+
+Install NewRL in your current environment to expose the `newrl` command.
+From an existing NewRL development environment, refresh the entry point
+with `uv pip install --no-deps -e .`.
+
+```sh
+newrl project create foo_project
+```
+
+From the NewRL checkout root this creates a sibling project. Elsewhere it
+creates a project under the current directory. Use `--dir` to choose its
+parent directory.
+
+Follow the generated README to create the project's own environment and
+install the package. Each project chooses its dependency sources and indexes
+and can use `uv pip install` without a lockfile. NewRL's train and play
+commands discover presets from projects installed in the active environment
+through the `newrl.projects` entry-point group.
+
+```sh
+.venv/bin/newrl train task=foo_project:AnymalLocoFlat algo=ppo
+```
+
+Run the commands from the project directory to keep outputs and downloads
+there. Projects can provide their own training and playback scripts when the
+built-in commands don't fit their workflow.
+
+For zsh completion, activate the environment whose presets you want to see
+and run `scripts/install_zsh_completion.sh` from the NewRL checkout. Re-run
+it after installing a project or changing its presets.
 
 See [environment benchmarks](benchmarks/README.md) for reproducible runs and reference results.

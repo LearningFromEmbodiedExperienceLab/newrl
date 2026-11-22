@@ -1,6 +1,5 @@
 """CLI resolution and tagged JSON round trips for dataclass configs."""
 
-import importlib.util
 import tempfile
 import unittest
 from collections.abc import Callable
@@ -9,19 +8,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from newrl.algos.interfaces import OnPolicyConfig
+from newrl.commands import train as _module
+from newrl.commands.train import TrainConfig
 from newrl.configs import EnvironmentConfig
 from newrl.robots import newton_anymal_c
 from newrl.solver_adapters import MujocoSimConfig, SteelSimConfig
 from newrl.utils.config import cs, load_config, main, save_config
 from newrl.utils.logging import RunLogger, WandbConfig
-
-_SCRIPT = Path(__file__).parents[1] / "scripts" / "train_onpolicy.py"
-_train = importlib.util.spec_from_file_location("train_onpolicy", _SCRIPT)
-assert _train is not None and _train.loader is not None
-_module = importlib.util.module_from_spec(_train)
-_train.loader.exec_module(_module)
-TrainConfig = _module.TrainConfig
-
 
 @dataclass
 class _Widget:
