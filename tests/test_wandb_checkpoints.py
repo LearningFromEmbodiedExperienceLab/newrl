@@ -14,7 +14,7 @@ from scripts.play import PlayConfig
 class WandbCheckpointTests(unittest.TestCase):
     def test_play_resolves_algo_before_checkpoint(self):
         cfg = resolve(PlayConfig, ["algo=ppo", "checkpoint=run:entity/project/run_id"])
-        self.assertEqual(cfg.algo, "ppo")
+        self.assertEqual(cfg.algo.algo_id, "ppo")
         self.assertEqual(cfg.checkpoint, "run:entity/project/run_id")
 
     def test_latest_is_rechecked_and_pinned_checkpoint_is_cached(self):

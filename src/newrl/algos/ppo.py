@@ -6,6 +6,7 @@ the environment; ``scripts/train_onpolicy.py`` owns collection.
 
 from contextlib import nullcontext
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 from tensordict import TensorDict
@@ -21,6 +22,7 @@ from .common.batch import (
     POLICY_OBSERVATION,
     TERMINATED,
     aggregate_reward,
+    group_width,
     minibatches,
     stack_groups,
 )
@@ -41,6 +43,7 @@ _ACTIVATIONS = {
 
 @dataclass
 class PPOConfig:
+    algo_id: ClassVar[str] = "ppo"
     name: str = "ppo"
     update_every: int = 32
     num_epochs: int = 2
@@ -79,8 +82,16 @@ class PPOConfig:
             )
         clip_bounds(self.clip_eps)
 
+    def build(self, env) -> "PPO":
+        return PPO(
+            self,
+            policy_dim=group_width(env.mdp, self.policy_obs_keys),
+            critic_dim=group_width(env.mdp, self.critic_obs_keys),
+            action_dim=env.action_dim,
+        ).to(env.device)
 
-cs.store("ppo", PPOConfig(), group="algo")
+
+cs.store(PPOConfig.algo_id, PPOConfig(), group="algo")
 
 
 class PPO(nn.Module):

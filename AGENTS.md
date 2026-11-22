@@ -12,6 +12,8 @@ PPO and GenPO++.
 - Keep learners and their configs independent. Use shared primitives such as
   batch utilities, GAE, and optimizers directly instead of inheriting from
   another algorithm or introducing a learner base class.
+- Give each on-policy config a stable `algo_id` and a `build(env)` method.
+  Register its preset under `algo` and import its module from `newrl.algos`.
 - Keep single-use logic at its call site. Extract a method when it gives a
   substantial operation a clear boundary or makes that operation independently
   testable.

@@ -37,6 +37,10 @@ BATCH_KEYS = (
 )
 
 
+def group_width(mdp, groups: tuple[str, ...]) -> int:
+    return sum(mdp.observations[name].shape.numel() for name in groups)
+
+
 def stack_groups(observation: TensorDict, groups: tuple[str, ...]) -> torch.Tensor:
     """Concatenate observation groups in the given order."""
     missing = [name for name in groups if name not in observation]

@@ -120,15 +120,25 @@ def load(value: Any) -> Any:
 
 
 def resolve(config_cls: type, argv: Sequence[str]) -> Any:
-    """Build ``config_cls`` from ``key=value`` and ``group=preset`` arguments."""
+    """Resolve CLI overrides. Field metadata can declare an explicit preset group."""
     assignments = [_split_assignment(token) for token in argv]
     hints = get_type_hints(config_cls)
+    fields = dataclasses.fields(config_cls)
+    preset_groups = {
+        field.name: field.metadata["preset_group"]
+        for field in fields
+        if "preset_group" in field.metadata
+    }
     selected: dict[str, Any] = {}
     consumed: set[str] = set()
     for key, raw in assignments:
         if "." in key:
             continue
         hint = hints.get(key)
+        if key in preset_groups:
+            selected[key] = coerce(cs.get(preset_groups[key], raw), hint)
+            consumed.add(key)
+            continue
         options = (hint,)
         if get_origin(hint) in (Union, types.UnionType):
             options = get_args(hint)
@@ -143,7 +153,7 @@ def resolve(config_cls: type, argv: Sequence[str]) -> Any:
             consumed.add(key)
     missing = [
         field.name
-        for field in dataclasses.fields(config_cls)
+        for field in fields
         if field.init
         and field.default is _MISSING
         and field.default_factory is _MISSING
@@ -152,7 +162,7 @@ def resolve(config_cls: type, argv: Sequence[str]) -> Any:
     if missing:
         details = []
         for name in missing:
-            options = cs.names(name)
+            options = cs.names(preset_groups.get(name, name))
             if options:
                 details.append(f"{name} (choose from {', '.join(options)})")
             else:

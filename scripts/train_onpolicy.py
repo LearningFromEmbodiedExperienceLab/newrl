@@ -1,6 +1,6 @@
 """Train an on-policy learner on a NewRL environment."""
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from secrets import token_hex
@@ -9,8 +9,7 @@ from time import perf_counter
 import torch
 from tensordict import TensorDict
 
-from newrl.algos.genpo import GenPO, GenPOConfig
-from newrl.algos.ppo import PPO, PPOConfig
+from newrl.algos.interfaces import OnPolicyConfig, OnPolicyLearner
 from newrl.algos.rollout import collect_rollout
 from newrl.configs import EnvironmentConfig
 from newrl.env import StatefulEnvironment
@@ -24,7 +23,7 @@ TRAIN_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "outputs_train"
 @dataclass
 class TrainConfig:
     task: EnvironmentConfig
-    algo: PPOConfig | GenPOConfig
+    algo: OnPolicyConfig = field(metadata={"preset_group": "algo"})
     seed: int = 0
     iterations: int = 2000
     logger: WandbConfig = field(default_factory=WandbConfig)
@@ -33,10 +32,6 @@ class TrainConfig:
     def __post_init__(self):
         if self.checkpoint_interval < 0:
             raise ValueError("checkpoint_interval must be non-negative")
-
-
-def _group_width(mdp, groups: tuple[str, ...]) -> int:
-    return sum(mdp.observations[name].shape.numel() for name in groups)
 
 
 def _task_output_dir(task: str) -> Path:
@@ -68,7 +63,11 @@ def _make_logger(cfg: TrainConfig, *, run_id: str | None = None) -> RunLogger:
 
 
 def _save_checkpoint(
-    directory: Path, policy: PPO | GenPO, cfg: TrainConfig, iteration: int, frames: int
+    directory: Path,
+    policy: OnPolicyLearner,
+    cfg: TrainConfig,
+    iteration: int,
+    frames: int,
 ) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / f"checkpoint_{iteration:06d}.pt"
@@ -77,7 +76,10 @@ def _save_checkpoint(
         torch.save(
             {
                 **policy.training_state_dict(),
-                "config": dump(cfg),
+                "config": {
+                    "version": 1,
+                    **{item.name: dump(getattr(cfg, item.name)) for item in fields(cfg)},
+                },
                 "iteration": iteration,
                 "env_frames": frames,
             },
@@ -159,13 +161,7 @@ def main(cfg: TrainConfig) -> None:
     torch.manual_seed(cfg.seed)
     cfg.task.mdp.seed = cfg.seed
     env = StatefulEnvironment(cfg.task)
-    learner = GenPO if isinstance(cfg.algo, GenPOConfig) else PPO
-    policy = learner(
-        cfg.algo,
-        policy_dim=_group_width(env.mdp, cfg.algo.policy_obs_keys),
-        critic_dim=_group_width(env.mdp, cfg.algo.critic_obs_keys),
-        action_dim=env.action_dim,
-    ).to(env.device)
+    policy = cfg.algo.build(env)
     carry = env.reset()
     episode_stats = EpisodeStats(env.mdp.rewards)
     logger = _make_logger(cfg, run_id=run_id)

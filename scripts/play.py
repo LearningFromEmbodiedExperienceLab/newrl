@@ -1,14 +1,13 @@
 """Play a trained policy or roll out zero actions with optional visualization."""
 
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import newton
 import torch
 
-from newrl.algos.genpo import GenPO, GenPOConfig
-from newrl.algos.ppo import PPO, PPOConfig
+from newrl.algos.interfaces import OnPolicyConfig
 from newrl.configs import EnvironmentConfig
 from newrl.env import StatefulEnvironment
 from newrl.mdp.episode_ends import Timeout
@@ -27,15 +26,13 @@ class PlayConfig:
     checkpoint: str | None = None
     num_envs: int | None = None
     deterministic: bool = True
-    algo: str | None = None
+    algo: OnPolicyConfig | None = field(default=None, metadata={"preset_group": "algo"})
 
     def __post_init__(self):
         if self.episode_steps < 1 or (self.steps is not None and self.steps < 1):
             raise ValueError("episode_steps and steps must be positive")
         if self.num_envs is not None and self.num_envs < 1:
             raise ValueError("num_envs must be positive")
-        if self.algo is not None and self.algo not in ("ppo", "genpo"):
-            raise ValueError("algo must be ppo or genpo")
 
 
 @config_main(PlayConfig)
@@ -45,25 +42,24 @@ def play(cfg: PlayConfig) -> None:
     task = cfg.task
     algo = None
     weights = None
-    learner = None
     if cfg.checkpoint is not None:
         path = resolve_checkpoint(cfg.checkpoint, CHECKPOINT_CACHE_DIR)
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-        # Training from the CLI tags the outer config as __main__.TrainConfig.
-        # Its nested task and algorithm fields have importable type names.
-        fields = checkpoint["config"]["fields"]
+        saved_config = checkpoint["config"]
+        version = saved_config.get("version")
+        if version is None:
+            # Legacy checkpoints tagged the outer config as __main__.TrainConfig.
+            saved_config = saved_config["fields"]
+        elif version != 1:
+            raise ValueError(f"Unsupported checkpoint config version {version!r}")
         if task is None:
-            task = replace(load(fields["task"]), num_envs=4)
-        algo = load(fields["algo"])
-        if isinstance(algo, GenPOConfig):
-            learner, checkpoint_algo = GenPO, "genpo"
-        elif isinstance(algo, PPOConfig):
-            learner, checkpoint_algo = PPO, "ppo"
-        else:
+            task = replace(load(saved_config["task"]), num_envs=4)
+        algo = load(saved_config["algo"])
+        if not isinstance(algo, OnPolicyConfig):
             raise ValueError(f"Unsupported checkpoint algorithm {type(algo).__name__}")
-        if cfg.algo is not None and cfg.algo != checkpoint_algo:
+        if cfg.algo is not None and cfg.algo.algo_id != algo.algo_id:
             raise ValueError(
-                f"Checkpoint contains {checkpoint_algo}, requested {cfg.algo}"
+                f"Checkpoint contains {algo.algo_id}, requested {cfg.algo.algo_id}"
             )
         if cfg.checkpoint.startswith("run:"):
             print(f"Loaded {path.name} from {cfg.checkpoint}", flush=True)
@@ -79,14 +75,8 @@ def play(cfg: PlayConfig) -> None:
         task.mdp.truncations["timeout"] = Timeout(cfg.episode_steps)
         env = StatefulEnvironment(task)
         policy = None
-        if learner is not None:
-            groups = env.mdp.observations
-            policy = learner(
-                algo,
-                policy_dim=sum(groups[name].shape.numel() for name in algo.policy_obs_keys),
-                critic_dim=sum(groups[name].shape.numel() for name in algo.critic_obs_keys),
-                action_dim=env.action_dim,
-            ).to(env.device)
+        if algo is not None:
+            policy = algo.build(env)
             policy.load_state_dict(weights)
             policy.eval()
         actions = torch.zeros((env.num_envs, env.action_dim), device=env.device)

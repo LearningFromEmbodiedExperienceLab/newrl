@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 from dataclasses import dataclass
 from math import isfinite, log, pi
+from typing import ClassVar
 
 import torch
 from tensordict import TensorDict
@@ -18,6 +19,7 @@ from .common.batch import (
     POLICY_OBSERVATION,
     TERMINATED,
     aggregate_reward,
+    group_width,
     minibatches,
     stack_groups,
 )
@@ -41,6 +43,7 @@ FLOW_HIST = "flow_hist"
 
 @dataclass
 class GenPOConfig:
+    algo_id: ClassVar[str] = "genpo"
     name: str = "genpo"
     update_every: int = 32
     num_epochs: int = 4
@@ -95,6 +98,14 @@ class GenPOConfig:
             not isfinite(self.desired_kl) or self.desired_kl <= 0.0
         ):
             raise ValueError("GenPO desired_kl must be finite and positive, or None")
+
+    def build(self, env) -> "GenPO":
+        return GenPO(
+            self,
+            policy_dim=group_width(env.mdp, self.policy_obs_keys),
+            critic_dim=group_width(env.mdp, self.critic_obs_keys),
+            action_dim=env.action_dim,
+        ).to(env.device)
 
 
 def _base_log_prob(noise: torch.Tensor) -> torch.Tensor:
@@ -190,7 +201,7 @@ class ReversibleFlowActor(nn.Module):
         return _base_log_prob(self.invert(observation, action, history))
 
 
-cs.store("genpo", GenPOConfig(), group="algo")
+cs.store(GenPOConfig.algo_id, GenPOConfig(), group="algo")
 
 
 class GenPO(nn.Module):

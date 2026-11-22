@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
+from newrl.algos.interfaces import OnPolicyConfig
 from newrl.configs import EnvironmentConfig
 from newrl.robots import newton_anymal_c
 from newrl.solver_adapters import MujocoSimConfig, SteelSimConfig
@@ -36,6 +37,20 @@ class _Holder:
 
 
 class ConfigTests(unittest.TestCase):
+    def test_algorithm_presets_resolve_to_concrete_configs(self):
+        from newrl.utils.config import resolve
+
+        config = resolve(
+            TrainConfig,
+            ["task=AnymalLocoFlat", "algo.flow_steps=3", "algo=genpo", "algo.name=trial"],
+        )
+        self.assertIsInstance(config.algo, OnPolicyConfig)
+        self.assertEqual(config.algo.algo_id, "genpo")
+        self.assertEqual(config.algo.flow_steps, 3)
+        self.assertEqual(config.algo.name, "trial")
+        with self.assertRaisesRegex(KeyError, "Unknown algo config"):
+            resolve(TrainConfig, ["task=AnymalLocoFlat", "algo=missing"])
+
     def test_nested_solver_selection_and_round_trip(self):
         from newrl.utils.config import resolve
 
