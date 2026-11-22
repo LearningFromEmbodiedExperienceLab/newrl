@@ -1,5 +1,6 @@
 """CPU checks for GAE, normalization, the PPO update, and rollout assembly."""
 
+import io
 import unittest
 
 import torch
@@ -7,8 +8,9 @@ from tensordict import TensorDict
 
 from newrl.algos.common.modules import NormalActor
 from newrl.algos.common.normalization import EmpiricalNormalization, ReturnNormalization
+from newrl.algos.common.optimizer import MuonAdamW
 from newrl.algos.common.policy_evaluation import generalized_advantage
-from newrl.algos.ppo import PPO, PPOConfig
+from newrl.algos.ppo import PPO, PPOConfig, _aggregate_reward
 from newrl.algos.rollout import collect_rollout
 
 
@@ -72,6 +74,7 @@ class RolloutTests(unittest.TestCase):
         env = _ScriptedEnvironment()
         batch, carry = collect_rollout(env, _RecordingPolicy(), 2, env.reset())
         self.assertEqual(tuple(batch.batch_size), (2, 2))
+        torch.testing.assert_close(batch["reward", "tracking"], torch.ones(2, 2, 1))
         self.assertTrue(
             torch.equal(batch["policy_observation"][:, 0], torch.tensor([[0.0], [0.0]]))
         )
@@ -96,6 +99,85 @@ class RolloutTests(unittest.TestCase):
 
 
 class PPOTests(unittest.TestCase):
+    def test_training_checkpoint_restores_model_normalizers_and_optimizer(self):
+        for muon in (False, True):
+            with self.subTest(muon=muon):
+                cfg = PPOConfig(
+                    muon=muon,
+                    normalize_reward=True,
+                    actor_hidden=(8, 8),
+                    critic_hidden=(8, 8),
+                    num_epochs=1,
+                    num_minibatches=2,
+                )
+                dims = dict(policy_dim=3, critic_dim=3, action_dim=2)
+                policy = PPO(cfg, **dims)
+                batch = _random_batch(num_envs=4, steps=4, policy_dim=3, action_dim=2)
+                policy.policy_norm.update(batch["policy_observation"])
+                policy.train_op(batch)
+                checkpoint = io.BytesIO()
+                torch.save(policy.training_state_dict(), checkpoint)
+                checkpoint.seek(0)
+                restored = PPO(cfg, **dims)
+                restored.load_training_state_dict(torch.load(checkpoint, weights_only=True))
+                torch.testing.assert_close(restored.state_dict(), policy.state_dict())
+
+                torch.manual_seed(0)
+                expected = policy.train_op(batch)
+                torch.manual_seed(0)
+                actual = restored.train_op(batch)
+                self.assertEqual(actual, expected)
+                torch.testing.assert_close(restored.state_dict(), policy.state_dict())
+
+    def test_muon_updates_hidden_matrices_and_restores_live_groups(self):
+        cfg = PPOConfig(
+            muon=True,
+            actor_hidden=(8, 8),
+            critic_hidden=(8, 8),
+            num_epochs=1,
+            num_minibatches=2,
+            weight_decay=0.02,
+        )
+        policy = PPO(cfg, policy_dim=3, critic_dim=3, action_dim=2)
+        optimizer = policy.optimizer
+        self.assertIsInstance(optimizer, MuonAdamW)
+        expected = [
+            policy.actor.backbone.layers[3].weight,
+            policy.critic.backbone.layers[3].weight,
+        ]
+        muon_params = [
+            p for group in optimizer.muon.param_groups for p in group["params"]
+        ]
+        self.assertEqual([id(p) for p in muon_params], [id(p) for p in expected])
+        all_params = [p for group in optimizer.param_groups for p in group["params"]]
+        self.assertCountEqual(map(id, all_params), map(id, policy.parameters()))
+        self.assertTrue(
+            all(group["weight_decay"] == cfg.weight_decay for group in optimizer.param_groups)
+        )
+
+        tracked = (*muon_params, policy.actor.mean.weight)
+        before = [p.detach().clone() for p in tracked]
+        batch = _random_batch(num_envs=4, steps=4, policy_dim=3, action_dim=2)
+        metrics = policy.train_op(batch)
+        for previous, parameter in zip(before, tracked, strict=True):
+            self.assertFalse(torch.equal(previous, parameter))
+        self.assertTrue(torch.isfinite(torch.tensor(metrics["actor/approx_kl"])))
+        self.assertEqual(metrics["actor/lr"], cfg.lr)
+
+        restored = PPO(cfg, policy_dim=3, critic_dim=3, action_dim=2).optimizer
+        restored.load_state_dict(optimizer.state_dict())
+        self.assertTrue(restored.muon.state)
+        self.assertTrue(restored.adamw.state)
+        restored.param_groups[0]["lr"] = 0.001
+        self.assertEqual(restored.adamw.param_groups[0]["lr"], 0.001)
+        restored.param_groups[-1]["lr"] = 0.002
+        self.assertEqual(restored.muon.param_groups[-1]["lr"], 0.002)
+
+    def test_muon_falls_back_to_adamw_with_no_eligible_matrices(self):
+        cfg = PPOConfig(muon=True, actor_hidden=(8,), critic_hidden=(8,))
+        policy = PPO(cfg, policy_dim=3, critic_dim=3, action_dim=2)
+        self.assertIsInstance(policy.optimizer, torch.optim.AdamW)
+
     def test_rejects_scalar_batches_without_feature_dimension(self):
         policy = PPO(PPOConfig(), policy_dim=3, critic_dim=3, action_dim=2)
         batch = _random_batch(num_envs=4, steps=4, policy_dim=3, action_dim=2)
@@ -114,14 +196,19 @@ class PPOTests(unittest.TestCase):
                 gamma=0.5,
                 lam=1.0,
                 lr=1e-2,
+                clamp_reward=True,
             ),
             policy_dim=3,
             critic_dim=3,
             action_dim=2,
         )
         batch = _random_batch(num_envs=4, steps=4, policy_dim=3, action_dim=2)
-        scaled = policy._scaled_reward(batch)
-        self.assertTrue(torch.allclose(scaled, batch["reward"] * 0.5))
+        raw = _aggregate_reward(batch)
+        expected = batch["reward", "tracking"].sum(-1, keepdim=True)
+        expected = expected + batch["reward", "regularization"]
+        torch.testing.assert_close(raw, expected)
+        scaled = policy._scaled_reward(raw, batch["done"])
+        torch.testing.assert_close(scaled, expected.clamp_min(0) * 0.5)
         policy.critic.head.weight.data.zero_()
         policy.critic.head.bias.data.zero_()
         with torch.no_grad():
@@ -149,6 +236,7 @@ class PPOTests(unittest.TestCase):
             all(torch.isfinite(torch.tensor(value)) for value in metrics.values())
         )
         self.assertIn("actor/policy_loss", metrics)
+        self.assertEqual(metrics["critic/neg_rew_ratio"], float((raw <= 0).float().mean()))
 
     def test_std_stays_inside_its_bounds(self):
         actor = NormalActor(4, 3, hidden=(8,), min_std=0.05, max_std=0.4)
@@ -217,7 +305,7 @@ class _ScriptedEnvironment:
                     {"episode_step": self._episode_step.clone()},
                     batch_size=[self.num_envs],
                 ),
-                "reward": reward,
+                "reward": {"tracking": reward},
                 "terminated": torch.zeros_like(done),
                 "done": done,
             },
@@ -234,7 +322,10 @@ def _random_batch(num_envs, steps, policy_dim, action_dim):
             "next_critic_observation": torch.randn(num_envs, steps, policy_dim),
             "action": torch.randn(num_envs, steps, action_dim),
             "action_log_prob": torch.zeros(num_envs, steps, 1),
-            "reward": torch.randn(num_envs, steps, 1),
+            "reward": {
+                "tracking": torch.randn(num_envs, steps, 2),
+                "regularization": -torch.rand(num_envs, steps, 1),
+            },
             "terminated": torch.zeros(num_envs, steps, 1, dtype=torch.bool),
             "done": torch.zeros(num_envs, steps, 1, dtype=torch.bool),
         },

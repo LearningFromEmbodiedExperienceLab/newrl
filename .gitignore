@@ -12,6 +12,9 @@ wheels/
 # Local benchmark run history
 /benchmark-results/
 
+# Local training runs
+/outputs_train/
+
 # Cooked robot bundles and other local caches
 /.cache/
 

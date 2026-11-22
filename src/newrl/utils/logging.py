@@ -1,6 +1,7 @@
 """Optional Weights & Biases logging for a training run."""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from newrl.utils.config import dump
 
@@ -21,14 +22,25 @@ class WandbConfig:
 class RunLogger:
     """Log scalar metrics when enabled. A disabled logger does not contact wandb."""
 
-    def __init__(self, cfg: WandbConfig, config: object):
+    def __init__(
+        self,
+        cfg: WandbConfig,
+        config: object,
+        *,
+        run_id: str | None = None,
+        directory: Path | None = None,
+    ):
         self._run = None
         if not cfg.enabled or cfg.mode == "disabled":
             return
         import wandb
 
+        if directory is not None:
+            directory.mkdir(parents=True, exist_ok=True)
         self._run = wandb.init(
             project=cfg.project,
+            id=run_id,
+            dir=directory,
             name=cfg.name,
             group=cfg.group,
             config=dump(config),

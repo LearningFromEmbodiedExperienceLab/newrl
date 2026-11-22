@@ -22,6 +22,14 @@ def _require_groups(groups: dict, kind: str, group_type: type) -> None:
             )
 
 
+def _check_column_shape(terms, shape):
+    for name, value in terms.items():
+        if value.shape != shape:
+            raise ValueError(
+                f"Expected MDP term {name!r} to have shape {shape}, got {tuple(value.shape)}"
+            )
+
+
 @dataclass(frozen=True)
 class ObservationGroup:
     """Concatenate named observation terms in definition order.
@@ -71,7 +79,7 @@ class ObservationGroup:
 
 @dataclass(frozen=True)
 class RewardGroup:
-    """Named reward terms. The group total is their sum."""
+    """Concatenate named scalar reward terms in definition order."""
 
     terms: dict[str, RewardTerm]
 
@@ -105,11 +113,9 @@ class RewardGroup:
         mdp_state: TensorDict,
         /,
     ) -> torch.Tensor:
-        values = list(self.contributions(physical_state, mdp_state).values())
-        total = values[0]
-        for value in values[1:]:
-            total = total + value
-        return total
+        values = self.contributions(physical_state, mdp_state)
+        _check_column_shape(values, (*mdp_state.batch_size, 1))
+        return torch.cat(tuple(values.values()), dim=-1)
 
 
 @dataclass
@@ -117,8 +123,10 @@ class MDP:
     """Task terms. Observations and rewards are groups; episode ends are flat.
 
     An observation group evaluates to one concatenated vector at
-    ``observation[group]``. Reward terms stay named under
-    ``reward_terms[group][term]``, and ``reward`` is the sum of every term.
+    ``observation[group]``. Each reward group concatenates its terms at
+    ``reward[group]``. Its columns follow the group's ``keys`` order.
+    Named episode-end flags appear in ``termination_terms`` and
+    ``truncation_terms`` alongside their aggregate flags.
     """
 
     observations: dict[str, ObservationGroup] = field(default_factory=dict)
@@ -220,31 +228,25 @@ class MDP:
         physical_state: TensorDict,
         mdp_state: TensorDict,
     ) -> TensorDict:
-        column_shape = (*mdp_state.batch_size, 1)
-        reward = mdp_state["previous_action"].new_zeros(column_shape)
-        reward_terms = {}
-        for name, group in self.rewards.items():
-            values = group.contributions(physical_state, mdp_state)
-            self._check_column_shape(values, column_shape)
-            for value in values.values():
-                reward = reward + value
-            reward_terms[name] = TensorDict(
-                values, batch_size=mdp_state.batch_size, device=mdp_state.device
-            )
-        terminated = self._any(
-            self._evaluate(self.terminations, physical_state, mdp_state), mdp_state
+        reward = TensorDict(
+            {
+                name: group(physical_state, mdp_state)
+                for name, group in self.rewards.items()
+            },
+            batch_size=mdp_state.batch_size,
+            device=mdp_state.device,
         )
-        truncated = self._any(
-            self._evaluate(self.truncations, physical_state, mdp_state), mdp_state
+        termination_terms = self._evaluate(
+            self.terminations, physical_state, mdp_state
         )
+        truncation_terms = self._evaluate(self.truncations, physical_state, mdp_state)
+        terminated = self._any(termination_terms, mdp_state)
+        truncated = self._any(truncation_terms, mdp_state)
         return TensorDict(
             {
-                "reward_terms": TensorDict(
-                    reward_terms,
-                    batch_size=mdp_state.batch_size,
-                    device=mdp_state.device,
-                ),
                 "reward": reward,
+                "termination_terms": termination_terms,
+                "truncation_terms": truncation_terms,
                 "terminated": terminated,
                 "truncated": truncated,
                 "done": terminated | truncated,
@@ -262,17 +264,9 @@ class MDP:
         )
 
     @staticmethod
-    def _check_column_shape(terms, shape):
-        for name, value in terms.items():
-            if value.shape != shape:
-                raise ValueError(
-                    f"Expected MDP term {name!r} to have shape {shape}, got {tuple(value.shape)}"
-                )
-
-    @staticmethod
     def _any(terms, mdp_state):
         column_shape = (*mdp_state.batch_size, 1)
-        MDP._check_column_shape(terms, column_shape)
+        _check_column_shape(terms, column_shape)
         flags = torch.zeros(column_shape, device=mdp_state.device, dtype=torch.bool)
         for value in terms.values():
             flags |= value

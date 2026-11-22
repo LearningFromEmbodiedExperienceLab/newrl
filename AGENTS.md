@@ -53,8 +53,9 @@ a partial reset.
   individual rewards, episode-end flags, and task state such as RNG counters.
   Episode-end flags are boolean. Indices and other unbatched or intermediate
   tensors follow their own API requirements.
-  An observation group concatenates its terms into one vector. A reward group
-  keeps each named term under `reward_terms`, and `reward` is their sum.
+  Observation and reward groups concatenate their terms into one vector per
+  group. Step outputs expose reward groups at `("reward", group_name)`.
+  PPO sums the reward columns across groups before computing advantages.
 - The RL environment uses Newton's `CollisionPipeline`. The custom terrain
   collider is exercised by [benchmark_mesh_collision.py](benchmark_mesh_collision.py).
   Solver and timing defaults are configured in `EnvironmentConfig`. MuJoCo Warp

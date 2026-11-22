@@ -34,6 +34,9 @@ def collect_rollout(env, policy, steps: int, carry: TensorDict):
         step[_ENV_REWARD] = _require(transition, _ENV_REWARD).detach().clone()
         step[_ENV_TERMINATED] = _require(transition, _ENV_TERMINATED).detach().clone()
         step[_ENV_DONE] = _require(transition, _ENV_DONE).detach().clone()
+        for field in ("termination_terms", "truncation_terms"):
+            if field in transition:
+                step[field] = transition[field].detach().clone()
         rows.append(step.exclude(_ENV_OBSERVATION))
         carry = _output_carry(transition)
         finished = transition[_ENV_DONE].squeeze(-1).nonzero(as_tuple=True)[0]

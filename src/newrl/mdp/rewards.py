@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from math import inf
 from typing import ClassVar
 
 import torch
@@ -9,12 +10,24 @@ from newrl.utils.string import resolve_scene_names
 from .observations import BodyAngularVelocity, BodyLinearVelocity
 
 
+def _weighted_range(weight: float, maximum: float = inf) -> tuple[float, float]:
+    """Bounds for a weighted quantity between zero and maximum."""
+    if weight == 0:
+        return 0.0, 0.0
+    endpoint = weight * maximum
+    return min(0.0, endpoint), max(0.0, endpoint)
+
+
 @dataclass(frozen=True)
 class ActionRate:
     """Penalize squared changes in normalized action per environment."""
 
     weight: float
     physical_fields: ClassVar[frozenset] = frozenset()
+
+    @property
+    def range(self) -> tuple[float, float]:
+        return _weighted_range(-self.weight)
 
     def __call__(self, physical_state, mdp_state):
         delta = mdp_state["action"] - mdp_state["previous_action"]
@@ -38,6 +51,10 @@ class _JointTerm:
     _indices: torch.Tensor | None = field(
         default=None, init=False, repr=False, compare=False
     )
+
+    @property
+    def range(self) -> tuple[float, float]:
+        return _weighted_range(-self.weight)
 
     @property
     def physical_fields(self):
@@ -132,6 +149,10 @@ class TrackVelocity:
     sigma: float
 
     @property
+    def range(self) -> tuple[float, float]:
+        return _weighted_range(self.weight, 1.0)
+
+    @property
     def physical_fields(self):
         return self.velocity.physical_fields
 
@@ -154,6 +175,10 @@ class FootSlip:
     _velocity: BodyLinearVelocity | None = field(
         default=None, init=False, repr=False, compare=False
     )
+
+    @property
+    def range(self) -> tuple[float, float]:
+        return _weighted_range(-self.weight)
 
     @property
     def physical_fields(self):
@@ -191,10 +216,17 @@ class FeetAirTime:
     weight: float
     threshold_min: float = 0.05
     threshold_max: float = 0.5
+    _num_feet: int | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         if not 0.0 <= self.threshold_min < self.threshold_max:
             raise ValueError("Air-time thresholds must satisfy 0 <= min < max")
+
+    @property
+    def range(self) -> tuple[float, float]:
+        """Use a conservative bound until the scene supplies the foot count."""
+        maximum = inf if self._num_feet is None else self._num_feet
+        return _weighted_range(self.weight, maximum)
 
     @property
     def physical_fields(self):
@@ -202,7 +234,10 @@ class FeetAirTime:
 
     def _initialize(self, scene):
         scene.resolve_physical_fields(self.physical_fields)
-        return self
+        sensor = scene.contact_sensors[self.sensor]
+        bound = replace(self)
+        object.__setattr__(bound, "_num_feet", sensor.body_ids.shape[-1])
+        return bound
 
     def __call__(self, physical_state, mdp_state):
         air = physical_state[self.sensor, "current_air_time"]

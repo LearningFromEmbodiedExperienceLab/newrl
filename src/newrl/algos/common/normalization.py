@@ -88,6 +88,18 @@ class ReturnNormalization(nn.Module):
         self.register_buffer("count", torch.zeros(()))
         self.register_buffer("returns", torch.zeros(0, 1))
 
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # The number of worlds is learned from the first rollout.
+        saved = state_dict.get(prefix + "returns")
+        if (
+            saved is not None
+            and saved.ndim == 2
+            and saved.shape[1] == 1
+            and self.returns.shape != saved.shape
+        ):
+            self.returns = self.returns.new_empty(saved.shape)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
     @torch.no_grad()
     def update(self, reward: torch.Tensor, done: torch.Tensor) -> None:
         returns = self._advance(reward, done)

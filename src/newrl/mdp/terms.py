@@ -23,6 +23,11 @@ class ObservationTerm(Protocol):
 
 
 class RewardTerm(Protocol):
+    @property
+    def range(self) -> tuple[float, float]:
+        """Lower and upper per-step bounds, including the term's weight."""
+        ...
+
     def __call__(
         self,
         physical_state: TensorDict,

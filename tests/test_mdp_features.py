@@ -8,8 +8,17 @@ from tensordict import TensorDict
 
 from newrl.mdp.base import MDP, ObservationGroup, RewardGroup
 from newrl.mdp.episode_ends import HeightTermination, TiltTermination, Timeout
-from newrl.mdp.observations import BodyHeight, ProjectedGravity
-from newrl.mdp.rewards import JointAcc2, JointEnergy1, JointVel2, _JointTerm
+from newrl.mdp.observations import BodyHeight, BodyLinearVelocity, ProjectedGravity
+from newrl.mdp.rewards import (
+    ActionRate,
+    FeetAirTime,
+    FootSlip,
+    JointAcc2,
+    JointEnergy1,
+    JointVel2,
+    TrackVelocity,
+    _JointTerm,
+)
 
 
 class MDPTests(unittest.TestCase):
@@ -24,7 +33,8 @@ class MDPTests(unittest.TestCase):
         )
         physical = TensorDict({}, batch_size=[2, 3])
         result = mdp.step(physical, state)
-        for key in ("reward", "terminated", "truncated", "done"):
+        self.assertEqual(list(result["reward"].keys()), [])
+        for key in ("terminated", "truncated", "done"):
             self.assertEqual(result[key].shape, (2, 3, 1))
         torch.testing.assert_close(result["truncated"], state["episode_step"] >= 3)
 
@@ -74,11 +84,12 @@ class MDPTests(unittest.TestCase):
         mdp_state["spawn_height"] = torch.tensor([[0.5]])
         self.assertTrue(mdp.terminations["height"](physical_state, mdp_state).item())
 
-    def test_reward_groups_keep_terms_and_sum_them(self):
+    def test_reward_groups_concatenate_terms_in_definition_order(self):
         def reward(value):
             def term(physical_state, mdp_state):
                 return torch.full((*mdp_state.batch_size, 1), value)
 
+            term.range = (value, value)
             return term
 
         mdp = MDP(
@@ -90,12 +101,36 @@ class MDPTests(unittest.TestCase):
         mdp_state = mdp.initial_state(2, 1, torch.device("cpu"))
         physical_state = TensorDict({}, batch_size=[2])
         _, transition = mdp.advance(physical_state, mdp_state, torch.zeros(2, 1))
-        torch.testing.assert_close(transition["reward"], torch.full((2, 1), 1.25))
         torch.testing.assert_close(
-            transition["reward_terms", "task", "yaw"], torch.full((2, 1), 0.5)
+            transition["reward", "task"], torch.tensor([[1.0, 0.5], [1.0, 0.5]])
+        )
+        torch.testing.assert_close(
+            transition["reward", "regularization"], torch.full((2, 1), -0.25)
         )
         with self.assertRaises(ValueError):
             ObservationGroup({})
+
+
+class RewardRangeTests(unittest.TestCase):
+    def test_penalty_ranges_follow_weight_sign(self):
+        for penalty in (ActionRate, JointAcc2, JointEnergy1, JointVel2):
+            self.assertEqual(penalty(weight=2.0).range, (-float("inf"), 0.0))
+            self.assertEqual(penalty(weight=-2.0).range, (0.0, float("inf")))
+            self.assertEqual(penalty(weight=0.0).range, (0.0, 0.0))
+        self.assertEqual(FootSlip("feet", weight=2.0).range, (-float("inf"), 0.0))
+
+    def test_tracking_and_bound_air_time_ranges(self):
+        velocity = BodyLinearVelocity("robot", "base")
+        self.assertEqual(TrackVelocity(velocity, slice(2), 0.5, 1.0).range, (0.0, 0.5))
+        self.assertEqual(TrackVelocity(velocity, slice(2), -0.5, 1.0).range, (-0.5, 0.0))
+        scene = SimpleNamespace(
+            resolve_physical_fields=lambda _: None,
+            contact_sensors={"feet": SimpleNamespace(body_ids=torch.zeros(2, 4))},
+        )
+        air_time = FeetAirTime("feet", weight=0.5)
+        self.assertEqual(air_time.range, (0.0, float("inf")))
+        self.assertEqual(air_time._initialize(scene).range, (0.0, 2.0))
+        self.assertEqual(FeetAirTime("feet", weight=-0.5)._initialize(scene).range, (-2.0, 0.0))
 
 
 def _bind_joints(term, names=("LF_HAA", "LF_KFE")):

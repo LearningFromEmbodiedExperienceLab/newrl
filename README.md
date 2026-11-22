@@ -46,4 +46,14 @@ its configured thresholds, following mjlab's velocity task without command
 gating. `AnymalLocomotion(feet_air_time_weight=...)` enables the term and
 air-time tracking.
 
+Enable W&B with `logger.enabled=true`, or add `logger.mode=offline` to
+record locally. The trainer names runs `<run-id>-<task>-<algo>-<UTC timestamp>`,
+groups them by task in W&B, and stores logs under the repository's
+`outputs_train/<task>/wandb/` directory. Use `logger.name` or `logger.group`
+to override the W&B display name or group.
+
+The trainer saves a local PPO checkpoint every 250 completed updates under
+`outputs_train/<task>/checkpoints/<run-id>/`. Set `checkpoint_interval=<updates>`
+to change the cadence or `checkpoint_interval=0` to disable saves.
+
 See [environment benchmarks](benchmarks/README.md) for reproducible runs and reference results.

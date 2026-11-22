@@ -1,3 +1,7 @@
+[build-system]
+requires = ["uv_build>=0.11.0"]
+build-backend = "uv_build"
+
 [project]
 name = "newrl"
 version = "0.1.0"
@@ -22,4 +26,14 @@ dependencies = [
 [tool.uv.sources]
 newton = { path = "../newton", editable = true }
 assetx = { git = "https://github.com/btx0424/assetx.git", branch = "main" }
+ovstage = { index = "pypi" }
+ovrtx = { index = "pypi" }
 
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+explicit = true
+
+[tool.uv.build-backend]
+module-name = "newrl"
+module-root = "src"

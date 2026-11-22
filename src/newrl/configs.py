@@ -42,7 +42,7 @@ class EnvironmentConfig:
     solver: MujocoSimConfig | SteelSimConfig = field(default_factory=MujocoSimConfig)
     ground_stiffness: float = 1.0e3
     ground_damping: float = 1.0e2
-    graph_capture: bool = False
+    graph_capture: bool = True
     deterministic: bool = False
     terrain: TerrainConfig | str | Callable[[newton.ModelBuilder], None] = field(
         default_factory=PlaneTerrainConfig
@@ -53,6 +53,7 @@ class EnvironmentConfig:
     output_physical_fields: tuple[tuple[str, str], ...] = ()
     output_mdp_fields: tuple[str, ...] = ()
     contact_sensors: dict[str, TerrainContactConfig] = field(default_factory=dict)
+    name: str = "custom"
 
 
 def locomotion_mdp(mdp_type: type[MDP] = MDP, base: str = "base") -> MDP:
@@ -158,13 +159,13 @@ def _quadruped_locomotion(
                 "track_xy_velocity": TrackVelocity(
                     BodyLinearVelocity("robot", base, frame="yaw"),
                     slice(0, 2),
-                    weight=1.0,
+                    weight=1.5,
                     sigma=0.5,
                 ),
                 "track_yaw_rate": TrackVelocity(
                     BodyAngularVelocity("robot", base, frame="yaw"),
                     slice(2, 3),
-                    weight=0.5,
+                    weight=1.0,
                     sigma=0.5,
                 ),
             }
@@ -172,8 +173,8 @@ def _quadruped_locomotion(
         "regularization": RewardGroup(
             {
                 "action_rate": ActionRate(weight=0.01),
-                "joint_energy1": JointEnergy1(weight=0.01),
-                "joint_acc2": JointAcc2(weight=0.00001),
+                "joint_energy1": JointEnergy1(weight=0.0002),
+                # "joint_acc2": JointAcc2(weight=0.00001),
                 "joint_vel2": JointVel2(weight=0.01),
                 "feet_air_time": FeetAirTime(sensor="feet_ground", weight=1.0),
                 "foot_slip": FootSlip(sensor="feet_ground", weight=foot_slip_weight),
@@ -195,6 +196,9 @@ def _quadruped_locomotion(
 
 from newrl.utils.config import cs
 
-cs.store("anymal_loco_flat", AnymalLocomotion(num_envs=2048), group="task")
-cs.store("spot_loco_flat", SpotLocomotion(num_envs=2048), group="task")
-cs.store("as2_loco_flat", AS2Locomotion(num_envs=2048), group="task")
+for name, factory in (
+    ("AnymalLocoFlat", AnymalLocomotion),
+    ("SpotLocoFlat", SpotLocomotion),
+    ("AS2LocoFlat", AS2Locomotion),
+):
+    cs.store(name, factory(name=name, num_envs=4096), group="task")

@@ -8,6 +8,7 @@ maps those fields onto this schema.
 ``critic_observation`` is the value input at that same decision.
 ``next_critic_observation`` is the critic observation of the true successor,
 including on termination or truncation, and it is recorded before any reset.
+``reward`` holds a tensor per group with one column per term.
 ``terminated`` drops the value bootstrap. ``done`` is termination or truncation
 and stops the advantage trace at the episode boundary.
 """

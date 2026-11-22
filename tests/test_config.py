@@ -41,7 +41,7 @@ class ConfigTests(unittest.TestCase):
 
         for overrides in (
             [
-                "task=anymal_loco_flat",
+                "task=AnymalLocoFlat",
                 "algo=ppo",
                 "task.solver=steel",
                 "task.solver.iterations=7",
@@ -50,7 +50,7 @@ class ConfigTests(unittest.TestCase):
                 "task.solver.iterations=7",
                 "task.solver=steel",
                 "algo=ppo",
-                "task=anymal_loco_flat",
+                "task=AnymalLocoFlat",
             ],
         ):
             config = resolve(TrainConfig, overrides)
@@ -62,13 +62,13 @@ class ConfigTests(unittest.TestCase):
                 save_config(path, config.task)
                 loaded = load_config(path)
             self.assertEqual(loaded.solver, config.task.solver)
-        default = resolve(TrainConfig, ["task=anymal_loco_flat", "algo=ppo"])
+        default = resolve(TrainConfig, ["task=AnymalLocoFlat", "algo=ppo"])
         self.assertIsInstance(default.task.solver, MujocoSimConfig)
         self.assertFalse(hasattr(default.task.solver, "articulation_constraint_max"))
         with self.assertRaises((TypeError, ValueError, KeyError)):
             resolve(
                 TrainConfig,
-                ["task=anymal_loco_flat", "algo=ppo", "task.solver=missing"],
+                ["task=AnymalLocoFlat", "algo=ppo", "task.solver=missing"],
             )
 
     @classmethod
@@ -109,9 +109,10 @@ class ConfigTests(unittest.TestCase):
             path = Path(directory) / "config.json"
             cfg = entry(
                 [
-                    "task=anymal_loco_flat",
+                    "task=AnymalLocoFlat",
                     "algo=ppo",
                     "algo.lr=1e-4",
+                    "task.num_envs=64",
                     "algo.actor_hidden=(32,32)",
                     "seed=3",
                     f"config_out={path}",
@@ -137,8 +138,8 @@ class ConfigTests(unittest.TestCase):
 
         with self.assertRaises(ValueError) as caught:
             entry(["algo=ppo"])
-        self.assertIn("spot_loco_flat", str(caught.exception))
-        self.assertIn("as2_loco_flat", str(caught.exception))
+        self.assertIn("SpotLocoFlat", str(caught.exception))
+        self.assertIn("AS2LocoFlat", str(caught.exception))
         self.assertFalse(called)
 
     def test_default_override_yields_to_the_command_line(self):
@@ -147,11 +148,11 @@ class ConfigTests(unittest.TestCase):
             return cfg
 
         self.assertEqual(
-            entry(["task=anymal_loco_flat", "algo=ppo"]).task.num_envs, 4
+            entry(["task=AnymalLocoFlat", "algo=ppo"]).task.num_envs, 4
         )
         self.assertEqual(
             entry(
-                ["task=anymal_loco_flat", "algo=ppo", "task.num_envs=2"]
+                ["task=AnymalLocoFlat", "algo=ppo", "task.num_envs=2"]
             ).task.num_envs,
             2,
         )
@@ -162,6 +163,33 @@ class ConfigTests(unittest.TestCase):
             logger.log({"actor/policy_loss": 1.0}, step=0)
             logger.finish()
         init.assert_not_called()
+
+    def test_training_logger_groups_runs_by_task(self):
+        from newrl.utils.config import resolve
+
+        cfg = resolve(
+            TrainConfig,
+            ["task=SpotLocoFlat", "algo=ppo", "algo.name=ppo-muon", "logger.enabled=true"],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "outputs_train"
+            with patch.object(_module, "TRAIN_OUTPUT_DIR", output), patch("wandb.init") as init:
+                logger = _module._make_logger(cfg)
+                logger.finish()
+                kwargs = init.call_args.kwargs
+                self.assertEqual(kwargs["group"], "SpotLocoFlat")
+                self.assertEqual(kwargs["dir"], output / "SpotLocoFlat")
+                self.assertTrue(kwargs["dir"].is_dir())
+                self.assertRegex(
+                    kwargs["name"], rf"^{kwargs['id']}-SpotLocoFlat-ppo-muon-\d{{8}}-\d{{6}}Z$"
+                )
+
+                cfg.logger.name = "custom name"
+                cfg.logger.group = "custom group"
+                _module._make_logger(cfg).finish()
+                self.assertEqual(init.call_args.kwargs["name"], "custom name")
+                self.assertEqual(init.call_args.kwargs["group"], "custom group")
+                self.assertEqual(init.call_args.kwargs["dir"], output / "SpotLocoFlat")
 
 
 if __name__ == "__main__":

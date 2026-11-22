@@ -11,7 +11,12 @@ export NEWRL_COMPLETION="$dest"
 
 mkdir -p "$(dirname "$dest")"
 cd "$root"
-uv run python - <<'PY'
+if [ -n "${VIRTUAL_ENV:-}" ]; then
+  set -- python
+else
+  set -- uv run python
+fi
+"$@" - <<'PY'
 import os
 
 import newrl.algos.ppo  # noqa: F401

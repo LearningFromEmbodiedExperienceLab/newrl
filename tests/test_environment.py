@@ -17,6 +17,11 @@ from newrl.steel import reconstruct_augmented_drive_torque
 from newrl.terrain import FlatMeshTerrainConfig, PlaneTerrainConfig
 
 
+def _reward_term(env, transition, group, term):
+    column = env.mdp.rewards[group].keys.index(term)
+    return transition["reward", group][..., column : column + 1]
+
+
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class EnvironmentTests(unittest.TestCase):
     def test_contact_history_checkpoint_and_partial_reset(self):
@@ -28,7 +33,6 @@ class EnvironmentTests(unittest.TestCase):
                     graph_capture=True,
                     substeps=3,
                     deterministic=True,
-                    feet_air_time_weight=0.2,
                     output_physical_fields=tuple(
                         ("feet_ground", field)
                         for field in (
@@ -73,11 +77,12 @@ class EnvironmentTests(unittest.TestCase):
                 self.assertTrue(sensor["last_contact_pos_valid"].any(dim=-1).all())
                 self.assertTrue(torch.isfinite(sensor["last_contact_pos_w"]).all())
                 air = sensor["current_air_time"]
-                expected_reward = 0.2 * ((air > 0.05) & (air < 0.5)).sum(
+                weight = env.mdp.rewards["regularization"].terms["feet_air_time"].weight
+                expected_reward = weight * ((air > 0.05) & (air < 0.5)).sum(
                     -1, keepdim=True
                 )
                 torch.testing.assert_close(
-                    transition["reward_terms", "tracking", "feet_air_time"],
+                    _reward_term(env, transition, "regularization", "feet_air_time"),
                     expected_reward.float(),
                 )
                 next_sim, next_mdp, expected = env.step(sim, mdp, inputs)
@@ -217,7 +222,7 @@ class EnvironmentTests(unittest.TestCase):
                 torch.testing.assert_close(privileged[:, -4:], loaded.float())
                 feet_xy = privileged[:, -16:-4].reshape(2, 4, 3)[..., :2]
                 torch.testing.assert_close(
-                    transition["reward_terms", "regularization", "foot_slip"],
+                    _reward_term(env, transition, "regularization", "foot_slip"),
                     -0.5 * (feet_xy.square().sum(-1) * loaded).sum(-1, keepdim=True),
                 )
                 next_sim, next_mdp, expected = env.step(sim, mdp, inputs)
@@ -275,7 +280,7 @@ class EnvironmentTests(unittest.TestCase):
             torque, wp.to_torch(env.observables.qfrc_actuator)[entity.qd]
         )
         velocity = transition["physical_state", "robot", "joint_vel"]
-        energy = transition["reward_terms", "regularization", "joint_energy1"]
+        energy = _reward_term(env, transition, "regularization", "joint_energy1")
         torch.testing.assert_close(
             energy, -0.01 * (torque * velocity).abs().sum(-1, keepdim=True)
         )
@@ -392,11 +397,10 @@ class EnvironmentTests(unittest.TestCase):
                 sim, mdp, TensorDict({"action": action}, batch_size=[3])
             )
             compare(sim, mdp, actual, expected)
-            for key in ("reward", "terminated", "truncated", "done"):
+            for key in ("terminated", "truncated", "done"):
                 self.assertEqual(actual[key].shape, torch.Size([3, 1]))
-            for group in actual["reward_terms"].values():
-                for reward in group.values():
-                    self.assertEqual(reward.shape, torch.Size([3, 1]))
+            for name, group in stateful.mdp.rewards.items():
+                self.assertEqual(actual["reward", name].shape, (3, len(group.keys)))
             if step in (17, 27):
                 self.assertEqual(
                     actual["truncated"].squeeze(-1).tolist(),
@@ -554,11 +558,14 @@ class EnvironmentTests(unittest.TestCase):
     def test_undeclared_custom_term_keeps_complete_snapshot(self):
         from newrl.mdp.base import MDP, RewardGroup
 
-        def custom(physical_state, mdp_state):
-            return physical_state["robot", "body_twist_w"][:, 0, :1] * 0
+        class Custom:
+            range = (0.0, 0.0)
+
+            def __call__(self, physical_state, mdp_state):
+                return physical_state["robot", "body_twist_w"][:, 0, :1] * 0
 
         cfg = AnymalLocomotion(num_envs=1)
-        cfg.mdp = MDP(rewards={"custom": RewardGroup({"term": custom})})
+        cfg.mdp = MDP(rewards={"custom": RewardGroup({"term": Custom()})})
         env = StatefulEnvironment(cfg)
         self.assertEqual(
             set(env.physical_read_plan["robot"]),
