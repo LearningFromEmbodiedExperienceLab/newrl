@@ -62,6 +62,10 @@ a partial reset.
   file, or a mesh factory. The flat slab shares its geometry generator
   with the collision benchmark. Optional spawn locations are world-space
   ground anchors shared by the replicated worlds.
+- Generated terrain builds one static tile grid and returns its spawn anchors
+  during scene construction. Use native heightfields for sampled roughness
+  and boxes for flat slabs and stairs. Terrain generation uses its own seed,
+  while world resets sample the anchors through the MDP's per-world RNG.
 - The MDP samples task state and optional reset poses. The environment
   applies the sampled poses, clears solver history, and rebuilds
   kinematics. `VelocityMDP` owns pose noise, spawn sampling, command
@@ -80,8 +84,12 @@ a partial reset.
   Observation and reward groups concatenate their terms into one vector per
   group. Step outputs expose reward groups at `("reward", group_name)`.
   PPO sums the reward columns across groups before computing advantages.
-- The RL environment uses Newton's `CollisionPipeline`. The custom terrain
-  collider is exercised by [benchmark_mesh_collision.py](benchmark_mesh_collision.py).
+- The RL environment defaults to Newton's `CollisionPipeline`.
+  `task.collision=mujoco` uses MuJoCo Warp's built-in detector and requires the
+  MuJoCo solver. `task.collision=newrl` routes supported primitive–terrain mesh
+  pairs to the custom collider and delegates the remaining pairs to Newton.
+  Every mode refreshes contacts on each physics substep. Compare modes with
+  [benchmark_mesh_collision.py](benchmark_mesh_collision.py).
   Solver and timing defaults are configured in `EnvironmentConfig`. MuJoCo Warp
   is the default backend; Steel uses augmented drives and point friction so
   its per-world checkpoints remain replayable. Its actuator torque is

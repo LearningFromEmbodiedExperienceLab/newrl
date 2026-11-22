@@ -11,6 +11,7 @@ from newrl.algos.interfaces import OnPolicyConfig
 from newrl.commands import train as _module
 from newrl.commands.train import TrainConfig
 from newrl.configs import EnvironmentConfig
+from newrl.env import StatefulEnvironment
 from newrl.robots import newton_anymal_c
 from newrl.solver_adapters import MujocoSimConfig, SteelSimConfig
 from newrl.utils.config import cs, load_config, main, save_config
@@ -30,6 +31,21 @@ class _Holder:
 
 
 class ConfigTests(unittest.TestCase):
+    def test_collision_mode_is_independent_of_solver(self):
+        from newrl.utils.config import resolve
+
+        for mode in ("newton", "mujoco", "newrl"):
+            cfg = resolve(TrainConfig, [
+                "task=AnymalLocoFlat", "algo=ppo", f"task.collision={mode}",
+            ])
+            self.assertEqual(cfg.task.collision, mode)
+            self.assertIsInstance(cfg.task.solver, MujocoSimConfig)
+        incompatible = resolve(TrainConfig, [
+            "task=AnymalLocoFlat", "algo=ppo", "task.collision=mujoco", "task.solver=steel",
+        ])
+        with self.assertRaisesRegex(ValueError, "requires the MuJoCo solver"):
+            StatefulEnvironment(incompatible.task)
+
     def test_algorithm_presets_resolve_to_concrete_configs(self):
         from newrl.utils.config import resolve
 

@@ -30,7 +30,14 @@ from .mdp.rewards import (
 from .mdp.velocity import VelocityMDP
 from .robots import RobotConfig, assetx_as2, assetx_spot, newton_anymal_c
 from .solver_adapters import MujocoSimConfig, SteelSimConfig
-from .terrain import PlaneTerrainConfig, TerrainConfig
+from .terrain import (
+    FlatTileConfig,
+    GeneratedTerrainConfig,
+    PlaneTerrainConfig,
+    RoughHeightfieldTileConfig,
+    StairsTileConfig,
+    TerrainConfig,
+)
 
 
 @dataclass
@@ -54,6 +61,11 @@ class EnvironmentConfig:
     output_mdp_fields: tuple[str, ...] = ()
     contact_sensors: dict[str, TerrainContactConfig] = field(default_factory=dict)
     name: str = "custom"
+    collision: str = "newton"
+
+    def __post_init__(self):
+        if self.collision not in ("newton", "mujoco", "newrl"):
+            raise ValueError("collision must be newton, mujoco, or newrl")
 
 
 def locomotion_mdp(mdp_type: type[MDP] = MDP, base: str = "base") -> MDP:
@@ -195,6 +207,33 @@ def _quadruped_locomotion(
 
 
 from newrl.utils.config import cs
+
+cs.store("plane", PlaneTerrainConfig(), group="terrain")
+cs.store(
+    "flat_tiles",
+    GeneratedTerrainConfig(tiles={"flat": FlatTileConfig()}),
+    group="terrain",
+)
+cs.store(
+    "rough_easy",
+    GeneratedTerrainConfig(
+        tiles={
+            "fine": RoughHeightfieldTileConfig(amplitude=0.04, noise_spacing=0.30),
+            "coarse": RoughHeightfieldTileConfig(amplitude=0.06, noise_spacing=0.55),
+        }
+    ),
+    group="terrain",
+)
+cs.store(
+    "rough_hard",
+    GeneratedTerrainConfig(
+        tiles={
+            "rough": RoughHeightfieldTileConfig(amplitude=0.10, noise_spacing=0.40),
+            "stairs": StairsTileConfig(step_height=0.12, step_width=0.40),
+        }
+    ),
+    group="terrain",
+)
 
 for name, factory in (
     ("AnymalLocoFlat", AnymalLocomotion),

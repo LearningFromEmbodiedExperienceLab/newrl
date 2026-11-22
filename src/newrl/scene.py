@@ -99,8 +99,14 @@ class Scene:
         builder.default_shape_cfg.ke = config.ground_stiffness
         builder.default_shape_cfg.kd = config.ground_damping
         terrain_start = builder.shape_count
+        spawn_locations = ()
         if isinstance(config.terrain, TerrainConfig):
-            config.terrain.build(builder)
+            generated_spawns = config.terrain.build(builder)
+            spawn_locations = (
+                config.terrain.spawn_locations
+                if generated_spawns is None
+                else generated_spawns
+            )
         elif callable(config.terrain):
             config.terrain(builder)
         elif config.terrain == "plane":
@@ -114,11 +120,7 @@ class Scene:
         model = self.model = builder.finalize(device=config.device)
         device = wp.device_to_torch(model.device)
         self.spawn_locations = torch.as_tensor(
-            config.terrain.spawn_locations
-            if isinstance(config.terrain, TerrainConfig)
-            else (),
-            dtype=torch.float32,
-            device=device,
+            spawn_locations, dtype=torch.float32, device=device
         ).reshape(-1, 3)
         worlds = torch.arange(config.num_envs, device=device)[:, None]
         self.entities: dict[str, RobotEntity] = {}

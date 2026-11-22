@@ -116,3 +116,23 @@ and run `scripts/install_zsh_completion.sh` from the NewRL checkout. Re-run
 it after installing a project or changing its presets.
 
 See [environment benchmarks](benchmarks/README.md) for reproducible runs and reference results.
+
+## Procedural locomotion terrain
+
+```sh
+newrl train task=AnymalLocoFlat task.terrain=rough_easy algo=ppo
+newrl play task=AnymalLocoFlat task.terrain=rough_hard
+```
+
+`rough_easy` mixes two native heightfield roughness scales. `rough_hard`
+mixes rougher heightfields with box stairs. `flat_tiles` uses box slabs and
+`plane` selects the infinite plane. The worlds share one static terrain grid
+and sample the tile centers as spawn anchors at reset. Set
+`task.terrain.seed=1` to change the generated roughness or
+`task.terrain.rows=4` to repeat the tile families along another row.
+
+Set `task.collision=newton` for the default detector, `task.collision=mujoco`
+for MuJoCo Warp's built-in detector, or `task.collision=newrl` to use the
+custom detector on supported mesh pairs. The custom mode delegates heightfields,
+boxes, and other pairs to Newton. All three refresh contacts on each physics
+substep in training.

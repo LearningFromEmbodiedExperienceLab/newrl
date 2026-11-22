@@ -2,12 +2,16 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from math import isfinite
+from math import ceil, isfinite
 from pathlib import Path
+from typing import Protocol
 
 import newton
 import numpy as np
+import warp as wp
 from newton._src.utils.mesh import load_meshes_from_file
+
+SpawnLocations = tuple[tuple[float, float, float], ...]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -18,14 +22,15 @@ class TerrainConfig:
     Coordinates refer to the shared terrain seen by each Newton world.
     """
 
-    spawn_locations: tuple[tuple[float, float, float], ...] = ()
+    spawn_locations: SpawnLocations = ()
 
     def __post_init__(self):
         for location in self.spawn_locations:
             if len(location) != 3 or not all(isfinite(value) for value in location):
                 raise ValueError("Spawn locations must contain finite XYZ coordinates")
 
-    def build(self, builder: newton.ModelBuilder) -> None:
+    def build(self, builder: newton.ModelBuilder) -> SpawnLocations | None:
+        """Add static shapes and optionally return generated spawn anchors."""
         raise NotImplementedError
 
 
@@ -72,6 +77,162 @@ class FlatMeshTerrainConfig(TerrainConfig):
     def build(self, builder: newton.ModelBuilder) -> None:
         mesh = flat_ground_mesh(self.resolution, self.size, self.thickness)
         builder.add_shape_mesh(body=-1, mesh=mesh, label="ground_mesh")
+
+
+class TerrainTile(Protocol):
+    def build(
+        self,
+        builder: newton.ModelBuilder,
+        *,
+        center: tuple[float, float],
+        size: float,
+        spawn_pad_width: float,
+        rng: np.random.Generator,
+        label: str,
+    ) -> float:
+        """Build a tile and return the ground height at its center."""
+        ...
+
+
+@dataclass(frozen=True)
+class GeneratedTerrainConfig(TerrainConfig):
+    """Repeat a fixed set of tile families in rows on one shared static map."""
+
+    tiles: dict[str, TerrainTile]
+    rows: int = 3
+    tile_size: float = 8.0
+    spawn_pad_width: float = 2.0
+    seed: int = 0
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.rows < 1 or not self.tiles:
+            raise ValueError("Generated terrain needs at least one row and tile family")
+        if not 0.0 < self.spawn_pad_width < self.tile_size < float("inf"):
+            raise ValueError("spawn_pad_width must be positive and smaller than tile_size")
+        if self.seed < 0:
+            raise ValueError("Terrain seed must be non-negative")
+
+    def build(self, builder: newton.ModelBuilder) -> SpawnLocations:
+        rng = np.random.default_rng(self.seed)
+        anchors = []
+        for row in range(self.rows):
+            x = (row + 0.5 - self.rows / 2) * self.tile_size
+            for column, (name, tile) in enumerate(self.tiles.items()):
+                y = (column + 0.5 - len(self.tiles) / 2) * self.tile_size
+                z = tile.build(
+                    builder,
+                    center=(x, y),
+                    size=self.tile_size,
+                    spawn_pad_width=self.spawn_pad_width,
+                    rng=rng,
+                    label=f"terrain_{row}_{column}_{name}",
+                )
+                anchors.append((x, y, z))
+        return self.spawn_locations or tuple(anchors)
+
+
+def _add_ground_box(builder, x, y, hx, hy, top, label):
+    bottom = -0.25
+    builder.add_shape_box(
+        body=-1,
+        xform=wp.transform((x, y, (top + bottom) / 2), wp.quat_identity()),
+        hx=hx,
+        hy=hy,
+        hz=(top - bottom) / 2,
+        label=label,
+    )
+
+
+@dataclass(frozen=True)
+class FlatTileConfig:
+    """Finite box slab with its upper surface at ground level."""
+
+    def build(self, builder, *, center, size, spawn_pad_width, rng, label) -> float:
+        _add_ground_box(builder, *center, size / 2, size / 2, 0.0, label)
+        return 0.0
+
+
+@dataclass(frozen=True)
+class RoughHeightfieldTileConfig:
+    """Interpolated uniform noise with a flat spawn pad and level edges."""
+
+    amplitude: float = 0.06
+    sample_spacing: float = 0.1
+    noise_spacing: float = 0.45
+
+    def __post_init__(self):
+        if not 0.0 <= self.amplitude < float("inf"):
+            raise ValueError("Heightfield amplitude must be finite and non-negative")
+        if not 0.0 < self.sample_spacing <= self.noise_spacing < float("inf"):
+            raise ValueError("Spacings must satisfy 0 < sample_spacing <= noise_spacing")
+
+    def build(self, builder, *, center, size, spawn_pad_width, rng, label) -> float:
+        half = size / 2
+        count = ceil(size / self.sample_spacing) + 1
+        axis = np.linspace(-half, half, count)
+        noise_count = ceil(size / self.noise_spacing) + 1
+        noise_axis = np.linspace(-half, half, noise_count)
+        noise = rng.uniform(-self.amplitude, self.amplitude, (noise_count, noise_count))
+        along_x = np.stack([np.interp(axis, noise_axis, row) for row in noise])
+        heights = np.stack(
+            [np.interp(axis, noise_axis, col) for col in along_x.T], axis=1
+        )
+
+        radius = np.maximum.outer(np.abs(axis), np.abs(axis))
+        # Include the cells intersecting the pad so triangle interpolation keeps it flat.
+        pad_edge = spawn_pad_width / 2 + size / (count - 1)
+        heights *= np.clip((radius - pad_edge) / self.noise_spacing, 0.0, 1.0)
+        heights *= np.clip((half - radius) / self.noise_spacing, 0.0, 1.0)
+        builder.add_shape_heightfield(
+            xform=wp.transform((*center, 0.0), wp.quat_identity()),
+            heightfield=newton.Heightfield(heights, count, count, hx=half, hy=half),
+            label=label,
+        )
+        return 0.0
+
+
+@dataclass(frozen=True)
+class StairsTileConfig:
+    """Square box treads ascending from a level rim to a flat center platform."""
+
+    step_height: float = 0.10
+    step_width: float = 0.40
+
+    def __post_init__(self):
+        if not 0.0 < self.step_height < float("inf"):
+            raise ValueError("step_height must be positive and finite")
+        if not 0.0 < self.step_width < float("inf"):
+            raise ValueError("step_width must be positive and finite")
+
+    def build(self, builder, *, center, size, spawn_pad_width, rng, label) -> float:
+        x, y = center
+        half = size / 2
+        levels = int((size - spawn_pad_width) / (2 * self.step_width))
+        if not levels:
+            raise ValueError("Tile needs room for a tread outside the spawn pad")
+        for level in range(levels):
+            outer = half - level * self.step_width
+            inner = outer - self.step_width
+            offset = (outer + inner) / 2
+            tread_half = self.step_width / 2
+            top = level * self.step_height
+            for side, (dx, dy, hx, hy) in enumerate(
+                (
+                    (-offset, 0.0, tread_half, outer),
+                    (offset, 0.0, tread_half, outer),
+                    (0.0, -offset, inner, tread_half),
+                    (0.0, offset, inner, tread_half),
+                )
+            ):
+                _add_ground_box(
+                    builder, x + dx, y + dy, hx, hy, top, f"{label}_{level}_{side}"
+                )
+
+        platform_half = half - levels * self.step_width
+        top = levels * self.step_height
+        _add_ground_box(builder, x, y, platform_half, platform_half, top, f"{label}_pad")
+        return top
 
 
 def flat_ground_mesh(resolution: int, size: float, thickness: float) -> newton.Mesh:

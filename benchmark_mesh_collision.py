@@ -1,28 +1,32 @@
-"""Batched Anymal C walking on flat ground.
+"""Compare contact generators with batched ANYmal C and MuJoCo Warp.
 
 ``--terrain mesh`` is a slab whose top is a z=0 grid, the same surface as a
-plane. ``--mesh-res 1`` makes that top two triangles. The bottom and each side
-are two triangles. ``--terrain plane`` is Newton's analytic ground plane.
+plane. ``--terrain hybrid`` adds native heightfields and box stairs beside the
+slab, with worlds distributed across all three surfaces.
 
-Each env is one Newton world, created with ``ModelBuilder.replicate``. ``--contacts newton`` builds contacts with
-``newton.CollisionPipeline``. ``--contacts mujoco`` lets SolverMuJoCo run
-MuJoCo's own detector. ``--contacts newrl`` uses the static terrain BVH.
-All three paths use the MuJoCo Warp backend and need CUDA.
+By default, every mode refreshes contacts each physics substep. ``--contacts
+newrl`` routes supported mesh pairs through the custom kernel and delegates
+other pairs to Newton.
 """
 
 from __future__ import annotations
 
 import argparse
 import time
+from contextlib import nullcontext
+from dataclasses import replace
 
 import newton
 import numpy as np
+import torch
 import warp as wp
 from newton import JointTargetMode
 from tqdm import tqdm
 
+from newrl.configs import cs
 from newrl.terrain import flat_ground_mesh
-from terrain_collision import TerrainCollision
+from newrl.terrain_collision import HybridTerrainCollision
+from newrl.utils.profiling import StageProfiler
 from walk_policy import AnymalWalkPolicy
 
 FRAME_DT = 1.0 / 50.0
@@ -34,7 +38,7 @@ WALK_COMMAND = (0.5, 0.0, 0.4)
 
 
 class AnymalPlaneEnv:
-    """Anymal C robots walking a 4 m circle, one per world."""
+    """ANYmal C robots tracking a fixed turning command, one per world."""
 
     def __init__(
         self,
@@ -45,20 +49,24 @@ class AnymalPlaneEnv:
         mesh_size: float = 100.0,
         mesh_thickness: float = 1.0,
         jacobian: str = DEFAULT_JACOBIAN,
+        contact_refresh: str = "substep",
     ) -> None:
         if num_envs < 1:
             raise ValueError(f"num_envs must be positive, got {num_envs}")
         if contacts not in ("newton", "mujoco", "newrl"):
             raise ValueError(f"contacts must be 'newton', 'mujoco', or 'newrl', got {contacts!r}")
-        if contacts == "newrl" and terrain != "mesh":
-            raise ValueError("newrl contacts require terrain='mesh'")
-        if terrain not in ("plane", "mesh"):
-            raise ValueError(f"terrain must be 'plane' or 'mesh', got {terrain!r}")
+        if terrain not in ("plane", "mesh", "rough_easy", "rough_hard", "hybrid"):
+            raise ValueError(f"Unknown terrain {terrain!r}")
+        if contact_refresh not in ("substep", "control"):
+            raise ValueError("contact_refresh must be substep or control")
+        if contacts == "mujoco" and contact_refresh == "control":
+            raise ValueError("MuJoCo's built-in detector runs every physics substep")
         self.device = wp.get_device()
         if not self.device.is_cuda:
             raise RuntimeError("SolverMuJoCo on this path requires CUDA.")
         self.num_envs = num_envs
         self.contacts_backend = contacts
+        self.contact_refresh = contact_refresh
         self.terrain = terrain
         self.use_mujoco_contacts = contacts == "mujoco"
         self.frame_dt = FRAME_DT
@@ -100,13 +108,30 @@ class AnymalPlaneEnv:
         builder.replicate(robot, copy_count=num_envs)
         builder.default_shape_cfg.ke = 1.0e3
         builder.default_shape_cfg.kd = 1.0e2
+        terrain_start = builder.shape_count
+        anchors = ((0.0, 0.0, 0.0),)
+        self.triangle_count = 0
         if terrain == "plane":
             builder.add_ground_plane()
-            self.triangle_count = 0
-        else:
+        if terrain in ("rough_easy", "rough_hard", "hybrid"):
+            preset = cs.get("terrain", "rough_hard" if terrain == "hybrid" else terrain)
+            if terrain == "hybrid":
+                preset = replace(preset, rows=1)
+            anchors = preset.build(builder)
+        if terrain in ("mesh", "hybrid"):
             ground = flat_ground_mesh(mesh_resolution, mesh_size, mesh_thickness)
-            builder.add_shape_mesh(body=-1, mesh=ground, label="ground_mesh")
+            x = -(preset.tile_size + mesh_size) / 2 if terrain == "hybrid" else 0.0
+            builder.add_shape_mesh(
+                body=-1, mesh=ground, label="ground_mesh",
+                xform=wp.transform((x, 0.0, 0.0), wp.quat_identity()),
+            )
             self.triangle_count = 2 * mesh_resolution * mesh_resolution + 10
+            if terrain == "hybrid":
+                anchors = ((x, 0.0, 0.0), *anchors)
+        for world in range(num_envs):
+            start = world * len(robot.joint_q)
+            for axis, offset in enumerate(anchors[world % len(anchors)]):
+                builder.joint_q[start + axis] += offset
 
         self.model = builder.finalize()
         self.solver = newton.solvers.SolverMuJoCo(
@@ -124,87 +149,55 @@ class AnymalPlaneEnv:
         self.state_next = self.model.state()
         self.control = self.model.control()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
-        self._terrain_collision = None
         if self.use_mujoco_contacts:
-            self.collision_pipeline = newton.CollisionPipeline(
-                self.model,
-                rigid_contact_max=self.solver.get_max_contact_count(),
-                soft_contact_max=0,
-            )
-            self.contacts = self.collision_pipeline.contacts()
-        elif contacts == "newrl":
-            self._terrain_collision = TerrainCollision(self.model)
             self.collision_pipeline = None
-            self.contacts = self._terrain_collision.contacts
+        elif contacts == "newrl":
+            self.collision_pipeline = HybridTerrainCollision(
+                self.model, range(terrain_start, builder.shape_count)
+            )
         else:
             self.collision_pipeline = newton.CollisionPipeline(self.model)
-            self.contacts = self.collision_pipeline.contacts()
+        self.contacts = (
+            self.collision_pipeline.contacts() if self.collision_pipeline is not None else None
+        )
         self.graph = None
         self._viewer = None
         self.policy = AnymalWalkPolicy(self.model, num_envs, WALK_COMMAND)
 
-    def simulate(self) -> None:
+    def simulate(self, profiler: StageProfiler | None = None) -> None:
         """One control step. Safe to capture: no host sync and a fixed substep count."""
-        if self._terrain_collision is not None:
-            self._terrain_collision.collide(self.state)
-        elif not self.use_mujoco_contacts:
-            self.collision_pipeline.collide(self.state, self.contacts)
-        for _ in range(SUBSTEPS):
+        stage = nullcontext if profiler is None else profiler.stage
+        for substep in range(SUBSTEPS):
             self.state.clear_forces()
-            self.solver.step(self.state, self.state_next, self.control, self.contacts, self.sim_dt)
+            if self._viewer is not None and self.graph is None and profiler is None:
+                self._viewer.apply_forces(self.state)
+            if self.collision_pipeline is not None and (
+                substep == 0 or self.contact_refresh == "substep"
+            ):
+                with stage("collision"):
+                    self.collision_pipeline.collide(self.state, self.contacts)
+            with stage("solver"):
+                self.solver.step(self.state, self.state_next, self.control, self.contacts, self.sim_dt)
             self.state, self.state_next = self.state_next, self.state
 
     def capture(self, viewer=None) -> None:
         """Compile kernels once, then record ``simulate`` into a CUDA graph."""
-        self._viewer = viewer
         self.simulate()
         wp.synchronize()
         with wp.ScopedCapture() as capture:
             self.simulate()
         self.graph = capture.graph
+        self._viewer = viewer
 
-    def step(self, sync: bool = True) -> tuple[float, float]:
-        """Advance one control step.
-
-        With a captured graph the returned pair is ``(0, step_s)``: collision and
-        the solver are one replay, so they are not timed separately. ``sync=False``
-        skips the device sync used by the profiler.
-        """
+    def step(self, profiler: StageProfiler | None = None) -> None:
+        """Queue one control step, using eager physics for stage profiling."""
         # The policy writes into the control buffer the graph already captured.
         self.policy.apply(self.state, self.control)
-        if self.graph is not None:
-            t0 = time.perf_counter()
+        if self.graph is not None and profiler is None:
             wp.capture_launch(self.graph)
-            if sync:
-                wp.synchronize()
-            elapsed_s = time.perf_counter() - t0
-            self.step_count += 1
-            return 0.0, elapsed_s
-
-        collide_s = 0.0
-        if not self.use_mujoco_contacts:
-            if sync:
-                wp.synchronize()  # Exclude work queued by the policy from collision timing.
-            t0 = time.perf_counter()
-            if self._terrain_collision is not None:
-                self._terrain_collision.collide(self.state)
-            else:
-                self.collision_pipeline.collide(self.state, self.contacts)
-            if sync:
-                wp.synchronize()
-            collide_s = time.perf_counter() - t0
-        t0 = time.perf_counter()
-        for _ in range(SUBSTEPS):
-            self.state.clear_forces()
-            if self._viewer is not None:
-                self._viewer.apply_forces(self.state)
-            self.solver.step(self.state, self.state_next, self.control, self.contacts, self.sim_dt)
-            self.state, self.state_next = self.state_next, self.state
-        if sync:
-            wp.synchronize()
-        solve_s = time.perf_counter() - t0
+        else:
+            self.simulate(profiler)
         self.step_count += 1
-        return collide_s, solve_s
 
     def base_pose(self) -> np.ndarray:
         body_q = self.state.body_q.numpy()
@@ -241,7 +234,7 @@ def _run_viewer(env: AnymalPlaneEnv, viewer, steps: int) -> None:
     simulated = 0
     while viewer.is_running():
         if simulated < steps and not viewer.is_paused():
-            env.step(sync=False)
+            env.step()
             simulated += 1
             sim_time += env.frame_dt
         viewer.begin_frame(sim_time)
@@ -255,18 +248,29 @@ def main() -> None:
     parser.add_argument("--num-envs", type=int, default=4096)
     parser.add_argument("--profile-memory", action="store_true", help="report peak Warp CUDA pool usage")
     parser.add_argument("--contacts", choices=("newton", "mujoco", "newrl"), default="newton")
+    parser.add_argument(
+        "--contact-refresh", choices=("substep", "control"), default="substep",
+        help="test once-per-control-step refresh with an external detector",
+    )
     parser.add_argument("--jacobian", choices=("sparse", "dense", "auto"), default=DEFAULT_JACOBIAN)
     parser.add_argument("--steps", type=int, default=500)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--viewer", choices=("none", "gl", "rtx"), default="none")
     parser.add_argument("--graph", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--terrain", choices=("plane", "mesh"), default="mesh")
+    parser.add_argument(
+        "--terrain", choices=("plane", "mesh", "rough_easy", "rough_hard", "hybrid"),
+        default="mesh",
+    )
+    parser.add_argument(
+        "--profile-stages", type=int, default=0, metavar="STEPS",
+        help="measure CUDA stream time in a separate eager pass",
+    )
     parser.add_argument("--mesh-res", type=int, default=1, help="cells per side; 1 is two triangles")
     parser.add_argument("--mesh-size", type=float, default=20.0, help="square side length in meters")
     parser.add_argument("--mesh-thickness", type=float, default=1.0, help="slab depth below z=0, meters")
     args = parser.parse_args()
-    if args.warmup < 0 or args.steps < 1:
-        raise SystemExit("--warmup must be >= 0 and --steps must be >= 1")
+    if args.warmup < 0 or args.steps < 1 or args.profile_stages < 0:
+        raise SystemExit("--warmup and --profile-stages must be >= 0 and --steps must be >= 1")
 
     viewer = _open_viewer(args.viewer) if args.viewer != "none" else None
     env = AnymalPlaneEnv(
@@ -277,6 +281,7 @@ def main() -> None:
         mesh_size=args.mesh_size,
         mesh_thickness=args.mesh_thickness,
         jacobian=args.jacobian,
+        contact_refresh=args.contact_refresh,
     )
     if args.graph:
         env.capture(viewer)
@@ -290,13 +295,9 @@ def main() -> None:
         env.step()
     wp.synchronize()
 
-    collide_s = 0.0
-    solve_s = 0.0
     t0 = time.perf_counter()
     for _ in tqdm(range(args.steps), desc="Steps"):
-        step_collide_s, step_solve_s = env.step()
-        collide_s += step_collide_s
-        solve_s += step_solve_s
+        env.step()
     wp.synchronize()
     elapsed_s = time.perf_counter() - t0
     pose = env.base_pose()
@@ -306,14 +307,25 @@ def main() -> None:
     if args.profile_memory:
         peak = wp.get_mempool_used_mem_high(env.device)
         timing += f" warp_pool_peak_MiB={peak / 2**20:.1f}"
-    if not args.graph:
-        timing += (
-            f" collide_ms={1.0e3 * collide_s / args.steps:.2f}"
-            f" solve_ms={1.0e3 * solve_s / args.steps:.2f}"
-        )
+    if args.profile_stages:
+        # Warm the eager path and time it independently of throughput.
+        env.simulate()
+        wp.synchronize()
+        device = torch.device(str(env.device))
+        profiler = StageProfiler(device)
+        with wp.ScopedStream(wp.stream_from_torch(torch.cuda.current_stream(device))):
+            for _ in range(args.profile_stages):
+                env.step(profiler)
+        for name, (stream_ms, _, calls) in profiler.totals().items():
+            timing += f" eager_{name}_ms={stream_ms / args.profile_stages:.2f}"
+            timing += f" {name}_calls={calls}"
+    custom_pairs = sum(
+        item.query_count for item in getattr(env.collision_pipeline, "mesh_colliders", ())
+    )
     print(
         f"envs={env.num_envs} contacts={env.contacts_backend} "
-        f"terrain={env.terrain} triangles={env.triangle_count} jacobian={args.jacobian} "
+        f"terrain={env.terrain} triangles={env.triangle_count} custom_pairs={custom_pairs} "
+        f"jacobian={args.jacobian} collision_refresh={env.contact_refresh} "
         f"warmup={args.warmup} steps={args.steps} graph={args.graph} "
         f"{timing} "
         f"base_height min={height.min():.3f} mean={height.mean():.3f} max={height.max():.3f} "

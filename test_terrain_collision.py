@@ -5,6 +5,7 @@ import numpy as np
 import warp as wp
 
 from newrl.terrain import flat_ground_mesh
+from newrl.terrain_collision import HybridTerrainCollision
 from terrain_collision import TerrainCollision
 
 
@@ -43,6 +44,45 @@ def contacts(pipeline, state):
 
 
 class TestTerrainCollision(unittest.TestCase):
+    def test_hybrid_routes_contacts_from_multiple_meshes_and_native_shapes(self):
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        mesh = flat_ground_mesh(1, 2.0, 0.5)
+        surfaces = [
+            builder.add_shape_mesh(body=-1, mesh=mesh, xform=pose(-6.0, 0.0, 0.0)),
+            builder.add_shape_mesh(body=-1, mesh=mesh, xform=pose(-2.0, 0.0, 0.0)),
+            builder.add_shape_box(body=-1, xform=pose(2.0, 0.0, -0.25), hz=0.25),
+            builder.add_shape_heightfield(
+                heightfield=newton.Heightfield(np.zeros((3, 3)), 3, 3),
+                xform=pose(6.0, 0.0, 0.0),
+            ),
+        ]
+        probes = []
+        for x in (-6.0, -2.0, 2.0, 6.0):
+            body = builder.add_body(xform=pose(x, 0.0, 0.09))
+            probes.append(builder.add_shape_sphere(body=body, radius=0.1))
+        model = builder.finalize()
+        pipeline = HybridTerrainCollision(model, surfaces, deterministic=True)
+        self.assertEqual([collider.ground for collider in pipeline.mesh_colliders], surfaces[:2])
+        fallback_pairs = pipeline.newton.shape_pairs_filtered.numpy()
+        self.assertFalse(np.isin(fallback_pairs, surfaces[:2]).any())
+
+        buffer, state = pipeline.contacts(), model.state()
+        previous = None
+        for _ in range(2):
+            pipeline.collide(state, buffer)
+            count = int(buffer.rigid_contact_count.numpy()[0])
+            pairs = np.stack(
+                (buffer.rigid_contact_shape0.numpy()[:count],
+                 buffer.rigid_contact_shape1.numpy()[:count]), axis=-1
+            )
+            self.assertEqual(
+                {tuple(sorted(pair)) for pair in pairs.tolist()},
+                set(zip(surfaces, probes, strict=True)),
+            )
+            if previous is not None:
+                np.testing.assert_array_equal(pairs, previous)
+            previous = pairs
+
     def test_edge_vertex_and_teleport(self):
         p, s = setup(triangle(), (-0.06, 0.3, 0.06))
         points, normals = contacts(p, s)

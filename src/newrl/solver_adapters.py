@@ -13,6 +13,7 @@ from .steel import reconstruct_augmented_drive_torque
 
 class SolverAdapter(Protocol):
     solver: object
+    contacts: newton.Contacts | None
     observables: object
     contact_observables: object
 
@@ -27,7 +28,15 @@ class SolverAdapter(Protocol):
 
 class MujocoSim:
     def __init__(
-        self, config, scene, contacts, needs_torque, needs_contacts, *, deterministic
+        self,
+        config,
+        scene,
+        contacts,
+        needs_torque,
+        needs_contacts,
+        *,
+        deterministic,
+        use_mujoco_contacts=False,
     ):
         self.model = scene.model
         self.num_envs = scene.model.world_count
@@ -42,12 +51,17 @@ class MujocoSim:
             ls_iterations=config.ls_iterations,
             nconmax=config.nconmax,
             njmax=config.njmax,
-            use_mujoco_contacts=False,
+            use_mujoco_contacts=use_mujoco_contacts,
             enable_sleeping=False,
             deterministic=wp.DeterministicMode.RUN_TO_RUN if deterministic else None,
         )
         self.observables = None
         self.contact_observables = None
+        if use_mujoco_contacts and needs_contacts:
+            contacts = newton.Contacts(
+                self.solver.get_max_contact_count(), 0, device=self.model.device
+            )
+        self.contacts = contacts
         if needs_contacts:
             kinds = {self.solver.ObservableKind.CONTACT_F}
             if needs_torque:
@@ -99,6 +113,7 @@ class SteelSim:
         self, config, scene, contacts, needs_torque, needs_contacts, *, deterministic
     ):
         self.model = scene.model
+        self.contacts = contacts
         self.num_envs = scene.model.world_count
         self.model.rigid_contact_max = contacts.rigid_contact_max
         self.solver = newton.solvers.SolverSteel(
@@ -207,7 +222,14 @@ class MujocoSimConfig:
     njmax: int = 100
 
     def build(
-        self, scene, contacts, needs_torque, needs_contacts, *, deterministic
+        self,
+        scene,
+        contacts,
+        needs_torque,
+        needs_contacts,
+        *,
+        deterministic,
+        use_mujoco_contacts=False,
     ) -> SolverAdapter:
         return MujocoSim(
             self,
@@ -216,6 +238,7 @@ class MujocoSimConfig:
             needs_torque,
             needs_contacts,
             deterministic=deterministic,
+            use_mujoco_contacts=use_mujoco_contacts,
         )
 
 
@@ -225,8 +248,17 @@ class SteelSimConfig:
     articulation_constraint_max: int = 128
 
     def build(
-        self, scene, contacts, needs_torque, needs_contacts, *, deterministic
+        self,
+        scene,
+        contacts,
+        needs_torque,
+        needs_contacts,
+        *,
+        deterministic,
+        use_mujoco_contacts=False,
     ) -> SolverAdapter:
+        if use_mujoco_contacts:
+            raise ValueError("collision=mujoco requires the MuJoCo solver")
         return SteelSim(
             self,
             scene,

@@ -10,6 +10,8 @@ from tensordict import TensorDict
 from .configs import EnvironmentConfig
 from .mdp.base import MDP
 from .scene import Scene
+from .solver_adapters import MujocoSimConfig
+from .terrain_collision import HybridTerrainCollision
 from .utils.profiling import StageProfiler
 
 
@@ -21,6 +23,8 @@ class _EnvironmentCore:
             raise ValueError("num_envs, substeps, and sim_dt must be positive")
         if not config.robots:
             raise ValueError("Configure at least one robot")
+        if config.collision == "mujoco" and not isinstance(config.solver, MujocoSimConfig):
+            raise ValueError("collision=mujoco requires the MuJoCo solver")
         if not wp.get_device(config.device).is_cuda:
             raise ValueError("The batched environment requires CUDA")
         self.config = config
@@ -45,10 +49,17 @@ class _EnvironmentCore:
         self.physical_read_plan = self.scene.resolve_physical_fields(requested)
         self.model = self.scene.model
         self.device = torch.device(wp.device_to_torch(self.model.device))
-        self.collision = newton.CollisionPipeline(
-            self.model, deterministic=config.deterministic
-        )
-        self.contacts = self.collision.contacts()
+        if config.collision == "newrl":
+            self.collision = HybridTerrainCollision(
+                self.model, self.scene.terrain_shapes, deterministic=config.deterministic
+            )
+        elif config.collision == "newton":
+            self.collision = newton.CollisionPipeline(
+                self.model, deterministic=config.deterministic
+            )
+        else:
+            self.collision = None
+        contacts = self.collision.contacts() if self.collision is not None else None
         needs_torque = any(
             "joint_torque" in fields for fields in self.physical_read_plan.values()
         )
@@ -61,11 +72,13 @@ class _EnvironmentCore:
             sensor.initialize(self.model, self.scene.terrain_shapes)
         self._solver = config.solver.build(
             self.scene,
-            self.contacts,
+            contacts,
             needs_torque,
             bool(self._contact_sensors),
             deterministic=config.deterministic,
+            use_mujoco_contacts=config.collision == "mujoco",
         )
+        self.contacts = self._solver.contacts
         self.sim = self._solver.solver
         self.observables = self._solver.observables
         self.state = self.model.state()
@@ -99,7 +112,8 @@ class _EnvironmentCore:
             )
             with self._profile_stage("collision") if profile else nullcontext():
                 state.clear_forces()
-                self.collision.collide(state, self.contacts)
+                if self.collision is not None:
+                    self.collision.collide(state, self.contacts)
             with self._profile_stage("solver") if profile else nullcontext():
                 self._solver.step(
                     state,
