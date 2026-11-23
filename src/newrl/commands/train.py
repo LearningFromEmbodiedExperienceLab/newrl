@@ -29,6 +29,7 @@ class TrainConfig:
     iterations: int = 2000
     logger: WandbConfig = field(default_factory=WandbConfig)
     checkpoint_interval: int = 250
+    compile_policy: bool = True
 
     def __post_init__(self):
         if self.checkpoint_interval < 0:
@@ -163,6 +164,8 @@ def train(cfg: TrainConfig) -> None:
     cfg.task.mdp.seed = cfg.seed
     env = StatefulEnvironment(cfg.task)
     policy = cfg.algo.build(env)
+    if cfg.compile_policy:
+        policy.act = torch.compile(policy.act, fullgraph=True)
     carry = env.reset()
     episode_stats = EpisodeStats(env.mdp.rewards)
     logger = _make_logger(cfg, run_id=run_id)

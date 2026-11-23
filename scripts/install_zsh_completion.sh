@@ -46,7 +46,9 @@ lines.append(
 _newrl_preset() {
     [[ $PREFIX == *=* ]] || return 1
     local group=${PREFIX%%=*}
-    group=${group##*.}
+    while (( ! ${+_newrl_presets[$group]} )) && [[ $group == *.* ]]; do
+        group=${group#*.}
+    done
     (( ${+_newrl_presets[$group]} )) || return 1
     compset -P '*=' || return 1
     local -a options

@@ -55,10 +55,8 @@ class EmpiricalNormalization(nn.Module):
         return mean, variance.sqrt()
 
     def normalize(self, values: torch.Tensor) -> torch.Tensor:
-        if float(self.count) == 0.0:
-            return values
         mean, std = self.mean_std()
-        return (values - mean) / std
+        return torch.where(self.count == 0, values, (values - mean) / std)
 
     @contextmanager
     def freeze(self):
@@ -107,9 +105,8 @@ class ReturnNormalization(nn.Module):
         self.count.add_(returns.numel())
 
     def scale(self) -> torch.Tensor:
-        if float(self.count) < 2.0:
-            return self.square_sum.new_ones(())
-        return (self.square_sum / self.count).sqrt().clamp_min(self.eps)
+        scale = (self.square_sum / self.count.clamp_min(2.0)).sqrt()
+        return torch.where(self.count < 2.0, 1.0, scale.clamp_min(self.eps))
 
     def _advance(self, reward: torch.Tensor, done: torch.Tensor) -> torch.Tensor:
         if reward.ndim != 3 or reward.shape[-1] != 1:

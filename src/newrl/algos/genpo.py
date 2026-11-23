@@ -20,6 +20,7 @@ from .common.batch import (
     POLICY_OBSERVATION,
     TERMINATED,
     aggregate_reward,
+    collect_metrics,
     group_width,
     minibatches,
     stack_groups,
@@ -347,21 +348,18 @@ class GenPO(nn.Module):
                 batch_size=batch.batch_size,
                 device=self.device,
             )
-            last_epoch: list[dict[str, float]] = []
+            last_epoch: list[dict[str, torch.Tensor]] = []
             for _ in range(self.cfg.num_epochs):
                 last_epoch = [
                     self._update(minibatch, profiler=profiler)
                     for minibatch in minibatches(training, self.cfg.num_minibatches)
                 ]
 
-        metrics = {
-            key: sum(info[key] for info in last_epoch) / len(last_epoch)
-            for key in last_epoch[0]
+        rollout_metrics = {
+            "critic/neg_rew_ratio": (raw_reward <= 0).float().mean(),
+            "critic/adv_mean": advantage_mean,
+            "critic/adv_std": advantage_std,
         }
-        metrics["critic/neg_rew_ratio"] = float((raw_reward <= 0).float().mean())
-        metrics["actor/lr"] = self.optimizer.param_groups[0]["lr"]
-        metrics["critic/adv_mean"] = float(advantage_mean)
-        metrics["critic/adv_std"] = float(advantage_std)
         with torch.no_grad(), self.policy_norm.freeze(), self.critic_norm.freeze():
             new_log_prob = self.actor.log_prob(
                 self.policy_norm(batch[POLICY_OBSERVATION]),
@@ -369,14 +367,18 @@ class GenPO(nn.Module):
                 batch[FLOW_HIST],
             )
             log_ratio = new_log_prob - batch[ACTION_LOG_PROB]
-            metrics["actor/policy_gain"] = float((log_ratio * advantage).mean())
+            rollout_metrics["actor/policy_gain"] = (log_ratio * advantage).mean()
             predicted = self.critic(self.critic_norm(batch[CRITIC_OBSERVATION]))
             return_variance = returns.var().clamp_min(1e-7)
-            metrics["critic/explained_var"] = float(
+            rollout_metrics["critic/explained_var"] = (
                 1.0 - (predicted - returns).square().mean() / return_variance
             )
+        metrics = collect_metrics(last_epoch, rollout_metrics)
+        metrics["actor/lr"] = self.optimizer.param_groups[0]["lr"]
+        metrics["actor/entropy"] = self.augmented_entropy
         if profiler is not None:
-            for stage, (stream_ms, host_ms, calls) in profiler.totals().items():
+            # The metric transfer above already waited for this stream.
+            for stage, (stream_ms, host_ms, calls) in profiler.totals(synchronize=False).items():
                 prefix = f"profile/genpo/{stage}"
                 metrics[f"{prefix}/host_ms"] = host_ms
                 metrics[f"{prefix}/calls"] = calls
@@ -386,7 +388,7 @@ class GenPO(nn.Module):
 
     def _update(
         self, batch: TensorDict, *, profiler: StageProfiler | None = None
-    ) -> dict[str, float]:
+    ) -> dict[str, torch.Tensor]:
         stage = nullcontext if profiler is None else profiler.stage
         with stage("forward_loss"):
             observation = self.policy_norm(batch[POLICY_OBSERVATION])
@@ -435,13 +437,15 @@ class GenPO(nn.Module):
         with stage("metrics"):
             detached_ratio = ratio.detach()
             detached_log_ratio = log_ratio.detach()
-            augmented_kl = float(-detached_log_ratio.mean())
+            augmented_kl = -detached_log_ratio.mean()
             target = self.cfg.desired_kl
             if target is not None:
+                # The optimizers consume a host learning rate on the next step.
+                kl = float(augmented_kl)
                 factor = 1.0
-                if augmented_kl > 2.0 * target:
+                if kl > 2.0 * target:
                     factor = 1.0 / 1.5
-                elif 0.0 < augmented_kl < 0.5 * target:
+                elif 0.0 < kl < 0.5 * target:
                     factor = 1.5
                 if factor != 1.0:
                     # AdamW and Muon keep separate actor groups. Use the live groups
@@ -451,21 +455,18 @@ class GenPO(nn.Module):
                         if group["params"] and id(group["params"][0]) in actor_params:
                             group["lr"] = min(1e-3, max(1e-5, group["lr"] * factor))
             metrics = {
-                "actor/policy_loss": float(policy_loss.detach()),
-                "actor/entropy": self.augmented_entropy,
+                "actor/policy_loss": policy_loss.detach(),
                 "actor/aug_kl": augmented_kl,
-                "actor/grad_norm": float(actor_grad),
-                "actor/approx_kl": float(
-                    ((detached_ratio - 1.0) - detached_log_ratio).mean()
-                ),
-                "actor/clamp_pos": float((detached_ratio > 1.0 + upper).float().mean()),
-                "actor/clamp_neg": float((detached_ratio < 1.0 - lower).float().mean()),
-                "critic/value_loss": float(value_loss.detach()),
-                "critic/value_mean": float(value.mean().detach()),
-                "critic/grad_norm": float(critic_grad),
+                "actor/grad_norm": actor_grad,
+                "actor/approx_kl": ((detached_ratio - 1.0) - detached_log_ratio).mean(),
+                "actor/clamp_pos": (detached_ratio > 1.0 + upper).float().mean(),
+                "actor/clamp_neg": (detached_ratio < 1.0 - lower).float().mean(),
+                "critic/value_loss": value_loss.detach(),
+                "critic/value_mean": value.mean().detach(),
+                "critic/grad_norm": critic_grad,
             }
             if symmetry_loss is not None:
-                metrics["actor/symmetry_loss"] = float(symmetry_loss.detach())
+                metrics["actor/symmetry_loss"] = symmetry_loss.detach()
             return metrics
 
 

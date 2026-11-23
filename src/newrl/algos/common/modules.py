@@ -103,7 +103,8 @@ class NormalActor(nn.Module):
 
     def distribution(self, observation: torch.Tensor) -> torch.distributions.Normal:
         loc = self.mean(self.backbone(observation))
-        return torch.distributions.Normal(loc, self.scale())
+        # The scale is positive by construction. Tensor validation syncs on CUDA.
+        return torch.distributions.Normal(loc, self.scale(), validate_args=False)
 
     def log_prob(self, observation: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         return self.distribution(observation).log_prob(action).sum(-1, keepdim=True)

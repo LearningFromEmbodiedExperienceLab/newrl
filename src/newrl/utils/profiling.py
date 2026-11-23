@@ -29,9 +29,12 @@ class StageProfiler:
             end.record(stream)
         self._samples[name].append((start, end, host_ms))
 
-    def totals(self) -> dict[str, tuple[float, float, int]]:
-        """Return (stream ms, CPU wall ms, calls) by stage, with zero stream time on CPU."""
-        if self.device.type == "cuda":
+    def totals(self, *, synchronize: bool = True) -> dict[str, tuple[float, float, int]]:
+        """Return (stream ms, CPU wall ms, calls) by stage.
+
+        Pass synchronize=False when all recorded CUDA events have completed.
+        """
+        if synchronize and self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         return {
             name: (

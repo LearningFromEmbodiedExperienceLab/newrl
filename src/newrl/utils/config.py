@@ -172,12 +172,16 @@ def resolve(config_cls: type, argv: Sequence[str]) -> Any:
     for key, raw in sorted(assignments, key=lambda item: item[0].count(".")):
         if key in consumed:
             continue
-        group = key.rsplit(".", 1)[-1]
-        if "." in key and (group, raw) in cs:
-            config = _assign(config, key.split("."), raw, selection=cs.get(group, raw))
+        parts = key.split(".")
+        if len(parts) > 1:
+            for index in range(len(parts)):
+                group = ".".join(parts[index:])
+                if (group, raw) in cs:
+                    config = _assign(config, parts, raw, selection=cs.get(group, raw))
+                    consumed.add(key)
+                    break
     for key, raw in assignments:
-        group = key.rsplit(".", 1)[-1]
-        if key in consumed or ("." in key and (group, raw) in cs):
+        if key in consumed:
             continue
         config = _assign(config, key.split("."), raw)
     return config

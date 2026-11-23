@@ -37,13 +37,12 @@ def generalized_advantage(
     advantages = torch.zeros_like(reward)
     nonterminal = (~terminated).to(reward.dtype)
     not_done = (~done).to(reward.dtype)
-    discount = reward.new_tensor(gamma)
-    trace_decay = reward.new_tensor(lam)
+    trace_decay = gamma * lam
     advantage = torch.zeros_like(reward[:, 0])
     for step in reversed(range(reward.shape[1])):
         bootstrap = next_value[:, step] * nonterminal[:, step]
-        delta = reward[:, step] + discount * bootstrap - value[:, step]
-        advantage = delta + discount * trace_decay * not_done[:, step] * advantage
+        delta = reward[:, step] + gamma * bootstrap - value[:, step]
+        advantage = delta + trace_decay * not_done[:, step] * advantage
         advantages[:, step] = advantage
     return advantages, advantages + value
 

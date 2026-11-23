@@ -33,9 +33,11 @@ from .mdp.velocity import VelocityMDP
 from .robots import RobotConfig, assetx_as2, assetx_spot, newton_anymal_c
 from .solver_adapters import MujocoSimConfig, SteelSimConfig
 from .terrain import (
+    BorderConfig,
     FlatTileConfig,
     GeneratedTerrainConfig,
     PlaneTerrainConfig,
+    PyramidSlopeTileConfig,
     RoughHeightfieldTileConfig,
     StairsTileConfig,
     TerrainConfig,
@@ -203,8 +205,8 @@ def _quadruped_locomotion(
                 "action_rate": ActionRate(weight=0.01),
                 "joint_energy1": JointEnergy1(weight=0.0002),
                 # "joint_acc2": JointAcc2(weight=0.00001),
-                "joint_vel2": JointVel2(weight=0.01),
-                "feet_air_time": FeetAirTime(sensor="feet_ground", weight=1.0),
+                "joint_vel2": JointVel2(weight=0.002),
+                "feet_air_time": FeetAirTime(sensor="feet_ground", weight=0.2),
                 "foot_slip": FootSlip(sensor="feet_ground", weight=foot_slip_weight),
             }
         ),
@@ -224,6 +226,8 @@ def _quadruped_locomotion(
 
 from newrl.utils.config import cs
 
+cs.store("wall", BorderConfig(), group="terrain.border")
+cs.store("apron", BorderConfig(kind="apron", width=5.0), group="terrain.border")
 cs.store("plane", PlaneTerrainConfig(), group="terrain")
 cs.store(
     "flat_tiles",
@@ -236,6 +240,8 @@ cs.store(
         tiles={
             "fine": RoughHeightfieldTileConfig(amplitude=0.04, noise_spacing=0.30),
             "coarse": RoughHeightfieldTileConfig(amplitude=0.06, noise_spacing=0.55),
+            "slope": PyramidSlopeTileConfig(slope=0.25),
+            "slope_inverted": PyramidSlopeTileConfig(slope=0.25, inverted=True),
         }
     ),
     group="terrain",
@@ -246,6 +252,8 @@ cs.store(
         tiles={
             "rough": RoughHeightfieldTileConfig(amplitude=0.10, noise_spacing=0.40),
             "stairs": StairsTileConfig(step_height=0.12, step_width=0.40),
+            "slope": PyramidSlopeTileConfig(slope=0.25),
+            "slope_inverted": PyramidSlopeTileConfig(slope=0.25, inverted=True),
         }
     ),
     group="terrain",

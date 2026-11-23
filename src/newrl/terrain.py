@@ -1,7 +1,7 @@
 """Static terrain geometry and optional spawn anchors for each replicated world."""
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import ceil, isfinite
 from pathlib import Path
 from typing import Protocol
@@ -79,6 +79,26 @@ class FlatMeshTerrainConfig(TerrainConfig):
         builder.add_shape_mesh(body=-1, mesh=mesh, label="ground_mesh")
 
 
+@dataclass(frozen=True)
+class BorderConfig:
+    """Rectangular terrain border, with dimensions in meters."""
+
+    width: float = 0.25
+    height: float = 1.5
+    thickness: float = 0.25
+    kind: str = "wall"
+
+    def __post_init__(self):
+        if self.kind not in ("wall", "apron"):
+            raise ValueError("Border kind must be wall or apron")
+        if not isfinite(self.width) or self.width < 0:
+            raise ValueError("Border width must be finite and non-negative")
+        if not isfinite(self.height) or self.height <= 0:
+            raise ValueError("Border height must be finite and positive")
+        if not isfinite(self.thickness) or self.thickness <= 0:
+            raise ValueError("Border thickness must be finite and positive")
+
+
 class TerrainTile(Protocol):
     def build(
         self,
@@ -103,6 +123,10 @@ class GeneratedTerrainConfig(TerrainConfig):
     tile_size: float = 8.0
     spawn_pad_width: float = 2.0
     seed: int = 0
+    border: BorderConfig = field(default_factory=BorderConfig)
+    # Retained for loading configurations saved before border presets.
+    border_width: float | None = None
+    border_height: float | None = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -112,6 +136,14 @@ class GeneratedTerrainConfig(TerrainConfig):
             raise ValueError("spawn_pad_width must be positive and smaller than tile_size")
         if self.seed < 0:
             raise ValueError("Terrain seed must be non-negative")
+        if self.border_width is not None and (
+            not isfinite(self.border_width) or self.border_width < 0
+        ):
+            raise ValueError("Border width must be finite and non-negative")
+        if self.border_height is not None and (
+            not isfinite(self.border_height) or self.border_height <= 0
+        ):
+            raise ValueError("Border height must be finite and positive")
 
     def build(self, builder: newton.ModelBuilder) -> SpawnLocations:
         rng = np.random.default_rng(self.seed)
@@ -129,6 +161,29 @@ class GeneratedTerrainConfig(TerrainConfig):
                     label=f"terrain_{row}_{column}_{name}",
                 )
                 anchors.append((x, y, z))
+        width = self.border.width if self.border_width is None else self.border_width
+        height = self.border.height if self.border_height is None else self.border_height
+        if width:
+            half_x = self.rows * self.tile_size / 2
+            half_y = len(self.tiles) * self.tile_size / 2
+            for name, x, y, hx, hy in (
+                ("west", -half_x - width / 2, 0.0, width / 2, half_y + width),
+                ("east", half_x + width / 2, 0.0, width / 2, half_y + width),
+                ("south", 0.0, -half_y - width / 2, half_x, width / 2),
+                ("north", 0.0, half_y + width / 2, half_x, width / 2),
+            ):
+                top = height if self.border.kind == "wall" else 0.0
+                builder.add_shape_box(
+                    body=-1,
+                    xform=wp.transform(
+                        (x, y, (top - self.border.thickness) / 2),
+                        wp.quat_identity(),
+                    ),
+                    hx=hx,
+                    hy=hy,
+                    hz=(top + self.border.thickness) / 2,
+                    label=f"border_{name}",
+                )
         return self.spawn_locations or tuple(anchors)
 
 
@@ -190,6 +245,40 @@ class RoughHeightfieldTileConfig:
             label=label,
         )
         return 0.0
+
+
+@dataclass(frozen=True)
+class PyramidSlopeTileConfig:
+    """Heightfield pyramid with level edges and a flat central platform."""
+
+    slope: float = 0.25
+    sample_spacing: float = 0.1
+    inverted: bool = False
+
+    def __post_init__(self):
+        if not isfinite(self.slope) or self.slope <= 0:
+            raise ValueError("Slope must be finite and positive")
+        if not isfinite(self.sample_spacing) or self.sample_spacing <= 0:
+            raise ValueError("Sample spacing must be finite and positive")
+
+    def build(self, builder, *, center, size, spawn_pad_width, rng, label) -> float:
+        half = size / 2
+        count = ceil(size / self.sample_spacing) + 1
+        axis = np.linspace(-half, half, count)
+        radius = np.maximum.outer(np.abs(axis), np.abs(axis))
+        # Flatten every cell touching the spawn platform.
+        pad_edge = min(half, spawn_pad_width / 2 + size / (count - 1))
+        height = self.slope * (half - pad_edge)
+        heights = self.slope * np.minimum(half - radius, half - pad_edge)
+        if self.inverted:
+            heights = -heights
+            height = -height
+        builder.add_shape_heightfield(
+            xform=wp.transform((*center, 0.0), wp.quat_identity()),
+            heightfield=newton.Heightfield(heights, count, count, hx=half, hy=half),
+            label=label,
+        )
+        return height
 
 
 @dataclass(frozen=True)

@@ -80,3 +80,15 @@ def minibatches(batch: TensorDict, num_minibatches: int):
     )
     for index in permutation:
         yield flat[index]
+
+
+def collect_metrics(
+    minibatch_metrics: list[dict[str, torch.Tensor]],
+    rollout_metrics: dict[str, torch.Tensor],
+) -> dict[str, float]:
+    """Average the last epoch and transfer all tensor metrics together."""
+    keys = tuple(minibatch_metrics[0])
+    rows = [torch.stack([info[key] for key in keys]) for info in minibatch_metrics]
+    epoch_mean = torch.stack(rows).mean(dim=0)
+    values = torch.cat((epoch_mean, torch.stack(tuple(rollout_metrics.values()))))
+    return dict(zip((*keys, *rollout_metrics), values.cpu().tolist(), strict=True))

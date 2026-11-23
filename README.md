@@ -60,6 +60,9 @@ Select Gaussian PPO with `algo=ppo` or the GenPO++ flow policy with
 `algo=genpo`. GenPO adapts the actor learning rate toward `algo.desired_kl`
 using augmented KL.
 
+Training compiles `policy.act` by default. Set `compile_policy=false` to
+run the policy eagerly.
+
 For left–right actor regularization on the ANYmal, Spot, and AS2 flat tasks,
 select `algo=ppo_symaug` or set `algo=genpo algo.symmetry_coef=1.0`.
 PPO SymAug defaults to a coefficient of `1.0`. GenPO defaults to `0.0`.
@@ -131,11 +134,14 @@ newrl play task=AnymalLocoFlat task.terrain=rough_hard
 ```
 
 `rough_easy` mixes two native heightfield roughness scales. `rough_hard`
-mixes rougher heightfields with box stairs. `flat_tiles` uses box slabs and
+mixes rougher heightfields with box stairs and pyramid slopes. `flat_tiles` uses box slabs and
 `plane` selects the infinite plane. The worlds share one static terrain grid
 and sample the tile centers as spawn anchors at reset. Set
 `task.terrain.seed=1` to change the generated roughness or
 `task.terrain.rows=4` to repeat the tile families along another row.
+Generated terrains default to outer walls. Use `task.terrain.border=apron`
+for a flat border and `task.terrain.border.width=5.0` to set its width.
+`task.terrain.border=wall` selects walls explicitly.
 
 Set `task.collision=newton` for the default detector, `task.collision=mujoco`
 for MuJoCo Warp's built-in detector, or `task.collision=newrl` to use the
