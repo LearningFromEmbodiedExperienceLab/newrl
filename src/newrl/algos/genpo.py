@@ -8,6 +8,7 @@ from typing import ClassVar
 import torch
 from tensordict import TensorDict
 from torch import nn
+from torch.nn import functional as F
 
 from .common.batch import (
     ACTION,
@@ -29,6 +30,7 @@ from .common.optimizer import make_optimizer
 from .common.policy_evaluation import clip_bounds, generalized_advantage
 from newrl.utils.config import cs
 from newrl.utils.profiling import StageProfiler
+from newrl.utils.symmetry import SymmetryTransform
 
 _ACTIVATIONS = {
     "mish": nn.Mish,
@@ -73,6 +75,7 @@ class GenPOConfig:
     flow_steps: int = 5
     sigma: float = 0.75
     desired_kl: float | None = 0.04
+    symmetry_coef: float = 0.0
 
     def __post_init__(self):
         if self.update_every < 1 or self.num_epochs < 1 or self.num_minibatches < 1:
@@ -98,13 +101,22 @@ class GenPOConfig:
             not isfinite(self.desired_kl) or self.desired_kl <= 0.0
         ):
             raise ValueError("GenPO desired_kl must be finite and positive, or None")
+        if not isfinite(self.symmetry_coef) or self.symmetry_coef < 0.0:
+            raise ValueError("symmetry_coef must be finite and nonnegative")
 
     def build(self, env) -> "GenPO":
+        mirrors = None
+        if self.symmetry_coef > 0.0:
+            mirrors = (
+                env.observation_symmetry_transform(self.policy_obs_keys),
+                env.scene.action_symmetry_transform(),
+            )
         return GenPO(
             self,
             policy_dim=group_width(env.mdp, self.policy_obs_keys),
             critic_dim=group_width(env.mdp, self.critic_obs_keys),
             action_dim=env.action_dim,
+            mirrors=mirrors,
         ).to(env.device)
 
 
@@ -212,9 +224,13 @@ class GenPO(nn.Module):
         policy_dim: int,
         critic_dim: int,
         action_dim: int,
+        mirrors: tuple[SymmetryTransform, SymmetryTransform] | None = None,
     ):
         super().__init__()
         self.cfg = cfg
+        if cfg.symmetry_coef > 0.0 and mirrors is None:
+            raise ValueError("GenPO symmetry requires observation and action mirrors")
+        self.observation_mirror, self.action_mirror = mirrors or (None, None)
         activation = _ACTIVATIONS[cfg.activation]
         self.clip_eps = clip_bounds(cfg.clip_eps)
         self.actor = ReversibleFlowActor(policy_dim, action_dim, activation, cfg)
@@ -388,6 +404,22 @@ class GenPO(nn.Module):
                 + self.cfg.value_coef * value_loss
                 - self.cfg.entropy_coef * self.augmented_entropy
             )
+            symmetry_loss = None
+            if self.observation_mirror is not None:
+                mirrored_observation = self.policy_norm(
+                    self.observation_mirror(batch[POLICY_OBSERVATION])
+                )
+                # The stored history is the input to the final flow step.
+                history = batch[FLOW_HIST]
+                step = self.cfg.flow_steps - 1
+                velocity = self.actor.velocity(observation, history, step)
+                mirrored_velocity = self.actor.velocity(
+                    mirrored_observation, self.action_mirror(history), step
+                )
+                symmetry_loss = F.mse_loss(
+                    mirrored_velocity, self.action_mirror(velocity)
+                )
+                loss = loss + self.cfg.symmetry_coef * symmetry_loss
         with stage("backward"):
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -418,7 +450,7 @@ class GenPO(nn.Module):
                     for group in self.optimizer.param_groups:
                         if group["params"] and id(group["params"][0]) in actor_params:
                             group["lr"] = min(1e-3, max(1e-5, group["lr"] * factor))
-            return {
+            metrics = {
                 "actor/policy_loss": float(policy_loss.detach()),
                 "actor/entropy": self.augmented_entropy,
                 "actor/aug_kl": augmented_kl,
@@ -432,5 +464,8 @@ class GenPO(nn.Module):
                 "critic/value_mean": float(value.mean().detach()),
                 "critic/grad_norm": float(critic_grad),
             }
+            if symmetry_loss is not None:
+                metrics["actor/symmetry_loss"] = float(symmetry_loss.detach())
+            return metrics
 
 

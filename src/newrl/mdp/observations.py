@@ -6,6 +6,11 @@ import torch
 
 from newrl.utils.math import quat_rotate_inverse, yaw_rotate
 from newrl.utils.string import resolve_scene_names
+from newrl.utils.symmetry import SymmetryTransform
+
+
+_POLAR_SIGNS = (1, -1, 1)
+_AXIAL_SIGNS = (-1, 1, -1)
 
 
 @dataclass(frozen=True)
@@ -45,6 +50,11 @@ class EntityField:
     def __call__(self, physical_state, mdp_state):
         return physical_state[self.entity, self.field]
 
+    def symmetry_transform(self, scene) -> SymmetryTransform:
+        if self.field not in ("joint_pos", "joint_vel", "joint_torque"):
+            raise ValueError(f"No reflection defined for entity field {self.field!r}")
+        return scene.entities[self.entity].joint_symmetry_transform()
+
 
 @dataclass(frozen=True)
 class PreviousAction:
@@ -69,6 +79,9 @@ class PreviousAction:
     def __call__(self, physical_state, mdp_state):
         return mdp_state["previous_action"]
 
+    def symmetry_transform(self, scene) -> SymmetryTransform:
+        return scene.action_symmetry_transform()
+
 
 previous_action = PreviousAction()
 
@@ -90,6 +103,7 @@ class _BodyObservation:
         default=(), init=False, repr=False, compare=False
     )
     _components: ClassVar[tuple[int, ...]] = (3,)
+    _mirror_signs: ClassVar[tuple[int, ...] | None] = None
 
     @property
     def shape(self) -> torch.Size:
@@ -129,6 +143,13 @@ class _BodyObservation:
             physical_state.ndim, self._indices
         )
 
+    def symmetry_transform(self, scene) -> SymmetryTransform:
+        if self._mirror_signs is None:
+            raise ValueError(f"No reflection defined for {type(self).__name__}")
+        return scene.entities[self.entity].body_symmetry_transform(
+            self._body_indices, self._mirror_signs
+        )
+
 
 @dataclass(frozen=True)
 class _BodyVelocity(_BodyObservation):
@@ -158,16 +179,22 @@ class _BodyVelocity(_BodyObservation):
 
 
 class BodyLinearVelocity(_BodyVelocity):
+    _mirror_signs = _POLAR_SIGNS
+
     def __call__(self, physical_state, mdp_state):
         return self._velocity(physical_state, slice(0, 3))
 
 
 class BodyAngularVelocity(_BodyVelocity):
+    _mirror_signs = _AXIAL_SIGNS
+
     def __call__(self, physical_state, mdp_state):
         return self._velocity(physical_state, slice(3, 6))
 
 
 class ProjectedGravity(_BodyObservation):
+    _mirror_signs = _POLAR_SIGNS
+
     @property
     def physical_fields(self):
         return frozenset({(self.entity, "projected_gravity")})
@@ -178,6 +205,7 @@ class ProjectedGravity(_BodyObservation):
 
 class BodyHeight(_BodyObservation):
     _components = ()
+    _mirror_signs = (1,)
 
     @property
     def physical_fields(self):
@@ -197,6 +225,9 @@ class VelocityCommandObservation:
 
     def __call__(self, physical_state, mdp_state):
         return mdp_state["velocity_command"]
+
+    def symmetry_transform(self, scene) -> SymmetryTransform:
+        return SymmetryTransform((0, 1, 2), (1, -1, -1))
 
 
 velocity_command = VelocityCommandObservation()
@@ -249,3 +280,10 @@ class ContactObservation:
 
     def __call__(self, physical_state, mdp_state):
         return physical_state[self.sensor, self.field].float()
+
+    def symmetry_transform(self, scene) -> SymmetryTransform:
+        sensor = scene.contact_sensors[self.sensor]
+        entity = scene.entities[sensor.config.entity]
+        indices = resolve_scene_names(sensor.config.body_names, entity.body_names)
+        signs = _POLAR_SIGNS if self.field in ("force_w", "last_contact_pos_w") else (1,)
+        return entity.body_symmetry_transform(indices, signs)

@@ -1,6 +1,6 @@
 """Replicate a Newton scene and expose named robot tensors."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import newton
 import torch
@@ -11,6 +11,7 @@ from .contact import TerrainContact
 from .mdp.actions import JointPositionAction
 from .robots import scalar_joints
 from .terrain import TerrainConfig
+from .utils.symmetry import SymmetryTransform
 
 
 @dataclass
@@ -24,6 +25,17 @@ class RobotEntity:
     root_q: torch.Tensor | None
     default_position: torch.Tensor
     action: JointPositionAction
+    joint_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
+    body_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
+
+    def joint_symmetry_transform(self) -> SymmetryTransform:
+        return SymmetryTransform.from_names(self.joint_names, self.joint_mirror)
+
+    def body_symmetry_transform(
+        self, indices, component_signs: tuple[int, ...]
+    ) -> SymmetryTransform:
+        labels = [self.body_names[index] for index in indices]
+        return SymmetryTransform.from_names(labels, self.body_mirror, component_signs)
 
     def read(self, state, fields, observables=None) -> TensorDict:
         # Advanced indexing produces snapshots, safe across state-buffer swaps.
@@ -92,6 +104,8 @@ class Scene:
                 bodies,
                 roots,
                 robot_cfg.action_scales(labels),
+                robot_cfg.joint_mirror,
+                robot_cfg.body_mirror,
             )
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -124,7 +138,8 @@ class Scene:
         ).reshape(-1, 3)
         worlds = torch.arange(config.num_envs, device=device)[:, None]
         self.entities: dict[str, RobotEntity] = {}
-        for name, (joints, bodies, roots, scale) in layouts.items():
+        for name, layout in layouts.items():
+            joints, bodies, roots, scale, joint_mirror, body_mirror = layout
             joint_ids = worlds * template.joint_count + torch.tensor(
                 joints, device=device, dtype=torch.long
             )
@@ -151,6 +166,8 @@ class Scene:
                 action=JointPositionAction(
                     torch.tensor(scale, dtype=torch.float32, device=device)
                 ),
+                joint_mirror=joint_mirror,
+                body_mirror=body_mirror,
             )
 
         self.contact_sensors = {}
@@ -160,6 +177,25 @@ class Scene:
             self.contact_sensors[name] = TerrainContact(
                 sensor, self.entities[sensor.entity]
             )
+
+    def action_symmetry_transform(self) -> SymmetryTransform:
+        """Build a CPU transform in the same entity and joint order as actions."""
+        transforms = []
+        for name, entity in self.entities.items():
+            try:
+                transform = entity.joint_symmetry_transform()
+                default = entity.default_position[0].cpu()
+                scale = entity.action.scale.cpu()
+                if not torch.allclose(transform(default), default):
+                    raise ValueError("The nominal joint pose is not mirror symmetric")
+                if not torch.allclose(transform.permute(scale), scale):
+                    raise ValueError("Paired joints must use the same action scale")
+            except ValueError as exc:
+                raise ValueError(
+                    f"Cannot reflect actions for entity {name!r}: {exc}"
+                ) from exc
+            transforms.append(transform)
+        return SymmetryTransform.cat(transforms)
 
     def resolve_physical_fields(self, requested):
         """Validate entity fields and group them into a stable per-entity read plan."""

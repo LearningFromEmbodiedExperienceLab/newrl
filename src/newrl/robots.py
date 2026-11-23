@@ -2,7 +2,7 @@
 
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import newton
@@ -48,6 +48,8 @@ class RobotConfig:
     contact_damping: float = 5.0e2
     contact_friction_stiffness: float = 1.0e3
     contact_friction: float = 0.75
+    joint_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
+    body_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.actuators and any(
@@ -194,6 +196,27 @@ def newton_anymal_c() -> RobotConfig:
         damping=tuple(cfg["mjw_joint_damping"]),
         armature=tuple(cfg["mjw_joint_armature"]),
         action_scale=float(cfg["action_scale"]),
+        joint_mirror={
+            "LF_HAA": ("RF_HAA", -1),
+            "RF_HAA": ("LF_HAA", -1),
+            "LF_HFE": ("RF_HFE", 1),
+            "RF_HFE": ("LF_HFE", 1),
+            "LF_KFE": ("RF_KFE", 1),
+            "RF_KFE": ("LF_KFE", 1),
+            "LH_HAA": ("RH_HAA", -1),
+            "RH_HAA": ("LH_HAA", -1),
+            "LH_HFE": ("RH_HFE", 1),
+            "RH_HFE": ("LH_HFE", 1),
+            "LH_KFE": ("RH_KFE", 1),
+            "RH_KFE": ("LH_KFE", 1),
+        },
+        body_mirror={
+            "base": ("base", 1),
+            "LF_FOOT": ("RF_FOOT", 1),
+            "RF_FOOT": ("LF_FOOT", 1),
+            "LH_FOOT": ("RH_FOOT", 1),
+            "RH_FOOT": ("LH_FOOT", 1),
+        },
     )
 
 
@@ -225,6 +248,27 @@ def assetx_spot() -> RobotConfig:
             ),
         ),
         action_scale=0.5,
+        joint_mirror={
+            "fl_hx": ("fr_hx", -1),
+            "fr_hx": ("fl_hx", -1),
+            "fl_hy": ("fr_hy", 1),
+            "fr_hy": ("fl_hy", 1),
+            "fl_kn": ("fr_kn", 1),
+            "fr_kn": ("fl_kn", 1),
+            "hl_hx": ("hr_hx", -1),
+            "hr_hx": ("hl_hx", -1),
+            "hl_hy": ("hr_hy", 1),
+            "hr_hy": ("hl_hy", 1),
+            "hl_kn": ("hr_kn", 1),
+            "hr_kn": ("hl_kn", 1),
+        },
+        body_mirror={
+            "base_link": ("base_link", 1),
+            "fl_foot": ("fr_foot", 1),
+            "fr_foot": ("fl_foot", 1),
+            "hl_foot": ("hr_foot", 1),
+            "hr_foot": ("hl_foot", 1),
+        },
     )
 
 
@@ -271,4 +315,25 @@ def assetx_as2() -> RobotConfig:
             ),
         ),
         action_scale={".*_joint": 0.4},
+        joint_mirror={
+            "FL_hip_joint": ("FR_hip_joint", -1),
+            "FR_hip_joint": ("FL_hip_joint", -1),
+            "FL_thigh_joint": ("FR_thigh_joint", 1),
+            "FR_thigh_joint": ("FL_thigh_joint", 1),
+            "FL_calf_joint": ("FR_calf_joint", 1),
+            "FR_calf_joint": ("FL_calf_joint", 1),
+            "RL_hip_joint": ("RR_hip_joint", -1),
+            "RR_hip_joint": ("RL_hip_joint", -1),
+            "RL_thigh_joint": ("RR_thigh_joint", 1),
+            "RR_thigh_joint": ("RL_thigh_joint", 1),
+            "RL_calf_joint": ("RR_calf_joint", 1),
+            "RR_calf_joint": ("RL_calf_joint", 1),
+        },
+        body_mirror={
+            "base_link": ("base_link", 1),
+            "FL_foot": ("FR_foot", 1),
+            "FR_foot": ("FL_foot", 1),
+            "RL_foot": ("RR_foot", 1),
+            "RR_foot": ("RL_foot", 1),
+        },
     )

@@ -8,7 +8,7 @@ import torch
 import warp as wp
 from tensordict import TensorDict
 
-from newrl.configs import AnymalLocomotion
+from newrl.configs import AS2Locomotion, AnymalLocomotion, SpotLocomotion
 from newrl.contact import TerrainContactConfig
 from newrl.env import StatefulEnvironment, StatelessEnvironment
 from newrl.mdp.episode_ends import Timeout
@@ -24,6 +24,44 @@ def _reward_term(env, transition, group, term):
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class EnvironmentTests(unittest.TestCase):
+    def test_quadruped_flat_step_reflects_observations_and_rewards(self):
+        for factory in (AnymalLocomotion, SpotLocomotion, AS2Locomotion):
+            with self.subTest(robot=factory.__name__):
+                cfg = factory(
+                    num_envs=2,
+                    contact_observation=True,
+                    graph_capture=False,
+                    deterministic=True,
+                )
+                cfg.mdp.joint_position_noise = 0.0
+                cfg.mdp.root_xy_noise = 0.0
+                cfg.mdp.root_yaw_noise = 0.0
+                env = StatefulEnvironment(cfg)
+                env.reset()
+                env.mdp_state["velocity_command"][:] = torch.tensor(
+                    [[0.35, 0.2, -0.4], [0.35, -0.2, 0.4]], device=env.device
+                )
+                env.mdp_state["command_steps_left"][:] = 2
+                action = torch.linspace(-0.2, 0.15, env.action_dim, device=env.device)
+                mirror_action = env.scene.action_symmetry_transform().to(env.device)
+                transition = env.step(torch.stack((action, mirror_action(action))))
+
+                for name, values in transition["observation"].items():
+                    with self.subTest(observation=name):
+                        mirror = env.observation_symmetry_transform((name,)).to(
+                            env.device
+                        )
+                        torch.testing.assert_close(
+                            mirror(values[0]), values[1], atol=2e-3, rtol=2e-3
+                        )
+                for name, values in transition["reward"].items():
+                    with self.subTest(reward=name):
+                        torch.testing.assert_close(
+                            values[0], values[1], atol=2e-3, rtol=2e-3
+                        )
+                for name in ("terminated", "truncated", "done"):
+                    self.assertTrue(torch.equal(transition[name][0], transition[name][1]))
+
     def test_contact_history_checkpoint_and_partial_reset(self):
         for solver in (MujocoSimConfig(), SteelSimConfig()):
             with self.subTest(solver=type(solver).__name__):

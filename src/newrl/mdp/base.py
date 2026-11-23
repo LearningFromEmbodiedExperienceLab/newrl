@@ -6,6 +6,8 @@ from functools import cached_property
 import torch
 from tensordict import TensorDict
 
+from newrl.utils.symmetry import SymmetryTransform
+
 from .terms import EpisodeEndTerm, ObservationTerm, RewardTerm
 
 
@@ -57,6 +59,25 @@ class ObservationGroup:
     @cached_property
     def keys(self) -> tuple[str, ...]:
         return tuple(self.terms.keys())
+
+    def symmetry_transform(self, scene) -> SymmetryTransform:
+        transforms = []
+        for name, term in self.terms.items():
+            mirror = getattr(term, "symmetry_transform", None)
+            if mirror is None:
+                raise ValueError(f"Observation term {name!r} does not declare a mirror")
+            try:
+                transform = mirror(scene)
+                if transform.indices.numel() != term.shape.numel():
+                    raise ValueError(
+                        "Mirror width does not match the term's flattened shape"
+                    )
+            except ValueError as exc:
+                raise ValueError(
+                    f"Cannot reflect observation term {name!r}: {exc}"
+                ) from exc
+            transforms.append(transform)
+        return SymmetryTransform.cat(transforms)
 
     def __call__(
         self,

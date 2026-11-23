@@ -60,7 +60,13 @@ Select Gaussian PPO with `algo=ppo` or the GenPO++ flow policy with
 `algo=genpo`. GenPO adapts the actor learning rate toward `algo.desired_kl`
 using augmented KL.
 
-Play a trained PPO or GenPO++ policy with the task saved in its checkpoint.
+For left–right actor regularization on the ANYmal, Spot, and AS2 flat tasks,
+select `algo=ppo_symaug` or set `algo=genpo algo.symmetry_coef=1.0`.
+PPO SymAug defaults to a coefficient of `1.0`. GenPO defaults to `0.0`.
+Both log the active penalty as
+`actor/symmetry_loss` and compute likelihood ratios on collected samples.
+
+Play a trained on-policy learner with the task saved in its checkpoint.
 
 ```sh
 uv run python scripts/play.py checkpoint=path/to/checkpoint.pt

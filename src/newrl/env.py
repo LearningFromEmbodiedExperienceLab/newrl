@@ -13,6 +13,7 @@ from .scene import Scene
 from .solver_adapters import MujocoSimConfig
 from .terrain_collision import HybridTerrainCollision
 from .utils.profiling import StageProfiler
+from .utils.symmetry import SymmetryTransform
 
 
 class _EnvironmentCore:
@@ -92,6 +93,21 @@ class _EnvironmentCore:
         self.action_dim = sum(self.action_sizes)
         self.control_dt = self.scene.control_dt
         self.profiler: StageProfiler | None = None
+
+    def observation_symmetry_transform(
+        self, groups: tuple[str, ...]
+    ) -> SymmetryTransform:
+        """Build a CPU transform in the order used to flatten those groups."""
+        transforms = []
+        for name in groups:
+            try:
+                transform = self.mdp.observations[name].symmetry_transform(self.scene)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Cannot reflect observation group {name!r}: {exc}"
+                ) from exc
+            transforms.append(transform)
+        return SymmetryTransform.cat(transforms)
 
     def _stream(self):
         return wp.ScopedStream(
