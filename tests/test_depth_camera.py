@@ -1,6 +1,7 @@
 """Verify camera refresh history across selective resets and replay."""
 
 import unittest
+from dataclasses import replace
 from math import pi
 
 import torch
@@ -8,6 +9,8 @@ from tensordict import TensorDict
 
 from newrl.configs import AS2WLocomotion
 from newrl.env import StatelessEnvironment
+from newrl.mdp.base import ObservationGroup
+from newrl.mdp.observations import DepthCameraObservation
 from newrl.sensors import DepthCameraConfig
 
 
@@ -23,14 +26,26 @@ class DepthCameraTests(unittest.TestCase):
                     rpy=(0.0, pi / 2, 0.0), update_every=3,
                 )
             },
-            output_physical_fields=(("front", "depth"), ("front", "valid")),
+            output_physical_fields=(
+                ("front", "depth"), ("front", "valid"),
+                ("short_range", "depth"), ("short_range", "valid"),
+            ),
+        )
+        config.sensors["short_range"] = replace(config.sensors["front"], max_depth=0.1)
+        config.mdp.observations["depth"] = ObservationGroup(
+            {"front": DepthCameraObservation("front")}
         )
         env = StatelessEnvironment(config)
         action = torch.zeros((2, env.action_dim), device=env.device)
         inputs = TensorDict({"action": action}, batch_size=[2])
         sim, mdp, initial = env.reset()
         depth_key = ("physical_state", "front", "depth")
+        self.assertEqual(sim["camera_depth:front"].dtype, torch.float16)
+        self.assertEqual(initial[depth_key].dtype, torch.float16)
+        self.assertEqual(initial["observation", "depth"].dtype, torch.float16)
         self.assertTrue(initial["physical_state", "front", "valid"].all().item())
+        self.assertFalse(initial["physical_state", "short_range", "valid"].any().item())
+        self.assertFalse(initial["physical_state", "short_range", "depth"].any().item())
 
         for _ in range(2):
             sim, mdp, held = env.step(sim, mdp, inputs)

@@ -8,6 +8,7 @@ import newton
 import torch
 
 from newrl.algos.interfaces import OnPolicyConfig
+from newrl.commands import with_used_observations
 from newrl.configs import EnvironmentConfig
 from newrl.env import StatefulEnvironment
 from newrl.mdp.episode_ends import Timeout
@@ -45,6 +46,7 @@ class PlayConfig:
     algo: OnPolicyConfig | None = field(default=None, metadata={"preset_group": "algo"})
     viser_host: str = "127.0.0.1"
     viser_port: int = 8080
+    discard_unused_obs: bool = False
 
     def __post_init__(self):
         if self.episode_steps < 1 or (self.steps is not None and self.steps < 1):
@@ -91,6 +93,8 @@ def play(cfg: PlayConfig) -> None:
         raise ValueError("Specify task=<preset> or checkpoint=<path>")
     if cfg.num_envs is not None:
         task = replace(task, num_envs=cfg.num_envs)
+    if cfg.discard_unused_obs:
+        task = with_used_observations(task, algo)
 
     viewer = None
     if cfg.viewer == "viser":
@@ -106,9 +110,14 @@ def play(cfg: PlayConfig) -> None:
             policy.load_state_dict(weights)
             policy.eval()
         actions = torch.zeros((env.num_envs, env.action_dim), device=env.device)
+        viser_playback = None
         if viewer is not None:
             viewer.set_model(env.model)
             viewer.set_world_offsets(viewer_world_offsets(task.terrain, env.num_envs))
+            if cfg.viewer == "viser":
+                from newrl.viser_view import ViserPlayback
+
+                viser_playback = ViserPlayback(viewer, env.scene)
         carry = env.reset().select("observation")
         steps = resets = 0
         while (cfg.steps is None or steps < cfg.steps) and (
@@ -126,6 +135,8 @@ def play(cfg: PlayConfig) -> None:
             if viewer is not None:
                 viewer.begin_frame(steps * env.control_dt)
                 viewer.log_state(env.state)
+                if viser_playback is not None:
+                    viser_playback.update(env.state)
                 viewer.end_frame()
             if finished is not None and finished.numel():
                 reset = env.reset(finished)

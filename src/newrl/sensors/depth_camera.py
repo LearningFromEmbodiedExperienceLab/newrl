@@ -10,6 +10,8 @@ from tensordict import TensorDict
 
 from ..utils.string import resolve_scene_names
 
+_MIN_FP16_DEPTH = wp.constant(2.0 ** -24)
+
 
 @dataclass(frozen=True)
 class DepthCameraConfig:
@@ -19,6 +21,7 @@ class DepthCameraConfig:
     The camera looks along the mount's +X axis, with +Z up.
     Each world samples on reset and holds its frame for ``update_every``
     control steps between captures.
+    Depth is stored and returned as FP16 meters, with zero for invalid pixels.
     """
 
     entity: str = "robot"
@@ -39,8 +42,8 @@ class DepthCameraConfig:
             raise ValueError("Camera pos and rpy must be finite XYZ triples")
         if min(self.width, self.height) < 1 or not 0 < self.fov_y < pi:
             raise ValueError("Camera dimensions must be positive and fov_y must be in (0, pi)")
-        if not isfinite(self.max_depth) or self.max_depth <= 0:
-            raise ValueError("Camera max_depth must be finite and positive")
+        if not 0 < self.max_depth <= 65504.0:
+            raise ValueError("Camera max_depth must be positive and fit in FP16")
         if type(self.update_every) is not int or self.update_every < 1:
             raise ValueError("Camera update_every must be a positive integer")
 
@@ -59,6 +62,24 @@ def _camera_poses(
     poses[world] = body_q[bodies[world]] * mount
 
 
+@wp.kernel(enable_backward=False)
+def _store_depth(
+    rendered: wp.array3d[wp.float32],
+    world_indices: wp.array[wp.int32],
+    max_depth: float,
+    depth: wp.array3d[wp.float16],
+):
+    world, row, col = wp.tid()
+    if world_indices[world] < 0:
+        return
+    value = rendered[world, row, col]
+    if value > 0.0 and value <= max_depth:
+        # Reserve zero for invalid pixels even when a positive hit rounds down.
+        depth[world, row, col] = wp.float16(wp.max(value, _MIN_FP16_DEPTH))
+    else:
+        depth[world, row, col] = wp.float16(0.0)
+
+
 class DepthCamera:
     fields = ("depth", "valid")
 
@@ -66,12 +87,13 @@ class DepthCamera:
         self.config = config
         self.model = model
         (body,) = resolve_scene_names(config.body, entity.body_names)
-        self._bodies = wp.from_torch(entity.bodies[:, body].to(torch.int32), dtype=wp.int32)
+        self.body_ids = entity.bodies[:, body]
+        self._bodies = wp.from_torch(self.body_ids.to(torch.int32), dtype=wp.int32)
         self.shape = torch.Size((config.height, config.width))
         # Convert Newton's camera axes to the mount's forward-left-up axes.
         optical = wp.quat(0.5, -0.5, -0.5, 0.5)
         rotation = wp.quat_rpy(*map(float, config.rpy))
-        self._mount = wp.transform(config.pos, rotation * optical)
+        self.mount_transform = wp.transform(config.pos, rotation * optical)
 
     def initialize(self, scene):
         config = self.config
@@ -82,7 +104,7 @@ class DepthCamera:
         self._rays = self._camera.compute_camera_rays_pinhole(
             config.width, config.height, camera_fov=config.fov_y, device=device
         )
-        self._depth = self._camera.allocate_image(worlds, config.width, config.height, wp.float32)
+        self._depth = self._camera.allocate_image(worlds, config.width, config.height, wp.float16)
         self._depth_view = wp.to_torch(self._depth)
         self._world_indices = torch.arange(worlds, dtype=torch.int32, device=self._depth_view.device)
         self._steps_until_refresh = (
@@ -114,12 +136,24 @@ class DepthCamera:
             world_indices = wp.from_torch(selected, dtype=wp.int32)
         wp.launch(
             _camera_poses, dim=self.model.world_count,
-            inputs=[state.body_q, self._bodies, self._mount, self._poses],
+            inputs=[state.body_q, self._bodies, self.mount_transform, self._poses],
             device=self.model.device,
         )
+        # Newton renders FP32. Keep the staging image local to the capture.
+        rendered = wp.from_torch(torch.empty_like(self._depth_view, dtype=torch.float32))
         self._camera.update(
             state, self._poses, self._rays,
-            forward_depth_image=self._depth, world_indices=world_indices,
+            forward_depth_image=rendered, world_indices=world_indices,
+        )
+        wp.launch(
+            _store_depth, dim=self._depth.shape,
+            inputs=[
+                rendered,
+                wp.from_torch(self._world_indices) if world_indices is None else world_indices,
+                self.config.max_depth,
+                self._depth,
+            ],
+            device=self.model.device,
         )
 
     def checkpoint_views(self):
@@ -128,10 +162,14 @@ class DepthCamera:
             views["steps_until_refresh"] = self._steps_until_refresh.unsqueeze(-1)
         return views
 
+    def depth_frame(self, world: int) -> torch.Tensor:
+        """Return a view of one world's latest cached depth in meters."""
+        return self._depth_view[world]
+
     def read(self, state, fields):
-        depth = self._depth_view
-        valid = (depth > 0.0) & (depth <= self.config.max_depth)
-        values = {"valid": valid}
+        values = {}
         if "depth" in fields:
-            values["depth"] = torch.where(valid, depth, 0.0)
-        return TensorDict({name: values[name] for name in fields}, batch_size=[self.model.world_count])
+            values["depth"] = self._depth_view.clone()
+        if "valid" in fields:
+            values["valid"] = self._depth_view > 0
+        return TensorDict(values, batch_size=[self.model.world_count])

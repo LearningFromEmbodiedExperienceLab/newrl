@@ -11,6 +11,7 @@ from tensordict import TensorDict
 
 from newrl.algos.interfaces import OnPolicyConfig, OnPolicyLearner
 from newrl.algos.rollout import collect_rollout
+from newrl.commands import with_used_observations
 from newrl.configs import EnvironmentConfig
 from newrl.env import StatefulEnvironment
 from newrl.mdp.base import RewardGroup
@@ -33,6 +34,7 @@ class TrainConfig:
     compile_policy: bool = True
     memory_profile_iters: int = 5
     memory_profile_warmup: int = 2
+    discard_unused_obs: bool = True
 
     def __post_init__(self):
         if self.checkpoint_interval < 0:
@@ -176,7 +178,8 @@ def train(cfg: TrainConfig) -> None:
     if cfg.memory_profile_iters:
         profiler = CudaMemoryProfiler(torch.device(cfg.task.device))
         profiler.begin_phase()
-    env = StatefulEnvironment(cfg.task)
+    task = with_used_observations(cfg.task, cfg.algo) if cfg.discard_unused_obs else cfg.task
+    env = StatefulEnvironment(task)
     if profiler is not None:
         memory_metrics.update(profiler.end_phase("env_build"))
     policy = cfg.algo.build(env)
