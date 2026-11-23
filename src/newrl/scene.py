@@ -7,9 +7,9 @@ import torch
 import warp as wp
 from tensordict import TensorDict
 
-from .contact import TerrainContact
 from .mdp.actions import JointPositionAction
 from .robots import scalar_joints
+from .sensors import Sensor
 from .terrain import Terrain, TerrainConfig
 from .utils.symmetry import SymmetryTransform
 from .utils.string import resolve_scene_names
@@ -87,6 +87,8 @@ class RobotEntity:
 
 
 class Scene:
+    physical_read_plan: dict[str, tuple[str, ...]]
+
     def __init__(self, config):
         self.sim_dt = config.sim_dt
         self.control_dt = config.sim_dt * config.substeps
@@ -190,13 +192,11 @@ class Scene:
                 velocity_mask=velocity_mask,
             )
 
-        self.contact_sensors = {}
-        for name, sensor in config.contact_sensors.items():
+        self.sensors: dict[str, Sensor] = {}
+        for name, sensor in config.sensors.items():
             if name in self.entities:
-                raise ValueError(f"Contact sensor name conflicts with entity {name!r}")
-            self.contact_sensors[name] = TerrainContact(
-                sensor, self.entities[sensor.entity]
-            )
+                raise ValueError(f"Sensor name conflicts with entity {name!r}")
+            self.sensors[name] = sensor.build(self)
 
     def action_symmetry_transform(self) -> SymmetryTransform:
         """Build a CPU transform in the same entity and joint order as actions."""
@@ -229,7 +229,7 @@ class Scene:
         }
         fields_by_name = {name: tuple(sorted(supported)) for name in self.entities}
         fields_by_name.update(
-            {name: sensor.fields for name, sensor in self.contact_sensors.items()}
+            {name: sensor.fields for name, sensor in self.sensors.items()}
         )
         if requested is None:
             return fields_by_name
@@ -244,25 +244,15 @@ class Scene:
             plan.setdefault(entity, []).append(field)
         return {name: tuple(fields) for name, fields in plan.items()}
 
-    def read(self, state, plan=None, observables=None) -> TensorDict:
-        if plan is None:
-            plan = {
-                name: fields
-                for name, fields in self.resolve_physical_fields(None).items()
-                if name in self.entities or self.contact_sensors[name].force is not None
-            }
-            if observables is None:
-                plan = {
-                    name: tuple(field for field in fields if field != "joint_torque")
-                    for name, fields in plan.items()
-                }
+    def read(self, state, observables) -> TensorDict:
+        values = {}
+        for name, fields in self.physical_read_plan.items():
+            if name in self.entities:
+                values[name] = self.entities[name].read(state, fields, observables)
+            else:
+                values[name] = self.sensors[name].read(state, fields)
         return TensorDict(
-            {
-                name: self.entities[name].read(state, fields, observables)
-                if name in self.entities
-                else self.contact_sensors[name].read(fields)
-                for name, fields in plan.items()
-            },
+            values,
             batch_size=[self.model.world_count],
             device=wp.device_to_torch(self.model.device),
         )

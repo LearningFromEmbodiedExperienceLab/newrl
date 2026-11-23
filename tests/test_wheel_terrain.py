@@ -17,7 +17,7 @@ from newrl.utils.math import quat_mul, quat_rotate, quat_rotate_inverse
 def _wheel_clearance(env, normals, offset, kind):
     """Measure signed distance from the wheel collision support to the slope."""
     model = env.model
-    wheel_bodies = env.scene.contact_sensors["feet_ground"].body_ids
+    wheel_bodies = env.scene.sensors["feet_ground"].body_ids
     body_ids = wheel_bodies.flatten()
     shape_bodies = model.shape_body.numpy()
     collides = model.shape_flags.numpy() & int(newton.ShapeFlags.COLLIDE_SHAPES)
@@ -108,7 +108,7 @@ class WheelTerrainTests(unittest.TestCase):
                         normals = torch.zeros((2, 3), device=env.device)
                         normals[:, 0] = gradient / length
                         normals[:, 2] = 1.0 / length
-                        wheel_bodies = env.scene.contact_sensors["feet_ground"].body_ids
+                        wheel_bodies = env.scene.sensors["feet_ground"].body_ids
                         offset = (-1 if inverted else 1) * slope * terrain.tile_size / (2 * length)
                         wheel_normals = normals.repeat_interleave(wheel_bodies.shape[1], dim=0)
                         clearance = _wheel_clearance(env, wheel_normals, offset, wheel_kind)

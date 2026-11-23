@@ -11,7 +11,7 @@ from tensordict import TensorDict
 from newrl.configs import (
     AS2Locomotion, AS2WLocomotion, AnymalLocomotion, M20SLocomotion, SpotLocomotion,
 )
-from newrl.contact import TerrainContactConfig
+from newrl.sensors import TerrainContactConfig
 from newrl.env import StatefulEnvironment, StatelessEnvironment
 from newrl.mdp.episode_ends import Timeout
 from newrl.solver_adapters import MujocoSimConfig, SteelSimConfig
@@ -112,7 +112,7 @@ class EnvironmentTests(unittest.TestCase):
                         )
                     ),
                 )
-                cfg.contact_sensors["feet_ground"] = TerrainContactConfig(
+                cfg.sensors["feet_ground"] = TerrainContactConfig(
                     "robot",
                     r"(LF|LH|RF|RH)_FOOT",
                     track_air_time=True,
@@ -308,16 +308,16 @@ class EnvironmentTests(unittest.TestCase):
                 torch.testing.assert_close(reset_force[1], force[1], atol=0, rtol=0)
 
     def test_scene_projected_gravity(self):
-        env = StatefulEnvironment(AnymalLocomotion(num_envs=2))
+        env = StatefulEnvironment(
+            AnymalLocomotion(num_envs=2, physical_fields=(("robot", "projected_gravity"),))
+        )
         env.reset()
         pose = wp.to_torch(env.state.body_q)
         indices = env.scene.entities["robot"].bodies[:, 0]
         pose[indices, 3:7] = torch.tensor(
             [[0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.0]], device=env.device
         )
-        snapshot = env.scene.read(
-            env.state, {"robot": ("projected_gravity", "body_pose_w")}
-        )
+        snapshot = env.scene.read(env.state, env.observables)
         gravity = snapshot["robot", "projected_gravity"][:, 0]
         torch.testing.assert_close(gravity, gravity.new_tensor([[0, 0, -1], [0, 0, 1]]))
         pose[indices, 3:7] = torch.tensor([0.0, 0.0, 0.0, 1.0], device=env.device)
@@ -599,7 +599,7 @@ class EnvironmentTests(unittest.TestCase):
             }
         )
         env = StatefulEnvironment(cfg)
-        self.assertEqual(env.physical_read_plan, {"robot": ("joint_pos",)})
+        self.assertEqual(env.scene.physical_read_plan, {"robot": ("joint_pos",)})
         self.assertNotIn("physical_state", env.reset())
         cfg.output_physical_fields = (("robot", "joint_pos"),)
         env = StatefulEnvironment(cfg)
@@ -613,7 +613,7 @@ class EnvironmentTests(unittest.TestCase):
         cfg.output_physical_fields = (("robot", "body_pose_w"),)
         extra_env = StatefulEnvironment(cfg)
         self.assertEqual(
-            set(extra_env.physical_read_plan["robot"]), {"joint_pos", "body_pose_w"}
+            set(extra_env.scene.physical_read_plan["robot"]), {"joint_pos", "body_pose_w"}
         )
         self.assertEqual(
             set(extra_env.reset()["physical_state", "robot"].keys()),
@@ -636,7 +636,7 @@ class EnvironmentTests(unittest.TestCase):
         cfg.mdp = MDP(rewards={"custom": RewardGroup({"term": Custom()})})
         env = StatefulEnvironment(cfg)
         self.assertEqual(
-            set(env.physical_read_plan["robot"]),
+            set(env.scene.physical_read_plan["robot"]),
             {
                 "joint_pos",
                 "joint_vel",

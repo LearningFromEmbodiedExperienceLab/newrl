@@ -6,7 +6,7 @@ import torch
 import warp as wp
 from tensordict import TensorDict
 
-from newrl.contact import _update_contact_history
+from newrl.sensors.contact import _update_contact_history
 from newrl.mdp.rewards import FeetAirTime
 
 

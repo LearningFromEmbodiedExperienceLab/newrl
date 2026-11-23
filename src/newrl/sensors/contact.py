@@ -7,7 +7,7 @@ import torch
 import warp as wp
 from tensordict import TensorDict
 
-from .utils.string import resolve_scene_names
+from ..utils.string import resolve_scene_names
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,9 @@ class TerrainContactConfig:
     def __post_init__(self):
         if not 0.0 < self.load_threshold < float("inf"):
             raise ValueError("load_threshold must be positive and finite")
+
+    def build(self, scene):
+        return TerrainContact(self, scene.entities[self.entity])
 
 
 @wp.kernel
@@ -98,14 +101,13 @@ class TerrainContact:
         self.config = config
         indices = resolve_scene_names(config.body_names, entity.body_names)
         self.body_ids = entity.bodies[:, indices]
-        self.sensor = None
-        self.force = None
 
-    def initialize(self, model, terrain_shapes):
+    def initialize(self, scene):
+        model = scene.model
         self.sensor = newton.sensors.SensorContact(
             model,
             sensing_bodies=self.body_ids.flatten().tolist(),
-            counterpart_shapes=terrain_shapes,
+            counterpart_shapes=scene.terrain_shapes,
             measure_total=False,
         )
         self.force = wp.zeros(self.body_ids.numel(), dtype=wp.vec3, device=model.device)
@@ -174,7 +176,7 @@ class TerrainContact:
                 device=self.force.device,
             )
 
-    def read(self, fields):
+    def read(self, state, fields):
         force = self.force_view()
         values = {}
         if "force_w" in fields:

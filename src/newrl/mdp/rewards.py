@@ -190,7 +190,7 @@ class FootSlip:
         )
 
     def _initialize(self, scene):
-        config = scene.contact_sensors[self.sensor].config
+        config = scene.sensors[self.sensor].config
         velocity = BodyLinearVelocity(config.entity, config.body_names)._initialize(
             scene
         )
@@ -234,7 +234,7 @@ class FeetAirTime:
 
     def _initialize(self, scene):
         scene.resolve_physical_fields(self.physical_fields)
-        sensor = scene.contact_sensors[self.sensor]
+        sensor = scene.sensors[self.sensor]
         bound = replace(self)
         object.__setattr__(bound, "_num_feet", sensor.body_ids.shape[-1])
         return bound

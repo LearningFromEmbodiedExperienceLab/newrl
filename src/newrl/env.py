@@ -10,6 +10,7 @@ from tensordict import TensorDict
 from .configs import EnvironmentConfig
 from .mdp.base import MDP
 from .scene import Scene
+from .sensors import DepthCamera, TerrainContact
 from .solver_adapters import MujocoSimConfig
 from .terrain_collision import HybridTerrainCollision
 from .utils.profiling import StageProfiler
@@ -47,7 +48,9 @@ class _EnvironmentCore:
             | frozenset(config.physical_fields)
             | frozenset(config.output_physical_fields)
         )
-        self.physical_read_plan = self.scene.resolve_physical_fields(requested)
+        read_plan = self.scene.physical_read_plan = self.scene.resolve_physical_fields(
+            requested
+        )
         self.model = self.scene.model
         self.device = torch.device(wp.device_to_torch(self.model.device))
         if config.collision == "newrl":
@@ -62,15 +65,23 @@ class _EnvironmentCore:
             self.collision = None
         contacts = self.collision.contacts() if self.collision is not None else None
         needs_torque = any(
-            "joint_torque" in fields for fields in self.physical_read_plan.values()
+            "joint_torque" in fields for fields in read_plan.values()
         )
-        self._contact_sensors = {
+        active_sensors = {
             name: sensor
-            for name, sensor in self.scene.contact_sensors.items()
-            if name in self.physical_read_plan
+            for name, sensor in self.scene.sensors.items()
+            if name in read_plan
         }
-        for sensor in self._contact_sensors.values():
-            sensor.initialize(self.model, self.scene.terrain_shapes)
+        for sensor in active_sensors.values():
+            sensor.initialize(self.scene)
+        self._contact_sensors = {
+            name: sensor for name, sensor in active_sensors.items()
+            if isinstance(sensor, TerrainContact)
+        }
+        self._depth_cameras = {
+            name: sensor for name, sensor in active_sensors.items()
+            if isinstance(sensor, DepthCamera)
+        }
         self._solver = config.solver.build(
             self.scene,
             contacts,
@@ -116,6 +127,14 @@ class _EnvironmentCore:
 
     def _profile_stage(self, name):
         return nullcontext() if self.profiler is None else self.profiler.stage(name)
+
+    def _sample_depth_cameras(self, *, reset=False, reset_mask=None):
+        if self._depth_cameras:
+            with self._profile_stage("depth_camera"):
+                self.model.bvh_refit_shapes(self.state)
+                self.model.bvh_refit_particles(self.state)
+                for camera in self._depth_cameras.values():
+                    camera.sample(self.state, reset=reset, reset_mask=reset_mask)
 
     def _simulate(self, state, state_next, *, profile=False):
         for sensor in self._contact_sensors.values():
@@ -239,9 +258,10 @@ class _EnvironmentCore:
             targets[entity.targets[ids]] = entity.default_position[ids]
             if entity.velocity_mask is not None:
                 wp.to_torch(self.control.joint_target_qd)[entity.qd[ids]] = 0.0
-        physical_state = self.scene.read(
-            self.state, self.physical_read_plan, self.observables
+        self._sample_depth_cameras(
+            reset=True, reset_mask=None if env_ids is None else mask[:-1]
         )
+        physical_state = self.scene.read(self.state, self.observables)
         result = TensorDict(
             {"observation": self.mdp.observe(physical_state, next_mdp_state)},
             batch_size=[self.num_envs],
@@ -263,10 +283,9 @@ class _EnvironmentCore:
             ):
                 entity.write_action(self.control, values)
         self._advance()
+        self._sample_depth_cameras()
         with self._profile_stage("state_read"):
-            physical_state = self.scene.read(
-                self.state, self.physical_read_plan, self.observables
-            )
+            physical_state = self.scene.read(self.state, self.observables)
         with self._profile_stage("mdp"):
             next_mdp_state, result = self.mdp.advance(physical_state, mdp_state, action)
             transition = self._transition(physical_state, next_mdp_state, result)
@@ -330,6 +349,13 @@ class StatelessEnvironment(_EnvironmentCore):
             {
                 f"contact_{field}:{name}": view
                 for name, sensor in self._contact_sensors.items()
+                for field, view in sensor.checkpoint_views().items()
+            }
+        )
+        views.update(
+            {
+                f"camera_{field}:{name}": view
+                for name, sensor in self._depth_cameras.items()
                 for field, view in sensor.checkpoint_views().items()
             }
         )

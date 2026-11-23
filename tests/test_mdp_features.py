@@ -179,7 +179,7 @@ class RewardRangeTests(unittest.TestCase):
         self.assertEqual(TrackVelocity(velocity, slice(2), -0.5, 1.0).range, (-0.5, 0.0))
         scene = SimpleNamespace(
             resolve_physical_fields=lambda _: None,
-            contact_sensors={"feet": SimpleNamespace(body_ids=torch.zeros(2, 4))},
+            sensors={"feet": SimpleNamespace(body_ids=torch.zeros(2, 4))},
         )
         air_time = FeetAirTime("feet", weight=0.5)
         self.assertEqual(air_time.range, (0.0, float("inf")))

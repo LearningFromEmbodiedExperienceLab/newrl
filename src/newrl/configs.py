@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 
 import newton
 
-from .contact import TerrainContactConfig
 from .mdp.base import MDP, ObservationGroup, RewardGroup
 from .mdp.episode_ends import HeightTermination, TiltTermination, Timeout
 from .mdp.observations import (
@@ -34,6 +33,7 @@ from .robots import (
     RobotConfig, assetx_as2, assetx_as2w, assetx_as2w_sphere,
     assetx_m20s, assetx_spot, newton_anymal_c,
 )
+from .sensors import SensorConfig, TerrainContactConfig
 from .solver_adapters import MujocoSimConfig, SteelSimConfig
 from .terrain import (
     BorderConfig,
@@ -67,9 +67,9 @@ class EnvironmentConfig:
     physical_fields: tuple[tuple[str, str], ...] = ()
     output_physical_fields: tuple[tuple[str, str], ...] = ()
     output_mdp_fields: tuple[str, ...] = ()
-    contact_sensors: dict[str, TerrainContactConfig] = field(default_factory=dict)
     name: str = "custom"
     collision: str = "newton"
+    sensors: dict[str, SensorConfig] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.collision not in ("newton", "mujoco", "newrl"):
@@ -241,12 +241,13 @@ def _quadruped_locomotion(
     mdp.terminations = {
         "tilt": TiltTermination(ProjectedGravity("robot", base)),
     }
+    sensors = {
+        "feet_ground": TerrainContactConfig("robot", feet, track_air_time=True)
+    }
     defaults = {
         "robots": {"robot": robot},
         "mdp": mdp,
-        "contact_sensors": {
-            "feet_ground": TerrainContactConfig("robot", feet, track_air_time=True)
-        },
+        "sensors": sensors | overrides.pop("sensors", {}),
     }
     return EnvironmentConfig(**(defaults | overrides))
 

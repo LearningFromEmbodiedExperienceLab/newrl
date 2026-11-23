@@ -265,7 +265,7 @@ class ContactObservation:
 
     def _initialize(self, scene):
         scene.resolve_physical_fields(self.physical_fields)
-        count = scene.contact_sensors[self.sensor].body_ids.shape[1]
+        count = scene.sensors[self.sensor].body_ids.shape[1]
         bound = replace(self)
         object.__setattr__(
             bound,
@@ -282,8 +282,76 @@ class ContactObservation:
         return physical_state[self.sensor, self.field].float()
 
     def symmetry_transform(self, scene) -> SymmetryTransform:
-        sensor = scene.contact_sensors[self.sensor]
+        sensor = scene.sensors[self.sensor]
         entity = scene.entities[sensor.config.entity]
         indices = resolve_scene_names(sensor.config.body_names, entity.body_names)
         signs = _POLAR_SIGNS if self.field in ("force_w", "last_contact_pos_w") else (1,)
         return entity.body_symmetry_transform(indices, signs)
+
+
+@dataclass(frozen=True)
+class _GridObservation:
+    sensor: str
+    include_valid: bool = True
+    _grid_shape: torch.Size | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    value_field: ClassVar[str]
+
+    @property
+    def physical_fields(self):
+        fields = {(self.sensor, self.value_field)}
+        if self.include_valid:
+            fields.add((self.sensor, "valid"))
+        return frozenset(fields)
+
+    @property
+    def shape(self) -> torch.Size:
+        if self._grid_shape is None:
+            raise RuntimeError("Bind the grid observation to a scene before reading its shape")
+        return torch.Size((2 if self.include_valid else 1, *self._grid_shape))
+
+    def _initialize(self, scene):
+        scene.resolve_physical_fields(self.physical_fields)
+        bound = replace(self)
+        object.__setattr__(
+            bound, "_grid_shape", scene.sensors[self.sensor].shape
+        )
+        return bound
+
+    def __call__(self, physical_state, mdp_state):
+        values = physical_state[self.sensor, self.value_field]
+        if self.include_valid:
+            valid = physical_state[self.sensor, "valid"].to(values.dtype)
+            return torch.stack((values, valid), dim=-3)
+        return values.unsqueeze(-3)
+
+    def symmetry_transform(self, scene) -> SymmetryTransform:
+        sensor = scene.sensors[self.sensor]
+        config = sensor.config
+        entity = scene.entities[config.entity]
+        indices = resolve_scene_names(config.body, entity.body_names)
+        entity.body_symmetry_transform(indices, (1,))
+        permutation = torch.arange(self.shape.numel()).reshape(self.shape).flip(-1)
+        return SymmetryTransform(permutation.flatten().tolist(), (1,) * permutation.numel())
+
+
+@dataclass(frozen=True)
+class DepthCameraObservation(_GridObservation):
+    """Camera depth and optional validity channel in CHW order."""
+
+    value_field: ClassVar[str] = "depth"
+
+    def symmetry_transform(self, scene) -> SymmetryTransform:
+        config = scene.sensors[self.sensor].config
+        roll, _, yaw = config.rpy
+        if any(abs(value) > 1e-7 for value in (config.pos[1], roll, yaw)):
+            raise ValueError("Depth mirroring requires a centered camera with zero roll and yaw")
+        return super().symmetry_transform(scene)
+
+
+@dataclass(frozen=True)
+class HeightMapObservation(_GridObservation):
+    """Terrain height and optional validity channel in CHW order."""
+
+    value_field: ClassVar[str] = "height"

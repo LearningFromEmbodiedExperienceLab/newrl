@@ -81,7 +81,7 @@ class CudaMemoryProfiler:
         state = storage_bytes(
             vars(env.state), vars(env.state_next), vars(env.control),
             env.mdp_state, env.scene.entities, env.scene.spawn_locations,
-            *(vars(sensor) for sensor in env.scene.contact_sensors.values()),
+            *(vars(sensor) for sensor in env.scene.sensors.values()),
             seen=seen,
         )
         solver_objects = (
