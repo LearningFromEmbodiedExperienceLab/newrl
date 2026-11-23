@@ -17,6 +17,7 @@ from newrl.mdp.base import RewardGroup
 from newrl.projects import load_projects
 from newrl.utils.config import dump, main
 from newrl.utils.logging import RunLogger, WandbConfig
+from newrl.utils.memory import CudaMemoryProfiler, write_memory_chart
 
 TRAIN_OUTPUT_DIR = Path("outputs_train")
 
@@ -30,10 +31,14 @@ class TrainConfig:
     logger: WandbConfig = field(default_factory=WandbConfig)
     checkpoint_interval: int = 250
     compile_policy: bool = True
+    memory_profile_iters: int = 5
+    memory_profile_warmup: int = 2
 
     def __post_init__(self):
         if self.checkpoint_interval < 0:
             raise ValueError("checkpoint_interval must be non-negative")
+        if self.memory_profile_iters < 0 or self.memory_profile_warmup < 0:
+            raise ValueError("Memory profiling iteration counts must be non-negative")
 
 
 def _task_output_dir(task: str) -> Path:
@@ -162,7 +167,18 @@ def train(cfg: TrainConfig) -> None:
     )
     torch.manual_seed(cfg.seed)
     cfg.task.mdp.seed = cfg.seed
+    profiler = None
+    memory_metrics = {}
+    memory_samples = []
+    memory_profile_end = min(
+        cfg.iterations, cfg.memory_profile_warmup + cfg.memory_profile_iters
+    )
+    if cfg.memory_profile_iters:
+        profiler = CudaMemoryProfiler(torch.device(cfg.task.device))
+        profiler.begin_phase()
     env = StatefulEnvironment(cfg.task)
+    if profiler is not None:
+        memory_metrics.update(profiler.end_phase("env_build"))
     policy = cfg.algo.build(env)
     if cfg.compile_policy:
         policy.act = torch.compile(policy.act, fullgraph=True)
@@ -171,15 +187,35 @@ def train(cfg: TrainConfig) -> None:
     logger = _make_logger(cfg, run_id=run_id)
     try:
         for iteration in range(cfg.iterations):
+            sample_memory = profiler is not None and (
+                iteration == 0
+                or cfg.memory_profile_warmup <= iteration
+                < cfg.memory_profile_warmup + cfg.memory_profile_iters
+            )
+            if sample_memory:
+                profiler.begin_phase()
             iteration_start = perf_counter()
             batch, carry = collect_rollout(env, policy, cfg.algo.update_every, carry)
             if env.device.type == "cuda":
                 torch.cuda.synchronize(env.device)
             rollout_time = perf_counter() - iteration_start
+            if sample_memory:
+                memory_metrics.update(profiler.end_phase("rollout"))
+                memory_metrics.update(profiler.rollout(batch, carry))
             metrics = episode_stats.update(batch)
+            if sample_memory:
+                profiler.begin_phase()
             training_start = perf_counter()
             metrics.update(policy.train_op(batch))
             training_end = perf_counter()
+            if sample_memory:
+                memory_metrics.update(profiler.end_phase("update"))
+                memory_metrics.update(profiler.environment(env))
+                memory_metrics.update(profiler.learner(policy))
+                memory_metrics["memory/warmup"] = int(iteration < cfg.memory_profile_warmup)
+                metrics.update(memory_metrics)
+                memory_samples.append(memory_metrics.copy())
+                memory_metrics.clear()
             metrics.update(
                 {
                     "performance/rollout_fps": batch.numel() / rollout_time,
@@ -193,6 +229,13 @@ def train(cfg: TrainConfig) -> None:
             summary = " ".join(f"{key}={value:.4f}" for key, value in metrics.items())
             print(f"iter={iteration} env_frames={frames} {summary}", flush=True)
             completed = iteration + 1
+            if memory_samples and completed == memory_profile_end:
+                chart_path = (
+                    _task_output_dir(cfg.task.name)
+                    / "profiles" / run_id / "gpu_memory.svg"
+                )
+                write_memory_chart(chart_path, memory_samples)
+                print(f"Saved GPU memory chart to {chart_path}", flush=True)
             if checkpoint_dir is not None and completed % cfg.checkpoint_interval == 0:
                 path = _save_checkpoint(checkpoint_dir, policy, cfg, completed, frames)
                 logger.save_checkpoint(path)

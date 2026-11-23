@@ -68,6 +68,14 @@ scales are starting values for training.
 Training compiles `policy.act` by default. Set `compile_policy=false` to
 run the policy eagerly.
 
+Set `memory_profile_iters=3` to log GPU memory on the first iteration and
+three iterations after the first two warmup iterations. Set
+`memory_profile_warmup` to change when that window starts. The report shows
+buffer inventories, PyTorch rollout and update peaks, and total GPU memory
+at phase boundaries. Total GPU readings include other processes on the device.
+When sampling ends, training writes a chart to
+`outputs_train/<task>/profiles/<run-id>/gpu_memory.svg`.
+
 For left–right actor regularization on the ANYmal, Spot, and AS2 flat tasks,
 select `algo=ppo_symaug` or set `algo=genpo algo.symmetry_coef=1.0`.
 PPO SymAug defaults to a coefficient of `1.0`. GenPO defaults to `0.0`.
