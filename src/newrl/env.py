@@ -237,6 +237,8 @@ class _EnvironmentCore:
         targets = wp.to_torch(self.control.joint_target_q)
         for entity in self.scene.entities.values():
             targets[entity.targets[ids]] = entity.default_position[ids]
+            if entity.velocity_mask is not None:
+                wp.to_torch(self.control.joint_target_qd)[entity.qd[ids]] = 0.0
         physical_state = self.scene.read(
             self.state, self.physical_read_plan, self.observables
         )

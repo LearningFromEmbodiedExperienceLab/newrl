@@ -8,7 +8,9 @@ import torch
 import warp as wp
 from tensordict import TensorDict
 
-from newrl.configs import AS2Locomotion, AnymalLocomotion, SpotLocomotion
+from newrl.configs import (
+    AS2Locomotion, AS2WLocomotion, AnymalLocomotion, M20SLocomotion, SpotLocomotion,
+)
 from newrl.contact import TerrainContactConfig
 from newrl.env import StatefulEnvironment, StatelessEnvironment
 from newrl.mdp.episode_ends import Timeout
@@ -24,8 +26,35 @@ def _reward_term(env, transition, group, term):
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class EnvironmentTests(unittest.TestCase):
+    def test_wheel_velocity_control_and_partial_reset(self):
+        for factory in (AS2WLocomotion, M20SLocomotion):
+            for solver in (MujocoSimConfig(), SteelSimConfig()):
+                with self.subTest(robot=factory.__name__, solver=type(solver).__name__):
+                    env = StatefulEnvironment(
+                        factory(num_envs=2, solver=solver, graph_capture=False)
+                    )
+                    env.reset()
+                    entity = env.scene.entities["robot"]
+                    mask = entity.velocity_mask
+                    action = torch.zeros(2, env.action_dim, device=env.device)
+                    action[:, mask] = 0.5
+                    env.step(action)
+                    target = wp.to_torch(env.control.joint_target_qd)[entity.qd]
+                    torch.testing.assert_close(target[:, mask], torch.full_like(target[:, mask], 5.0))
+                    self.assertGreater(
+                        float(wp.to_torch(env.state.joint_qd)[entity.qd][:, mask].abs().mean()),
+                        0.01,
+                    )
+                    env.reset(torch.tensor([0], device=env.device))
+                    target = wp.to_torch(env.control.joint_target_qd)[entity.qd]
+                    self.assertTrue(torch.all(target[0] == 0))
+                    self.assertTrue(torch.all(target[1, mask] == 5.0))
+
     def test_quadruped_flat_step_reflects_observations_and_rewards(self):
-        for factory in (AnymalLocomotion, SpotLocomotion, AS2Locomotion):
+        for factory in (
+            AnymalLocomotion, SpotLocomotion, AS2Locomotion,
+            AS2WLocomotion, M20SLocomotion,
+        ):
             with self.subTest(robot=factory.__name__):
                 cfg = factory(
                     num_envs=2,
@@ -51,8 +80,9 @@ class EnvironmentTests(unittest.TestCase):
                         mirror = env.observation_symmetry_transform((name,)).to(
                             env.device
                         )
+                        tolerance = 5e-3 if factory is M20SLocomotion else 2e-3
                         torch.testing.assert_close(
-                            mirror(values[0]), values[1], atol=2e-3, rtol=2e-3
+                            mirror(values[0]), values[1], atol=tolerance, rtol=2e-3
                         )
                 for name, values in transition["reward"].items():
                     with self.subTest(reward=name):

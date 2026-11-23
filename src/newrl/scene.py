@@ -12,6 +12,7 @@ from .mdp.actions import JointPositionAction
 from .robots import scalar_joints
 from .terrain import TerrainConfig
 from .utils.symmetry import SymmetryTransform
+from .utils.string import resolve_scene_names
 
 
 @dataclass
@@ -27,6 +28,7 @@ class RobotEntity:
     action: JointPositionAction
     joint_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
     body_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
+    velocity_mask: torch.Tensor | None = None
 
     def joint_symmetry_transform(self) -> SymmetryTransform:
         return SymmetryTransform.from_names(self.joint_names, self.joint_mirror)
@@ -75,9 +77,13 @@ class RobotEntity:
         )
 
     def write_action(self, control, action: torch.Tensor) -> None:
-        wp.to_torch(control.joint_target_q)[self.targets] = self.action(
-            action, self.default_position
-        )
+        position = self.action(action, self.default_position)
+        if self.velocity_mask is not None:
+            position = torch.where(self.velocity_mask, self.default_position, position)
+            wp.to_torch(control.joint_target_qd)[self.qd] = torch.where(
+                self.velocity_mask, self.action.scale * action, 0.0
+            )
+        wp.to_torch(control.joint_target_q)[self.targets] = position
 
 
 class Scene:
@@ -106,6 +112,7 @@ class Scene:
                 robot_cfg.action_scales(labels),
                 robot_cfg.joint_mirror,
                 robot_cfg.body_mirror,
+                robot_cfg.velocity_joints,
             )
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -139,7 +146,9 @@ class Scene:
         worlds = torch.arange(config.num_envs, device=device)[:, None]
         self.entities: dict[str, RobotEntity] = {}
         for name, layout in layouts.items():
-            joints, bodies, roots, scale, joint_mirror, body_mirror = layout
+            joints, bodies, roots, scale, joint_mirror, body_mirror, velocity_joints = (
+                layout
+            )
             joint_ids = worlds * template.joint_count + torch.tensor(
                 joints, device=device, dtype=torch.long
             )
@@ -154,6 +163,15 @@ class Scene:
                 root_joint_ids = worlds * template.joint_count + roots[0]
                 root_start = wp.to_torch(model.joint_q_start)[root_joint_ids].long()
                 root_q = root_start + torch.arange(7, device=device)
+            velocity_mask = None
+            if velocity_joints:
+                labels = tuple(template.joint_label[j] for j in joints)
+                indices = resolve_scene_names(velocity_joints, labels)
+                velocity_mask = torch.tensor(
+                    [index in indices for index in range(len(joints))],
+                    device=device,
+                    dtype=torch.bool,
+                )
             self.entities[name] = RobotEntity(
                 joint_names=tuple(template.joint_label[j] for j in joints),
                 body_names=tuple(template.body_label[b] for b in bodies),
@@ -168,6 +186,7 @@ class Scene:
                 ),
                 joint_mirror=joint_mirror,
                 body_mirror=body_mirror,
+                velocity_mask=velocity_mask,
             )
 
         self.contact_sensors = {}

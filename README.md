@@ -60,6 +60,11 @@ Select Gaussian PPO with `algo=ppo` or the GenPO++ flow policy with
 `algo=genpo`. GenPO adapts the actor learning rate toward `algo.desired_kl`
 using augmented KL.
 
+Wheeled locomotion presets are available as `task=M20SLocoFlat` and
+`task=AS2WLocoFlat`. Their leg actions set joint position offsets and their
+wheel actions set target angular velocities. The actuator gains and action
+scales are starting values for training.
+
 Training compiles `policy.act` by default. Set `compile_policy=false` to
 run the policy eagerly.
 

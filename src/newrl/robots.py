@@ -50,6 +50,7 @@ class RobotConfig:
     contact_friction: float = 0.75
     joint_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
     body_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
+    velocity_joints: tuple[str, ...] = ()
 
     def __post_init__(self):
         if self.actuators and any(
@@ -86,16 +87,26 @@ class RobotConfig:
         labels = [builder.joint_label[joint] for joint in joints]
         position = _resolve_values(self.joint_position, labels, "joint_position")
         stiffness, damping, armature, effort, velocity, friction = self._gains(labels)
-        for joint, pos, ke, kd, arm, limit, speed, joint_friction in zip(
-            joints, position, stiffness, damping, armature, effort, velocity, friction, strict=True
-        ):
+        velocity_indices = set()
+        if self.velocity_joints:
+            velocity_indices = set(resolve_scene_names(self.velocity_joints, labels))
+        values = zip(
+            joints, position, stiffness, damping, armature, effort, velocity, friction,
+            strict=True,
+        )
+        for index, (joint, pos, ke, kd, arm, limit, speed, joint_friction) in enumerate(values):
             q = builder.joint_q_start[joint]
             dof = builder.joint_qd_start[joint]
             builder.joint_q[q] = pos
             builder.joint_target_ke[dof] = ke
             builder.joint_target_kd[dof] = kd
             builder.joint_armature[dof] = arm
-            builder.joint_target_mode[dof] = int(newton.JointTargetMode.POSITION)
+            mode = newton.JointTargetMode.POSITION
+            if index in velocity_indices and ke != 0:
+                raise ValueError(f"Velocity joint {labels[index]!r} requires zero stiffness")
+            if index in velocity_indices:
+                mode = newton.JointTargetMode.VELOCITY
+            builder.joint_target_mode[dof] = int(mode)
             if limit is not None:
                 builder.joint_effort_limit[dof] = limit
             if speed is not None:
@@ -335,5 +346,100 @@ def assetx_as2() -> RobotConfig:
             "FR_foot": ("FL_foot", 1),
             "RL_foot": ("RR_foot", 1),
             "RR_foot": ("RL_foot", 1),
+        },
+    )
+
+
+def assetx_as2w() -> RobotConfig:
+    bundle = cooked_robot("as2w", robot_model_dir())
+    return RobotConfig(
+        asset=cooked_usd(bundle),
+        position=(0.0, 0.0, 0.5),
+        joint_position={
+            ".*L_hip": 0.1,
+            ".*R_hip": -0.1,
+            "F[L,R]_thigh": 0.7,
+            "R[L,R]_thigh": 0.8,
+            ".*_calf": -1.5,
+            ".*_foot": 0.0,
+        },
+        actuators=(
+            ActuatorGroup((".*_hip", ".*_thigh"), 60.0, 1.5, 0.026, 60.0, 20.0, 0.01),
+            ActuatorGroup((".*_calf",), 60.0, 1.5, 0.038, 90.0, 20.0, 0.01),
+            ActuatorGroup((".*_foot",), 0.0, 1.5, 0.01, 15.0, 30.0, 0.01),
+        ),
+        action_scale={".*_(hip|thigh|calf)": 0.4, ".*_foot": 10.0},
+        velocity_joints=(".*_foot",),
+        joint_mirror={
+            "FL_hip": ("FR_hip", -1),
+            "FR_hip": ("FL_hip", -1),
+            "FL_thigh": ("FR_thigh", 1),
+            "FR_thigh": ("FL_thigh", 1),
+            "FL_calf": ("FR_calf", 1),
+            "FR_calf": ("FL_calf", 1),
+            "FL_foot": ("FR_foot", 1),
+            "FR_foot": ("FL_foot", 1),
+            "RL_hip": ("RR_hip", -1),
+            "RR_hip": ("RL_hip", -1),
+            "RL_thigh": ("RR_thigh", 1),
+            "RR_thigh": ("RL_thigh", 1),
+            "RL_calf": ("RR_calf", 1),
+            "RR_calf": ("RL_calf", 1),
+            "RL_foot": ("RR_foot", 1),
+            "RR_foot": ("RL_foot", 1),
+        },
+        body_mirror={
+            "base_link": ("base_link", 1),
+            "FL_foot": ("FR_foot", 1),
+            "FR_foot": ("FL_foot", 1),
+            "RL_foot": ("RR_foot", 1),
+            "RR_foot": ("RL_foot", 1),
+        },
+    )
+
+
+def assetx_m20s() -> RobotConfig:
+    bundle = cooked_robot("m20s", robot_model_dir())
+    return RobotConfig(
+        asset=cooked_usd(bundle),
+        position=(0.0, 0.0, 0.55),
+        joint_position={
+            ".*_hipx_joint": 0.0,
+            "(fl|fr)_hipy_joint": 0.7,
+            "(hl|hr)_hipy_joint": -0.7,
+            "(fl|fr)_knee_joint": -1.4,
+            "(hl|hr)_knee_joint": 1.4,
+            ".*_wheel_joint": 0.0,
+        },
+        actuators=(
+            ActuatorGroup((".*_(hipx|hipy|knee)_joint",), 60.0, 1.5, 0.02, 60.0, 20.0, 0.01),
+            ActuatorGroup((".*_wheel_joint",), 0.0, 1.5, 0.01, 28.5, 30.0, 0.01),
+        ),
+        action_scale={".*_(hipx|hipy|knee)_joint": 0.4, ".*_wheel_joint": 10.0},
+        velocity_joints=(".*_wheel_joint",),
+        joint_mirror={
+            "fl_hipx_joint": ("fr_hipx_joint", -1),
+            "fr_hipx_joint": ("fl_hipx_joint", -1),
+            "fl_hipy_joint": ("fr_hipy_joint", 1),
+            "fr_hipy_joint": ("fl_hipy_joint", 1),
+            "fl_knee_joint": ("fr_knee_joint", 1),
+            "fr_knee_joint": ("fl_knee_joint", 1),
+            "fl_wheel_joint": ("fr_wheel_joint", 1),
+            "fr_wheel_joint": ("fl_wheel_joint", 1),
+            "hl_hipx_joint": ("hr_hipx_joint", -1),
+            "hr_hipx_joint": ("hl_hipx_joint", -1),
+            "hl_hipy_joint": ("hr_hipy_joint", 1),
+            "hr_hipy_joint": ("hl_hipy_joint", 1),
+            "hl_knee_joint": ("hr_knee_joint", 1),
+            "hr_knee_joint": ("hl_knee_joint", 1),
+            "hl_wheel_joint": ("hr_wheel_joint", 1),
+            "hr_wheel_joint": ("hl_wheel_joint", 1),
+        },
+        body_mirror={
+            "base_link": ("base_link", 1),
+            "fl_wheel": ("fr_wheel", 1),
+            "fr_wheel": ("fl_wheel", 1),
+            "hl_wheel": ("hr_wheel", 1),
+            "hr_wheel": ("hl_wheel", 1),
         },
     )

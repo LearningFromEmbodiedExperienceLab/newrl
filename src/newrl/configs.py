@@ -30,7 +30,9 @@ from .mdp.rewards import (
     BodyLinearVelocity2,
 )
 from .mdp.velocity import VelocityMDP
-from .robots import RobotConfig, assetx_as2, assetx_spot, newton_anymal_c
+from .robots import (
+    RobotConfig, assetx_as2, assetx_as2w, assetx_m20s, assetx_spot, newton_anymal_c,
+)
 from .solver_adapters import MujocoSimConfig, SteelSimConfig
 from .terrain import (
     BorderConfig,
@@ -143,6 +145,26 @@ def AS2Locomotion(
         foot_slip_weight=foot_slip_weight,
         **overrides,
     )
+
+
+def AS2WLocomotion(*, contact_observation: bool = False, **overrides) -> EnvironmentConfig:
+    config = _quadruped_locomotion(
+        assetx_as2w, base="base_link", feet=r"(FL|FR|RL|RR)_foot",
+        contact_observation=contact_observation, foot_slip_weight=0.0, **overrides,
+    )
+    del config.mdp.rewards["regularization"].terms["foot_slip"]
+    del config.mdp.rewards["regularization"].terms["feet_air_time"]
+    return config
+
+
+def M20SLocomotion(*, contact_observation: bool = False, **overrides) -> EnvironmentConfig:
+    config = _quadruped_locomotion(
+        assetx_m20s, base="base_link", feet=r"(fl|fr|hl|hr)_wheel",
+        contact_observation=contact_observation, foot_slip_weight=0.0, **overrides,
+    )
+    del config.mdp.rewards["regularization"].terms["foot_slip"]
+    del config.mdp.rewards["regularization"].terms["feet_air_time"]
+    return config
 
 
 def _quadruped_locomotion(
@@ -263,5 +285,7 @@ for name, factory in (
     ("AnymalLocoFlat", AnymalLocomotion),
     ("SpotLocoFlat", SpotLocomotion),
     ("AS2LocoFlat", AS2Locomotion),
+    ("AS2WLocoFlat", AS2WLocomotion),
+    ("M20SLocoFlat", M20SLocomotion),
 ):
     cs.store(name, factory(name=name, num_envs=4096), group="task")
