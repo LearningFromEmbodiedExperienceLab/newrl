@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from math import inf
+from math import inf, isfinite
 from typing import ClassVar
 
 import torch
@@ -243,3 +243,89 @@ class FeetAirTime:
         air = physical_state[self.sensor, "current_air_time"]
         in_range = (air > self.threshold_min) & (air < self.threshold_max)
         return self.weight * in_range.sum(dim=-1, keepdim=True).float()
+
+
+@dataclass(frozen=True)
+class BodyAngularVelocity2:
+    """Penalize squared angular velocity after scaling each axis in the chosen frame."""
+
+    entity: str
+    body_names: str | Sequence[str]
+    weight: float
+    axis: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    frame: str = "world"
+    _velocity: BodyAngularVelocity = field(
+        init=False, repr=False, compare=False
+    )
+    _axis: torch.Tensor | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self):
+        if len(self.axis) != 3 or not all(isfinite(scale) for scale in self.axis):
+            raise ValueError("axis must contain three finite component scales")
+        velocity = BodyAngularVelocity(self.entity, self.body_names, frame=self.frame)
+        object.__setattr__(self, "_velocity", velocity)
+
+    @property
+    def range(self) -> tuple[float, float]:
+        return _weighted_range(-self.weight if any(self.axis) else 0.0)
+
+    @property
+    def physical_fields(self):
+        return self._velocity.physical_fields
+
+    def _initialize(self, scene):
+        bound = replace(self)
+        velocity = self._velocity._initialize(scene)
+        device = scene.entities[self.entity].bodies.device
+        object.__setattr__(bound, "_velocity", velocity)
+        object.__setattr__(bound, "_axis", torch.tensor(self.axis, device=device))
+        return bound
+
+    def __call__(self, physical_state, mdp_state):
+        velocity = self._velocity(physical_state, mdp_state)
+        squared_speed = (velocity * self._axis).square().sum(dim=(-2, -1))
+        return -self.weight * squared_speed.unsqueeze(-1)
+
+
+@dataclass(frozen=True)
+class BodyLinearVelocity2:
+    """Penalize squared linear velocity after scaling each axis in the chosen frame."""
+
+    entity: str
+    body_names: str | Sequence[str]
+    weight: float
+    axis: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    frame: str = "world"
+    _velocity: BodyLinearVelocity = field(init=False, repr=False, compare=False)
+    _axis: torch.Tensor | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self):
+        if len(self.axis) != 3 or not all(isfinite(scale) for scale in self.axis):
+            raise ValueError("axis must contain three finite component scales")
+        velocity = BodyLinearVelocity(self.entity, self.body_names, frame=self.frame)
+        object.__setattr__(self, "_velocity", velocity)
+
+    @property
+    def range(self) -> tuple[float, float]:
+        return _weighted_range(-self.weight if any(self.axis) else 0.0)
+
+    @property
+    def physical_fields(self):
+        return self._velocity.physical_fields
+
+    def _initialize(self, scene):
+        bound = replace(self)
+        velocity = self._velocity._initialize(scene)
+        device = scene.entities[self.entity].bodies.device
+        object.__setattr__(bound, "_velocity", velocity)
+        object.__setattr__(bound, "_axis", torch.tensor(self.axis, device=device))
+        return bound
+
+    def __call__(self, physical_state, mdp_state):
+        velocity = self._velocity(physical_state, mdp_state)
+        squared_speed = (velocity * self._axis).square().sum(dim=(-2, -1))
+        return -self.weight * squared_speed.unsqueeze(-1)

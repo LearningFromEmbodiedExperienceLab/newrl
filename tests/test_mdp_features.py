@@ -11,6 +11,8 @@ from newrl.mdp.episode_ends import HeightTermination, TiltTermination, Timeout
 from newrl.mdp.observations import BodyHeight, BodyLinearVelocity, ProjectedGravity
 from newrl.mdp.rewards import (
     ActionRate,
+    BodyAngularVelocity2,
+    BodyLinearVelocity2,
     FeetAirTime,
     FootSlip,
     JointAcc2,
@@ -112,6 +114,58 @@ class MDPTests(unittest.TestCase):
 
 
 class RewardRangeTests(unittest.TestCase):
+    def test_body_velocity_penalties_select_bodies_and_frame_components(self):
+        batch_size = (2, 3)
+        scene = SimpleNamespace(
+            entities={
+                "robot": SimpleNamespace(
+                    body_names=("robot/base", "robot/ignored", "robot/foot"),
+                    bodies=torch.zeros(2, 3, dtype=torch.long),
+                )
+            }
+        )
+        linear = BodyLinearVelocity2(
+            "robot", ("base", "foot"), weight=2.0, axis=(0.0, 0.0, 1.0), frame="body"
+        )._initialize(scene)
+        angular = BodyAngularVelocity2(
+            "robot", "base", weight=0.5, axis=(1.0, 1.0, 0.0), frame="body"
+        )._initialize(scene)
+        world = BodyLinearVelocity2(
+            "robot", "base", weight=2.0, axis=(0.0, 0.0, 1.0)
+        )._initialize(scene)
+        twist = torch.tensor(
+            [[1, 2, 3, 4, 5, 6], [100] * 6, [3, 4, 5, 0, 0, 0]],
+            dtype=torch.float32,
+        ).expand(*batch_size, -1, -1)
+        pose = torch.zeros(*batch_size, 3, 7)
+        pose[..., 3] = 2 ** -0.5
+        pose[..., 6] = 2 ** -0.5
+        physical = TensorDict(
+            {"robot": {"body_twist_w": twist, "body_pose_w": pose}},
+            batch_size=batch_size,
+        )
+        torch.testing.assert_close(
+            linear(physical, None), torch.full((*batch_size, 1), -40.0)
+        )
+        torch.testing.assert_close(
+            angular(physical, None), torch.full((*batch_size, 1), -26.0)
+        )
+        torch.testing.assert_close(
+            world(physical, None), torch.full((*batch_size, 1), -18.0)
+        )
+        self.assertEqual(world.physical_fields, {("robot", "body_twist_w")})
+        self.assertEqual(
+            linear.physical_fields, {("robot", "body_twist_w"), ("robot", "body_pose_w")}
+        )
+        self.assertEqual(angular.range, (-float("inf"), 0.0))
+        self.assertEqual(
+            BodyLinearVelocity2("robot", "base", -1.0).range, (0.0, float("inf"))
+        )
+        self.assertEqual(
+            BodyAngularVelocity2("robot", "base", 1.0, axis=(0.0, 0.0, 0.0)).range,
+            (0.0, 0.0),
+        )
+
     def test_penalty_ranges_follow_weight_sign(self):
         for penalty in (ActionRate, JointAcc2, JointEnergy1, JointVel2):
             self.assertEqual(penalty(weight=2.0).range, (-float("inf"), 0.0))

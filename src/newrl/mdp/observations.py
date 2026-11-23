@@ -125,7 +125,9 @@ class _BodyObservation:
             raise RuntimeError(
                 "Initialize body observations against a scene before evaluation"
             )
-        return physical_state[self.entity, field_name].index_select(1, self._indices)
+        return physical_state[self.entity, field_name].index_select(
+            physical_state.ndim, self._indices
+        )
 
 
 @dataclass(frozen=True)

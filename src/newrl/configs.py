@@ -26,6 +26,8 @@ from .mdp.rewards import (
     JointEnergy1,
     JointVel2,
     TrackVelocity,
+    BodyAngularVelocity2,
+    BodyLinearVelocity2,
 )
 from .mdp.velocity import VelocityMDP
 from .robots import RobotConfig, assetx_as2, assetx_spot, newton_anymal_c
@@ -184,6 +186,20 @@ def _quadruped_locomotion(
         ),
         "regularization": RewardGroup(
             {
+                "root_angvel_xy": BodyAngularVelocity2(
+                    entity="robot",
+                    body_names=base,
+                    axis=(1.0, 1.0, 0.0),
+                    frame="body",
+                    weight=0.02,
+                ),
+                "root_linvel_z": BodyLinearVelocity2(
+                    entity="robot",
+                    body_names=base,
+                    axis=(0.0, 0.0, 1.0),
+                    frame="body",
+                    weight=2.0,
+                ),
                 "action_rate": ActionRate(weight=0.01),
                 "joint_energy1": JointEnergy1(weight=0.0002),
                 # "joint_acc2": JointAcc2(weight=0.00001),

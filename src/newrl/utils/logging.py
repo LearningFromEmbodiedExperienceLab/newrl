@@ -8,7 +8,7 @@ from newrl.utils.config import dump
 
 @dataclass
 class WandbConfig:
-    enabled: bool = False
+    enabled: bool = True
     project: str = "newrl"
     name: str | None = None
     group: str | None = None

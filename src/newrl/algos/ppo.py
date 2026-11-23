@@ -58,8 +58,8 @@ class PPOConfig:
     max_grad_norm: float = 1.0
     clamp_reward: bool = False
     normalize_reward: bool = False
-    actor_hidden: tuple[int, ...] = (256, 256, 256)
-    critic_hidden: tuple[int, ...] = (512, 256, 256)
+    actor_hidden: tuple[int, ...] = (512, 512, 256)
+    critic_hidden: tuple[int, ...] = (512, 512, 256)
     activation: str = "mish"
     min_std: float = 1e-2
     max_std: float = 1.0
