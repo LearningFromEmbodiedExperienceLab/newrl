@@ -46,7 +46,7 @@ def create_project(name: str, directory: Path | None = None) -> Path:
     core_pyproject = core / "pyproject.toml"
     checkout = core_pyproject.is_file() and (core / "src/newrl").is_dir()
     if directory is None:
-        directory = core.parent if checkout and Path.cwd() == core else Path.cwd()
+        directory = (core.parent if checkout else Path.cwd()) / "newrl-projects"
     root = directory.expanduser().resolve() / name
 
     sources = {}

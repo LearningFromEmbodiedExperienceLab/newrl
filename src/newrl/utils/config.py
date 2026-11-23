@@ -1,7 +1,35 @@
-"""Resolve Hydra-style CLI overrides into dataclasses and save them as tagged JSON.
+"""Compose typed Python dataclasses from presets and command-line overrides.
 
-Authoring stays in Python. A run file records types explicitly, so slices, tuples,
-and dataclass trees survive a round trip. Callables are stored as import paths.
+Define configs with dataclass fields and defaults. Register reusable presets
+with ``cs.store(name, node, group=...)``. Register an instance to give each
+caller a deep copy, or register a dataclass class to construct a new instance
+at selection time. A bare class preset calls the constructor with its defaults.
+Use ``name(arg1,arg2)`` to pass positional arguments to the constructor.
+
+Select a preset with ``group=name`` and override a field with a dotted
+``path.to.field=value`` assignment. Top-level dataclass fields can select
+presets from the group named after the field. To declare a group explicitly,
+use ``field(metadata={"preset_group": "group_name"})``. Nested selections
+match the longest registered group suffix, such as ``terrain.border`` in
+``task.terrain.border``. Preset selections are applied before field overrides,
+so an override can appear before the selection that supplies its field.
+
+Values accept strings, numbers, booleans, ``None``, lists, tuples, and
+``slice(start, stop, step)``. Quote the entire shell argument when it
+contains parentheses or spaces. Quote individual factory arguments inside
+that shell argument when they contain commas or parentheses.
+
+    newrl train task=AnymalLocoFlat algo=ppo task.num_envs=64 config_out=run.json
+    newrl play task=AS2WSphereLocoFlat 'task.terrain=reconstructed("maps/west track")'
+
+Use ``resolve(Config, argv)`` from Python, or decorate a command with
+``@main(Config)`` to pass it the resolved dataclass. A decorated command
+accepts ``config_out=path`` to save the resolved config before running.
+Use ``save_config`` and ``load_config`` for files, and ``dump`` and ``load``
+for in-memory JSON-compatible data. Type tags preserve dataclasses, tuples,
+and slices across a round trip. Dataclass fields with ``init=False`` are
+omitted, and callable references are restored by import path. Load trusted
+config data because loading imports objects and invokes constructors.
 """
 
 import copy
@@ -19,7 +47,7 @@ _MISSING = dataclasses.MISSING
 
 
 class ConfigStore:
-    """Named presets addressed as ``group/name``, matching a Hydra ConfigStore."""
+    """Store named presets by group and construct independent values on lookup."""
 
     def __init__(self):
         self._nodes: dict[tuple[str, str], Any] = {}
@@ -31,11 +59,19 @@ class ConfigStore:
         self._nodes[key] = node
 
     def get(self, group: str, name: str) -> Any:
+        preset, call, arguments = name.partition("(")
         try:
-            node = self._nodes[(group, name)]
+            node = self._nodes[(group, preset)]
         except KeyError:
             known = self.names(group)
-            raise KeyError(f"Unknown {group} config {name!r}. Known: {known}") from None
+            raise KeyError(f"Unknown {group} config {preset!r}. Known: {known}") from None
+        if call:
+            if not arguments.endswith(")"):
+                raise ValueError(f"Unclosed preset call {name!r}")
+            if not isinstance(node, type) or not dataclasses.is_dataclass(node):
+                raise TypeError(f"Preset {group}/{preset} is not a dataclass factory")
+            args = [parse_literal(arg) for arg in _split_args(arguments[:-1])]
+            return node(*args)
         if isinstance(node, type):
             return node()
         return copy.deepcopy(node)
@@ -47,7 +83,8 @@ class ConfigStore:
         return sorted({group for group, _name in self._nodes})
 
     def __contains__(self, key: tuple[str, str]) -> bool:
-        return key in self._nodes
+        group, name = key
+        return (group, name.partition("(")[0]) in self._nodes
 
 
 cs = ConfigStore()

@@ -1,9 +1,12 @@
 """Static terrain geometry and optional spawn anchors for each replicated world."""
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from hashlib import sha256
 from math import ceil, isfinite
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Protocol
 
 import newton
@@ -12,6 +15,14 @@ import warp as wp
 from newton._src.utils.mesh import load_meshes_from_file
 
 SpawnLocations = tuple[tuple[float, float, float], ...]
+
+
+@dataclass(frozen=True)
+class Terrain:
+    """Built terrain data available to MDPs in world coordinates."""
+
+    spawn_locations: SpawnLocations = ()
+    meta: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -29,8 +40,8 @@ class TerrainConfig:
             if len(location) != 3 or not all(isfinite(value) for value in location):
                 raise ValueError("Spawn locations must contain finite XYZ coordinates")
 
-    def build(self, builder: newton.ModelBuilder) -> SpawnLocations | None:
-        """Add static shapes and optionally return generated spawn anchors."""
+    def build(self, builder: newton.ModelBuilder) -> Terrain | SpawnLocations | None:
+        """Add static shapes and optionally return terrain data or spawn anchors."""
         raise NotImplementedError
 
 
@@ -64,6 +75,112 @@ class MeshTerrainConfig(TerrainConfig):
         for index, mesh in enumerate(meshes):
             label = "ground_mesh" if len(meshes) == 1 else f"ground_mesh_{index}"
             builder.add_shape_mesh(body=-1, mesh=mesh, label=label)
+
+
+@wp.kernel(enable_backward=False)
+def _project_spawn_support(
+    mesh: wp.uint64,
+    origins: wp.array[wp.vec3],
+    offsets: wp.array[wp.vec2],
+    min_normal_z: float,
+    max_drop: float,
+    heights: wp.array2d[float],
+):
+    index, sample = wp.tid()
+    origin = origins[index] + wp.vec3(offsets[sample][0], offsets[sample][1], 0.0)
+    hit = wp.mesh_query_ray(mesh, origin, wp.vec3(0.0, 0.0, -1.0), max_drop)
+    if hit.result and hit.normal[2] >= min_normal_z:
+        heights[index, sample] = origin[2] - hit.t
+
+
+@dataclass(frozen=True)
+class ReconstructedTerrainConfig(TerrainConfig):
+    """Load terrain.ply and terrain.json from a directory in a shared Z-up frame.
+
+    Metadata origins are XYZ trajectory samples above the terrain, in meters.
+    Support is sampled at the center and corners of a square around each origin.
+    """
+
+    directory: str = ""
+    support_half_width: float = 0.45
+    min_normal_z: float = 0.7
+    max_height_span: float = 0.22
+    max_drop: float = 2.0
+
+    def __post_init__(self):
+        super().__post_init__()
+        if not all(
+            isfinite(value) and value > 0
+            for value in (self.support_half_width, self.max_height_span, self.max_drop)
+        ):
+            raise ValueError("Support half-width, height span, and drop must be finite and positive")
+        if not 0 < self.min_normal_z <= 1:
+            raise ValueError("Minimum support normal Z must be in (0, 1]")
+
+    def build(self, builder: newton.ModelBuilder) -> Terrain:
+        if not self.directory:
+            raise ValueError("Set the reconstructed terrain directory")
+        directory = Path(self.directory).expanduser()
+        source = directory / "terrain.ply"
+        metadata = (directory / "terrain.json").read_bytes()
+        meta = json.loads(metadata)
+        if not isinstance(meta, dict) or meta.get("up", [0, 0, 1]) != [0, 0, 1]:
+            raise ValueError("terrain.json must contain a metadata object in a Z-up frame")
+
+        first_shape = builder.shape_count
+        MeshTerrainConfig(source=source).build(builder)
+        if self.spawn_locations:
+            return Terrain(self.spawn_locations, meta)
+        origins = np.asarray(meta.get("origins"), dtype=np.float32)
+        if (
+            origins.ndim != 2
+            or origins.shape[1] != 3
+            or not len(origins)
+            or not np.isfinite(origins).all()
+        ):
+            raise ValueError("terrain.json origins must be a nonempty array of finite XYZ points")
+
+        key = sha256(source.read_bytes())
+        key.update(metadata)
+        # Increment the version when the support sampling or filtering changes.
+        key.update(repr((
+            1, self.support_half_width, self.min_normal_z, self.max_height_span, self.max_drop
+        )).encode())
+        cache = Path(".cache/newrl/terrain-spawns") / f"{key.hexdigest()}.json"
+        if cache.is_file():
+            return Terrain(tuple(map(tuple, json.loads(cache.read_text()))), meta)
+
+        mesh = builder.shape_source[first_shape]
+        with wp.ScopedDevice("cpu"):
+            collision_mesh = wp.Mesh(
+                points=wp.array(mesh.vertices, dtype=wp.vec3),
+                indices=wp.array(mesh.indices, dtype=wp.int32),
+            )
+            w = self.support_half_width
+            offsets = wp.array([(0, 0), (-w, -w), (-w, w), (w, -w), (w, w)], dtype=wp.vec2)
+            heights = wp.full((len(origins), len(offsets)), np.nan, dtype=float)
+            wp.launch(
+                _project_spawn_support,
+                dim=heights.shape,
+                inputs=[
+                    collision_mesh.id, wp.array(origins, dtype=wp.vec3), offsets,
+                    self.min_normal_z, self.max_drop, heights,
+                ],
+            )
+            support = heights.numpy()
+
+        valid = np.isfinite(support).all(axis=1) & (
+            np.ptp(support, axis=1) <= self.max_height_span
+        )
+        anchors = np.column_stack((origins[valid, :2], support[valid, 0]))
+        if not len(anchors):
+            raise ValueError(f"No suitable spawn supports found for {source}")
+        locations = tuple(map(tuple, np.unique(anchors, axis=0).tolist()))
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(mode="w", dir=cache.parent, delete=False) as temp:
+            json.dump(locations, temp)
+        Path(temp.name).replace(cache)
+        return Terrain(locations, meta)
 
 
 @dataclass(frozen=True)

@@ -41,6 +41,7 @@ from .terrain import (
     GeneratedTerrainConfig,
     PlaneTerrainConfig,
     PyramidSlopeTileConfig,
+    ReconstructedTerrainConfig,
     RoughHeightfieldTileConfig,
     StairsTileConfig,
     TerrainConfig,
@@ -255,6 +256,7 @@ from newrl.utils.config import cs
 cs.store("wall", BorderConfig(), group="terrain.border")
 cs.store("apron", BorderConfig(kind="apron", width=5.0), group="terrain.border")
 cs.store("plane", PlaneTerrainConfig(), group="terrain")
+cs.store("recon", ReconstructedTerrainConfig, group="terrain")
 cs.store(
     "flat_tiles",
     GeneratedTerrainConfig(tiles={"flat": FlatTileConfig()}),

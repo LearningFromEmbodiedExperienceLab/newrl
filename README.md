@@ -119,9 +119,10 @@ with `uv pip install --no-deps -e .`.
 newrl project create foo_project
 ```
 
-From the NewRL checkout root this creates a sibling project. Elsewhere it
-creates a project under the current directory. Use `--dir` to choose its
-parent directory.
+With an editable NewRL checkout, this creates the project under the
+`newrl-projects/` directory beside the checkout. With an installed package,
+the default is `newrl-projects/` under the current directory. Use `--dir`
+to choose the parent directory.
 
 Follow the generated README to create the project's own environment and
 install the package. Each project chooses its dependency sources and indexes
