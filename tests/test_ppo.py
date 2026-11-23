@@ -48,6 +48,18 @@ class AdvantageTests(unittest.TestCase):
 
 
 class NormalizationTests(unittest.TestCase):
+    def test_eval_keeps_observation_statistics_fixed(self):
+        norm = EmpiricalNormalization(2, decay=1.0)
+        norm(torch.zeros(4, 2))
+        values = torch.ones(4, 2)
+        expected = norm.normalize(values)
+        norm.eval()
+        torch.testing.assert_close(norm(values), expected)
+        self.assertEqual(float(norm.count), 4.0)
+        norm.train()
+        norm(values)
+        self.assertEqual(float(norm.count), 8.0)
+
     def test_freeze_keeps_observation_statistics_fixed(self):
         norm = EmpiricalNormalization(2, decay=1.0)
         first = torch.zeros(4, 2)

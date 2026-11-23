@@ -14,7 +14,7 @@ from newrl.terrain import GeneratedTerrainConfig, PyramidSlopeTileConfig
 from newrl.utils.math import quat_mul, quat_rotate, quat_rotate_inverse
 
 
-def _wheel_clearance(env, normals, offset):
+def _wheel_clearance(env, normals, offset, kind):
     """Measure signed distance from the wheel collision support to the slope."""
     model = env.model
     wheel_bodies = env.scene.contact_sensors["feet_ground"].body_ids
@@ -28,15 +28,14 @@ def _wheel_clearance(env, normals, offset):
     local_pose = wp.to_torch(model.shape_transform)[shape_ids]
     scales = wp.to_torch(model.shape_scale)[shape_ids]
     kinds = model.shape_type.numpy()[shape_ids]
+    np.testing.assert_array_equal(kinds, np.full_like(kinds, kind))
     vertices = None
-    if np.all(kinds == newton.GeoType.CONVEX_MESH):
+    if kind == newton.GeoType.CONVEX_MESH:
         vertices = [
             torch.as_tensor(model.shape_source[shape].vertices, device=env.device)
             * scale
             for shape, scale in zip(shape_ids, scales, strict=True)
         ]
-    elif not np.all(kinds == newton.GeoType.CYLINDER):
-        raise AssertionError(f"Unexpected wheel collider types {kinds}")
 
     def measure():
         poses = wp.to_torch(env.state.body_q)
@@ -44,7 +43,9 @@ def _wheel_clearance(env, normals, offset):
         center = bodies[:, :3] + quat_rotate(bodies[:, 3:], local_pose[:, :3])
         rotation = quat_mul(bodies[:, 3:], local_pose[:, 3:])
         local_normal = quat_rotate_inverse(rotation, normals)
-        if vertices is None:
+        if kind == newton.GeoType.SPHERE:
+            support = -scales[:, 0]
+        elif kind == newton.GeoType.CYLINDER:
             support = -(
                 scales[:, 0] * local_normal[:, :2].norm(dim=-1)
                 + scales[:, 1] * local_normal[:, 2].abs()
@@ -66,11 +67,16 @@ def _wheel_clearance(env, normals, offset):
 class WheelTerrainTests(unittest.TestCase):
     def test_wheel_penetration_on_heightfield_slopes(self):
         slope = 0.25
-        for factory in (M20SLocomotion, AS2WLocomotion):
+        for factory, sphere_wheels, wheel_kind in (
+            (M20SLocomotion, False, newton.GeoType.CYLINDER),
+            (AS2WLocomotion, False, newton.GeoType.CONVEX_MESH),
+            (AS2WLocomotion, True, newton.GeoType.SPHERE),
+        ):
             for inverted in (False, True):
                 for collision in ("newton", "mujoco"):
                     with self.subTest(
-                        robot=factory.__name__, inverted=inverted, collision=collision
+                        robot=factory.__name__, wheels=wheel_kind.name,
+                        inverted=inverted, collision=collision,
                     ):
                         terrain = GeneratedTerrainConfig(
                             tiles={
@@ -80,6 +86,7 @@ class WheelTerrainTests(unittest.TestCase):
                             },
                             rows=1,
                         )
+                        options = {"sphere_wheels": True} if sphere_wheels else {}
                         cfg = factory(
                             num_envs=2,
                             terrain=terrain,
@@ -87,6 +94,7 @@ class WheelTerrainTests(unittest.TestCase):
                             deterministic=True,
                             graph_capture=False,
                             output_physical_fields=(("feet_ground", "loaded"),),
+                            **options,
                         )
                         cfg.mdp.joint_position_noise = 0.0
                         cfg.mdp.root_xy_noise = 0.0
@@ -103,7 +111,7 @@ class WheelTerrainTests(unittest.TestCase):
                         wheel_bodies = env.scene.contact_sensors["feet_ground"].body_ids
                         offset = (-1 if inverted else 1) * slope * terrain.tile_size / (2 * length)
                         wheel_normals = normals.repeat_interleave(wheel_bodies.shape[1], dim=0)
-                        clearance = _wheel_clearance(env, wheel_normals, offset)
+                        clearance = _wheel_clearance(env, wheel_normals, offset, wheel_kind)
                         with env._stream():
                             root = wp.to_torch(env.state.joint_q)
                             root[robot.root_q[:, 0]] = sides * 2.5

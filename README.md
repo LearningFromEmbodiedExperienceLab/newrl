@@ -60,10 +60,11 @@ Select Gaussian PPO with `algo=ppo` or the GenPO++ flow policy with
 `algo=genpo`. GenPO adapts the actor learning rate toward `algo.desired_kl`
 using augmented KL.
 
-Wheeled locomotion presets are available as `task=M20SLocoFlat` and
-`task=AS2WLocoFlat`. Their leg actions set joint position offsets and their
-wheel actions set target angular velocities. The actuator gains and action
-scales are starting values for training.
+Wheeled locomotion presets are available as `task=M20SLocoFlat`,
+`task=AS2WLocoFlat`, and `task=AS2WSphereLocoFlat`. The sphere variant keeps
+the AS2W tire visuals and uses spheres for wheel contacts. Leg actions set
+joint position offsets, and wheel actions set target angular velocities.
+The actuator gains and action scales are starting values for training.
 
 Training compiles `policy.act` by default. Set `compile_policy=false` to
 run the policy eagerly.
@@ -91,6 +92,9 @@ uv run python scripts/play.py checkpoint=path/to/checkpoint.pt
 Playback defaults to four worlds and deterministic actions. Use `num_envs=1`
 for a single world, `deterministic=false` to sample actions, or
 `viewer=false steps=100` for a headless run.
+Use `uv run --extra viser python scripts/play.py task=AnymalLocoFlat viewer=viser`
+to open playback in a browser. Viser listens on `127.0.0.1:8080` by default.
+Set `viser_host` and `viser_port` to change the listen address.
 
 With online W&B logging enabled (`logger.enabled=true`), the trainer queues
 each checkpoint for upload as soon as it is saved. On another machine with

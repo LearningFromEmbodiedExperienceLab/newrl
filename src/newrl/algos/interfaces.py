@@ -4,15 +4,11 @@ from typing import TYPE_CHECKING, ClassVar, Protocol, runtime_checkable
 
 from tensordict import TensorDict
 
-from .common.normalization import EmpiricalNormalization
-
 if TYPE_CHECKING:
     from newrl.env import StatefulEnvironment
 
 
 class OnPolicyLearner(Protocol):
-    policy_norm: EmpiricalNormalization
-
     def act(self, tensordict: TensorDict, *, deterministic: bool = False) -> TensorDict: ...
     def record(self, tensordict: TensorDict, transition: TensorDict) -> None: ...
     def train_op(self, batch: TensorDict) -> dict[str, float]: ...

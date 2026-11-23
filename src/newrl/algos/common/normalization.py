@@ -10,8 +10,8 @@ class EmpiricalNormalization(nn.Module):
     """Normalize the last dimension with decayed mean and variance.
 
     ``decay < 1`` tracks a shifting distribution. ``decay == 1`` gives equal
-    weight to every sample seen so far. ``freeze`` blocks updates from
-    ``forward``; an explicit ``update`` still records statistics.
+    weight to every sample seen so far. ``forward`` records statistics in
+    training mode unless frozen. Explicit ``update`` calls always record them.
     """
 
     def __init__(self, size: int, *, decay: float = 0.999, eps: float = 1e-5):
@@ -32,7 +32,7 @@ class EmpiricalNormalization(nn.Module):
             raise ValueError(
                 f"Expected a last dimension of {self.sum.shape[0]}, got {values.shape[-1]}"
             )
-        if not self.frozen:
+        if self.training and not self.frozen:
             self.update(values)
         return self.normalize(values)
 

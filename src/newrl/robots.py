@@ -4,6 +4,7 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import newton
 import warp as wp
@@ -350,8 +351,9 @@ def assetx_as2() -> RobotConfig:
     )
 
 
-def assetx_as2w() -> RobotConfig:
-    bundle = cooked_robot("as2w", robot_model_dir())
+def assetx_as2w(*, wheel_geometry: Literal["mesh", "sphere"] = "mesh") -> RobotConfig:
+    recipe = {"mesh": "as2w", "sphere": "as2w_sphere"}[wheel_geometry]
+    bundle = cooked_robot(recipe, robot_model_dir())
     return RobotConfig(
         asset=cooked_usd(bundle),
         position=(0.0, 0.0, 0.5),
@@ -396,6 +398,10 @@ def assetx_as2w() -> RobotConfig:
             "RR_foot": ("RL_foot", 1),
         },
     )
+
+
+def assetx_as2w_sphere() -> RobotConfig:
+    return assetx_as2w(wheel_geometry="sphere")
 
 
 def assetx_m20s() -> RobotConfig:

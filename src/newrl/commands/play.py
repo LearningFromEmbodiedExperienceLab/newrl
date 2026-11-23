@@ -23,17 +23,23 @@ class PlayConfig:
     task: EnvironmentConfig | None = None
     episode_steps: int = 1000
     steps: int | None = None
-    viewer: bool = True
+    viewer: bool | str = True
     checkpoint: str | None = None
     num_envs: int | None = None
     deterministic: bool = True
     algo: OnPolicyConfig | None = field(default=None, metadata={"preset_group": "algo"})
+    viser_host: str = "127.0.0.1"
+    viser_port: int = 8080
 
     def __post_init__(self):
         if self.episode_steps < 1 or (self.steps is not None and self.steps < 1):
             raise ValueError("episode_steps and steps must be positive")
         if self.num_envs is not None and self.num_envs < 1:
             raise ValueError("num_envs must be positive")
+        if not isinstance(self.viewer, bool) and self.viewer not in ("gl", "viser"):
+            raise ValueError("viewer must be true, false, gl, or viser")
+        if not 1 <= self.viser_port <= 65535:
+            raise ValueError("viser_port must be between 1 and 65535")
 
 
 @config_main(PlayConfig)
@@ -71,7 +77,11 @@ def play(cfg: PlayConfig) -> None:
     if cfg.num_envs is not None:
         task = replace(task, num_envs=cfg.num_envs)
 
-    viewer = newton.viewer.ViewerGL() if cfg.viewer else None
+    viewer = None
+    if cfg.viewer == "viser":
+        viewer = newton.viewer.ViewerViser(host=cfg.viser_host, port=cfg.viser_port)
+    elif cfg.viewer:
+        viewer = newton.viewer.ViewerGL()
     try:
         task.mdp.truncations["timeout"] = Timeout(cfg.episode_steps)
         env = StatefulEnvironment(task)
@@ -90,10 +100,9 @@ def play(cfg: PlayConfig) -> None:
         while (cfg.steps is None or steps < cfg.steps) and (
             viewer is None or viewer.is_running()
         ):
-            if viewer is None or not viewer.is_paused():
+            if viewer is None or viewer.should_step():
                 if policy is not None:
-                    with policy.policy_norm.freeze():
-                        actions = policy.act(carry, deterministic=cfg.deterministic)["action"]
+                    actions = policy.act(carry, deterministic=cfg.deterministic)["action"]
                 transition = env.step(actions)
                 carry = transition.select("observation")
                 steps += 1

@@ -23,6 +23,9 @@ dependencies = [
     "assetx",
 ]
 
+[project.optional-dependencies]
+viser = ["viser>=1.1.1"]
+
 [project.scripts]
 newrl = "newrl.cli:main"
 

@@ -31,7 +31,8 @@ from .mdp.rewards import (
 )
 from .mdp.velocity import VelocityMDP
 from .robots import (
-    RobotConfig, assetx_as2, assetx_as2w, assetx_m20s, assetx_spot, newton_anymal_c,
+    RobotConfig, assetx_as2, assetx_as2w, assetx_as2w_sphere,
+    assetx_m20s, assetx_spot, newton_anymal_c,
 )
 from .solver_adapters import MujocoSimConfig, SteelSimConfig
 from .terrain import (
@@ -147,9 +148,12 @@ def AS2Locomotion(
     )
 
 
-def AS2WLocomotion(*, contact_observation: bool = False, **overrides) -> EnvironmentConfig:
+def AS2WLocomotion(
+    *, contact_observation: bool = False, sphere_wheels: bool = False, **overrides
+) -> EnvironmentConfig:
     config = _quadruped_locomotion(
-        assetx_as2w, base="base_link", feet=r"(FL|FR|RL|RR)_foot",
+        assetx_as2w_sphere if sphere_wheels else assetx_as2w,
+        base="base_link", feet=r"(FL|FR|RL|RR)_foot",
         contact_observation=contact_observation, foot_slip_weight=0.0, **overrides,
     )
     del config.mdp.rewards["regularization"].terms["foot_slip"]
@@ -289,3 +293,9 @@ for name, factory in (
     ("M20SLocoFlat", M20SLocomotion),
 ):
     cs.store(name, factory(name=name, num_envs=4096), group="task")
+
+cs.store(
+    "AS2WSphereLocoFlat",
+    AS2WLocomotion(name="AS2WSphereLocoFlat", num_envs=4096, sphere_wheels=True),
+    group="task",
+)

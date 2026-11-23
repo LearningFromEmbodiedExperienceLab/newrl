@@ -135,10 +135,10 @@ def build_m20s(vendor_dir: Path) -> MujocoAsset:
     ]).transform(MujocoAsset.from_file(vendor_dir / "M20S.xml"))
 
 
-def build_as2w(vendor_dir: Path) -> MujocoAsset:
+def build_as2w(vendor_dir: Path, *, sphere_wheels: bool = False) -> MujocoAsset:
     xml = Path(tempfile.mkdtemp(prefix="newrl-as2w-")) / "as2w.xml"
     urdf_to_mjcf(vendor_dir / "as2w.urdf", out_xml=xml)
-    return Compose([
+    transforms = [
         NormalizeGeomNames(),
         NormalizeJointNames(),
         RemoveSensors(names=[".*"]),
@@ -152,13 +152,26 @@ def build_as2w(vendor_dir: Path) -> MujocoAsset:
             coverage_quantile=0.95,
             radius_scale=0.9,
         ),
-    ]).transform(MujocoAsset.from_file(xml))
+    ]
+    if sphere_wheels:
+        from assetx import ApproximateWithSphere
+
+        wheels = [f"{leg}_foot_collision0" for leg in ("FL", "FR", "RL", "RR")]
+        transforms.append(
+            ApproximateWithSphere([[wheel] for wheel in wheels], names=wheels, replace=True)
+        )
+    return Compose(transforms).transform(MujocoAsset.from_file(xml))
+
+
+def build_as2w_sphere(vendor_dir: Path) -> MujocoAsset:
+    return build_as2w(vendor_dir, sphere_wheels=True)
 
 
 RECIPES = {
     "spot": Recipe("spot", build_spot, MENAGERIE_SPOT),
     "as2": Recipe("as2", build_as2, UNITREE_AS2),
     "as2w": Recipe("as2w", build_as2w, UNITREE_AS2W),
+    "as2w_sphere": Recipe("as2w_sphere", build_as2w_sphere, UNITREE_AS2W),
     "m20s": Recipe("m20s", build_m20s, DEEP_M20S),
 }
 
