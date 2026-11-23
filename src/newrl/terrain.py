@@ -215,8 +215,11 @@ class RoughHeightfieldTileConfig:
     amplitude: float = 0.06
     sample_spacing: float = 0.1
     noise_spacing: float = 0.45
+    gap: float = 0.01
 
     def __post_init__(self):
+        if not isfinite(self.gap) or self.gap < 0:
+            raise ValueError("Heightfield gap must be finite and non-negative")
         if not 0.0 <= self.amplitude < float("inf"):
             raise ValueError("Heightfield amplitude must be finite and non-negative")
         if not 0.0 < self.sample_spacing <= self.noise_spacing < float("inf"):
@@ -239,9 +242,12 @@ class RoughHeightfieldTileConfig:
         pad_edge = spawn_pad_width / 2 + size / (count - 1)
         heights *= np.clip((radius - pad_edge) / self.noise_spacing, 0.0, 1.0)
         heights *= np.clip((half - radius) / self.noise_spacing, 0.0, 1.0)
+        shape_cfg = builder.default_shape_cfg.copy()
+        shape_cfg.gap = self.gap
         builder.add_shape_heightfield(
             xform=wp.transform((*center, 0.0), wp.quat_identity()),
             heightfield=newton.Heightfield(heights, count, count, hx=half, hy=half),
+            cfg=shape_cfg,
             label=label,
         )
         return 0.0
@@ -254,8 +260,11 @@ class PyramidSlopeTileConfig:
     slope: float = 0.25
     sample_spacing: float = 0.1
     inverted: bool = False
+    gap: float = 0.01
 
     def __post_init__(self):
+        if not isfinite(self.gap) or self.gap < 0:
+            raise ValueError("Heightfield gap must be finite and non-negative")
         if not isfinite(self.slope) or self.slope <= 0:
             raise ValueError("Slope must be finite and positive")
         if not isfinite(self.sample_spacing) or self.sample_spacing <= 0:
@@ -273,9 +282,12 @@ class PyramidSlopeTileConfig:
         if self.inverted:
             heights = -heights
             height = -height
+        shape_cfg = builder.default_shape_cfg.copy()
+        shape_cfg.gap = self.gap
         builder.add_shape_heightfield(
             xform=wp.transform((*center, 0.0), wp.quat_identity()),
             heightfield=newton.Heightfield(heights, count, count, hx=half, hy=half),
+            cfg=shape_cfg,
             label=label,
         )
         return height
