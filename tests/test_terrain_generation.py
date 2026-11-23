@@ -6,8 +6,9 @@ from dataclasses import replace
 import newton
 import numpy as np
 
+from newrl.commands.play import viewer_world_offsets
 from newrl.commands.train import TrainConfig
-from newrl.terrain import GeneratedTerrainConfig, PyramidSlopeTileConfig
+from newrl.terrain import GeneratedTerrainConfig, PlaneTerrainConfig, PyramidSlopeTileConfig
 from newrl.utils.config import cs, dump, load, resolve
 
 
@@ -30,6 +31,13 @@ class GeneratedTerrainTests(unittest.TestCase):
                     self.assertEqual(anchors[0][2], 0.0)
                     self.assertGreater(anchors[2][2], 0.0)
                     self.assertLess(anchors[3][2], 0.0)
+
+    def test_viewer_keeps_shared_terrain_aligned(self):
+        self.assertEqual(viewer_world_offsets(PlaneTerrainConfig(), 4), (2.0, 2.0, 0.0))
+        self.assertEqual(viewer_world_offsets("plane", 4), (2.0, 2.0, 0.0))
+        self.assertEqual(viewer_world_offsets(PlaneTerrainConfig(), 1), (0.0, 0.0, 0.0))
+        for name in ("flat_tiles", "rough_easy", "rough_hard"):
+            self.assertEqual(viewer_world_offsets(cs.get("terrain", name), 4), (0.0, 0.0, 0.0))
 
     def test_heightfield_seed_and_level_spawn_pad_and_edges(self):
         cfg = replace(cs.get("terrain", "rough_easy"), rows=1)

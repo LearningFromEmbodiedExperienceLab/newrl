@@ -12,10 +12,25 @@ from newrl.configs import EnvironmentConfig
 from newrl.env import StatefulEnvironment
 from newrl.mdp.episode_ends import Timeout
 from newrl.projects import load_projects
+from newrl.terrain import PlaneTerrainConfig
 from newrl.utils.config import load, main as config_main
 from newrl.utils.wandb import resolve_checkpoint
 
 CHECKPOINT_CACHE_DIR = Path(".cache/wandb-checkpoints")
+
+
+def viewer_world_offsets(terrain, num_envs: int) -> tuple[float, float, float]:
+    """Viewing offset applied on top of each world's simulated pose.
+
+    Every world shares one static terrain in world coordinates. ``set_model``
+    also spreads worlds by their own size. Either offset draws a robot over a
+    different point on that terrain than the one it contacts, so it appears to
+    float or sink wherever the ground height changes. An infinite plane is the
+    same height everywhere, so multiple worlds can be separated visually.
+    """
+    if num_envs > 1 and (terrain == "plane" or isinstance(terrain, PlaneTerrainConfig)):
+        return (2.0, 2.0, 0.0)
+    return (0.0, 0.0, 0.0)
 
 
 @dataclass
@@ -93,8 +108,7 @@ def play(cfg: PlayConfig) -> None:
         actions = torch.zeros((env.num_envs, env.action_dim), device=env.device)
         if viewer is not None:
             viewer.set_model(env.model)
-            if env.num_envs > 1:
-                viewer.set_world_offsets((2.0, 2.0, 0.0))
+            viewer.set_world_offsets(viewer_world_offsets(task.terrain, env.num_envs))
         carry = env.reset().select("observation")
         steps = resets = 0
         while (cfg.steps is None or steps < cfg.steps) and (
