@@ -44,20 +44,20 @@ class VelocityMDP(MDP):
     def _initialize(self, scene: "Scene") -> Self:
         bound = super()._initialize(scene)
         robot = scene.entities[self.entity]
-        if robot.root_q is None:
+        if robot.root_q_indices is None:
             raise ValueError("VelocityMDP requires a robot with one free root joint")
         bound._nominal_pose = TensorDict(
             {
-                "root_pose": wp.to_torch(scene.model.joint_q)[robot.root_q],
+                "root_pose": wp.to_torch(scene.model.joint_q)[robot.root_q_indices],
                 "joint_pos": robot.default_position,
             },
-            batch_size=[len(robot.q)],
-            device=robot.q.device,
+            batch_size=[len(robot.joint_q_indices)],
+            device=robot.joint_q_indices.device,
         )
         bound._spawn_locations = scene.spawn_locations
         bound._joint_limits = (
-            wp.to_torch(scene.model.joint_limit_lower)[robot.qd],
-            wp.to_torch(scene.model.joint_limit_upper)[robot.qd],
+            wp.to_torch(scene.model.joint_limit_lower)[robot.joint_qd_indices],
+            wp.to_torch(scene.model.joint_limit_upper)[robot.joint_qd_indices],
         )
         return bound
 

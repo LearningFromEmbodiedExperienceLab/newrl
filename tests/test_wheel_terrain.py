@@ -114,14 +114,14 @@ class WheelTerrainTests(unittest.TestCase):
                         clearance = _wheel_clearance(env, wheel_normals, offset, wheel_kind)
                         with env._stream():
                             root = wp.to_torch(env.state.joint_q)
-                            root[robot.root_q[:, 0]] = sides * 2.5
+                            root[robot.root_q_indices[:, 0]] = sides * 2.5
                             pitch = gradient.atan()
-                            root[robot.root_q[:, 4]] = (pitch / 2).sin()
-                            root[robot.root_q[:, 6]] = (pitch / 2).cos()
+                            root[robot.root_q_indices[:, 4]] = (pitch / 2).sin()
+                            root[robot.root_q_indices[:, 6]] = (pitch / 2).cos()
                             newton.eval_fk(
                                 env.model, env.state.joint_q, env.state.joint_qd, env.state
                             )
-                            root[robot.root_q[:, 2]] += (0.02 - clearance().amin(dim=1)) * length
+                            root[robot.root_q_indices[:, 2]] += (0.02 - clearance().amin(dim=1)) * length
                             newton.eval_fk(
                                 env.model, env.state.joint_q, env.state.joint_qd, env.state
                             )

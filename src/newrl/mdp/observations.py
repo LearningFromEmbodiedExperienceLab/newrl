@@ -33,10 +33,14 @@ class EntityField:
 
     def _initialize(self, scene: "Scene") -> Self:
         entity = scene.entities[self.entity]
+        if self.field in entity.model_parameters:
+            if self.joint_names is not None or self.body_names is not None:
+                raise ValueError("Select randomization indices in the randomization config")
+            return replace(self, _shape=entity.model_parameters[self.field].shape[1:])
         shapes = {
-            "joint_pos": entity.q.shape[1:],
-            "joint_vel": entity.qd.shape[1:],
-            "joint_torque": entity.qd.shape[1:],
+            "joint_pos": entity.joint_q_indices.shape[1:],
+            "joint_vel": entity.joint_qd_indices.shape[1:],
+            "joint_torque": entity.joint_qd_indices.shape[1:],
             "body_pose_w": torch.Size((len(entity.body_names), 7)),
             "body_twist_w": torch.Size((len(entity.body_names), 6)),
         }
@@ -51,7 +55,7 @@ class EntityField:
             joint = self.field.startswith('joint_')
             find = entity.find_joints if joint else entity.find_bodies
             selected, _ = find(names, self.preserve_order)
-            indices = torch.tensor(selected, device=(entity.q if joint else entity.bodies).device, dtype=torch.long)
+            indices = torch.tensor(selected, device=(entity.joint_q_indices if joint else entity.body_indices).device, dtype=torch.long)
             shape = torch.Size((len(selected), *shape[1:]))
         return replace(self, _shape=shape, _indices=indices)
 
@@ -71,7 +75,7 @@ class EntityField:
         return values.index_select(-1 if self.field.startswith('joint_') else -2, self._indices)
 
     def symmetry_transform(self, scene: "Scene") -> SymmetryTransform:
-        if self.field not in ("joint_pos", "joint_vel", "joint_torque"):
+        if self.entity not in scene.entities or self.field not in ("joint_pos", "joint_vel", "joint_torque"):
             raise ValueError(f"No reflection defined for entity field {self.field!r}")
         entity = scene.entities[self.entity]
         if self._indices is None:
@@ -86,7 +90,7 @@ class PreviousAction:
     _size: int | None = runtime_field()
 
     def _initialize(self, scene: "Scene") -> Self:
-        return replace(self, _size=sum(entity.q.shape[1] for entity in scene.entities.values()))
+        return replace(self, _size=sum(entity.joint_q_indices.shape[1] for entity in scene.entities.values()))
 
     @property
     def shape(self) -> torch.Size:
@@ -144,7 +148,7 @@ class _BodyObservation:
 
         body_indices = tuple(selected)
         indices = torch.tensor(
-            body_indices, device=entity.bodies.device, dtype=torch.long
+            body_indices, device=entity.body_indices.device, dtype=torch.long
         )
         return replace(self, _body_indices=body_indices, _indices=indices)
 
@@ -444,7 +448,7 @@ class ReferenceMotion:
     def _initialize(self, scene: "Scene") -> Self:
         robot = scene.entities[self.entity]
         (root,), _ = robot.find_bodies(self.root_body)
-        return replace(self, _root=root, _joints=robot.q.shape[-1])
+        return replace(self, _root=root, _joints=robot.joint_q_indices.shape[-1])
 
     def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         from newrl.utils.math import quat_conjugate, quat_mul, quat_to_6d

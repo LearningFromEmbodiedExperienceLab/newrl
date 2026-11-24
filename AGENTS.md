@@ -147,8 +147,9 @@ hostnames, local paths, device identifiers, and environment variables.
 
 MDP terms may declare `physical_fields` as a set of `(entity, field)` pairs.
 The bound MDP unions these requirements across observation, reward, and episode-end
-terms. Terms without a declaration retain a full scene snapshot. Set
-`EnvironmentConfig.physical_fields` to request additional internal read fields.
+terms. Terms without a declaration retain a full scene snapshot.
+`Scene._initialize` combines the MDP requirements with
+`output_physical_fields` and initializes the sensors needed for those reads.
 `output_physical_fields` controls which physical fields appear in outputs;
 `output_mdp_fields` requests additional MDP fields. Outputs always include
 `mdp_state.episode_step`, with shape `[num_envs, 1]`, describing the returned

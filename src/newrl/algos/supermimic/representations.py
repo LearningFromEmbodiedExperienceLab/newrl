@@ -55,17 +55,17 @@ class GeneralizedCoordinates(nn.Module):
         self.config = config
         robot, model = scene.entities[config.entity], scene.model
         (self.root,), _ = robot.find_bodies(config.root_body)
-        if robot.root_q is None:
+        if robot.root_q_indices is None:
             raise ValueError("Generalized coordinates require one free root")
         self.joint_names, self.body_names = robot.joint_names, robot.body_names
-        ids = robot.bodies[0].cpu().tolist()
+        ids = robot.body_indices[0].cpu().tolist()
         local = {body: i for i, body in enumerate(ids)}
         children = wp.to_torch(model.joint_child).cpu().tolist()
         parents = wp.to_torch(model.joint_parent).cpu().tolist()
         kinds = wp.to_torch(model.joint_type).cpu().tolist()
         starts = wp.to_torch(model.joint_q_start).cpu().tolist()
         dofs = wp.to_torch(model.joint_qd_start).cpu().tolist()
-        coordinates = {q: i for i, q in enumerate(robot.q[0].cpu().tolist())}
+        coordinates = {q: i for i, q in enumerate(robot.joint_q_indices[0].cpu().tolist())}
         incoming = {}
         for joint, child in enumerate(children):
             if child in local:
@@ -78,7 +78,7 @@ class GeneralizedCoordinates(nn.Module):
         if kinds[root_joint] != newton.JointType.FREE or parents[root_joint] != -1:
             raise ValueError("The selected root must have a world-parent free joint")
         self.parents, self.kinds, self.coordinates = [], [], []
-        axis = torch.zeros((len(ids), 3), device=robot.q.device)
+        axis = torch.zeros((len(ids), 3), device=robot.joint_q_indices.device)
         joint_ids = []
         for index, body in enumerate(ids):
             joint = incoming[body]
@@ -109,15 +109,15 @@ class GeneralizedCoordinates(nn.Module):
         self.order = tuple(order)
         self.levels = tuple(levels)
         for depth, level in enumerate(self.levels):
-            self.register_buffer(f'level_{depth}', torch.tensor(level, device=robot.q.device))
-        self.register_buffer('coordinate_index', torch.tensor(self.coordinates, device=robot.q.device).clamp_min(0))
-        self.register_buffer('revolute_mask', torch.tensor([kind == newton.JointType.REVOLUTE for kind in self.kinds], device=robot.q.device).float().unsqueeze(-1))
-        self.register_buffer('prismatic_mask', torch.tensor([kind == newton.JointType.PRISMATIC for kind in self.kinds], device=robot.q.device).float().unsqueeze(-1))
-        joint_ids = torch.tensor(joint_ids, device=robot.q.device)
+            self.register_buffer(f'level_{depth}', torch.tensor(level, device=robot.joint_q_indices.device))
+        self.register_buffer('coordinate_index', torch.tensor(self.coordinates, device=robot.joint_q_indices.device).clamp_min(0))
+        self.register_buffer('revolute_mask', torch.tensor([kind == newton.JointType.REVOLUTE for kind in self.kinds], device=robot.joint_q_indices.device).float().unsqueeze(-1))
+        self.register_buffer('prismatic_mask', torch.tensor([kind == newton.JointType.PRISMATIC for kind in self.kinds], device=robot.joint_q_indices.device).float().unsqueeze(-1))
+        joint_ids = torch.tensor(joint_ids, device=robot.joint_q_indices.device)
         self.register_buffer('parent_frame', wp.to_torch(model.joint_X_p)[joint_ids].clone())
         self.register_buffer('child_frame', wp.to_torch(model.joint_X_c)[joint_ids].clone())
         self.register_buffer('axis', axis)
-        self.register_buffer('com', wp.to_torch(model.body_com)[robot.bodies[0]].clone())
+        self.register_buffer('com', wp.to_torch(model.body_com)[robot.body_indices[0]].clone())
         self.feature_dim = 10 + 2 * len(self.joint_names)
         self.prediction_dim = 12 + 2 * len(self.joint_names)
         self.physical_fields = frozenset(config.physical_fields) | {(config.entity, 'projected_gravity')}

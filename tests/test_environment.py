@@ -9,7 +9,7 @@ import warp as wp
 from tensordict import TensorDict
 
 from newrl.configs import (
-    AS2Locomotion, AS2WLocomotion, AnymalLocomotion, M20SLocomotion, SpotLocomotion,
+    AS2Locomotion, AS2WLocomotion, AnymalLocomotion, G1Locomotion, M20SLocomotion, SpotLocomotion,
 )
 from newrl.sensors import TerrainContactConfig
 from newrl.env import StatefulEnvironment, StatelessEnvironment
@@ -17,6 +17,7 @@ from newrl.mdp.episode_ends import Timeout
 from newrl.solver_adapters import MujocoSimConfig, SteelSimConfig
 from newrl.steel import reconstruct_augmented_drive_torque
 from newrl.terrains import FlatMeshTerrainConfig, PlaneTerrainConfig
+from newrl.utils.config import cs
 
 
 def _reward_term(env, transition, group, term):
@@ -26,6 +27,44 @@ def _reward_term(env, transition, group, term):
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class EnvironmentTests(unittest.TestCase):
+    def test_randomized_g1_checkpoint_restores_dynamics(self):
+        for solver in (MujocoSimConfig(), SteelSimConfig()):
+            with self.subTest(solver=type(solver).__name__):
+                self._check_randomized_g1_checkpoint(solver)
+
+    def _check_randomized_g1_checkpoint(self, solver: MujocoSimConfig | SteelSimConfig) -> None:
+        randomization = cs.get("randomization", "g1")
+        fields = ("body_mass_scale", "shape_friction", "joint_gain_scale")
+        cfg = G1Locomotion(
+            num_envs=3,
+            solver=solver,
+            deterministic=True,
+            randomization=randomization,
+            output_physical_fields=tuple(("robot", name) for name in fields),
+        )
+        env = StatelessEnvironment(cfg)
+        sim, mdp, reset = env.reset()
+        inputs = TensorDict(
+            {"action": torch.full((3, env.action_dim), 0.1, device=env.device)},
+            batch_size=[3],
+        )
+        expected, _, _ = env.step(sim, mdp, inputs)
+        _, _, partial = env.reset(sim, mdp, env_ids=torch.tensor([1], device=env.device))
+        for name in fields:
+            samples = reset["physical_state", "robot", name]
+            self.assertFalse(torch.equal(samples[0], samples[1]))
+            torch.testing.assert_close(samples, sim[f"randomization:{name}"])
+            torch.testing.assert_close(samples, partial["physical_state", "robot", name])
+
+        other = StatelessEnvironment(replace(cfg, randomization=replace(randomization, seed=7)))
+        other_sim, other_mdp, _ = other.reset()
+        different, _, _ = other.step(other_sim, other_mdp, inputs)
+        self.assertFalse(torch.allclose(different["joint_qd"], expected["joint_qd"]))
+        # The second environment has already stepped with different model parameters.
+        replay, _, _ = other.step(sim, mdp, inputs)
+        torch.testing.assert_close(replay["joint_q"], expected["joint_q"])
+        torch.testing.assert_close(replay["joint_qd"], expected["joint_qd"])
+
     def test_wheel_velocity_control_and_partial_reset(self):
         for factory in (AS2WLocomotion, M20SLocomotion):
             for solver in (MujocoSimConfig(), SteelSimConfig()):
@@ -39,14 +78,14 @@ class EnvironmentTests(unittest.TestCase):
                     action = torch.zeros(2, env.action_dim, device=env.device)
                     action[:, mask] = 0.5
                     env.step(action)
-                    target = wp.to_torch(env.control.joint_target_qd)[entity.qd]
+                    target = wp.to_torch(env.control.joint_target_qd)[entity.joint_qd_indices]
                     torch.testing.assert_close(target[:, mask], torch.full_like(target[:, mask], 5.0))
                     self.assertGreater(
-                        float(wp.to_torch(env.state.joint_qd)[entity.qd][:, mask].abs().mean()),
+                        float(wp.to_torch(env.state.joint_qd)[entity.joint_qd_indices][:, mask].abs().mean()),
                         0.01,
                     )
                     env.reset(torch.tensor([0], device=env.device))
-                    target = wp.to_torch(env.control.joint_target_qd)[entity.qd]
+                    target = wp.to_torch(env.control.joint_target_qd)[entity.joint_qd_indices]
                     self.assertTrue(torch.all(target[0] == 0))
                     self.assertTrue(torch.all(target[1, mask] == 5.0))
 
@@ -308,12 +347,10 @@ class EnvironmentTests(unittest.TestCase):
                 torch.testing.assert_close(reset_force[1], force[1], atol=0, rtol=0)
 
     def test_scene_projected_gravity(self):
-        env = StatefulEnvironment(
-            AnymalLocomotion(num_envs=2, physical_fields=(("robot", "projected_gravity"),))
-        )
+        env = StatefulEnvironment(AnymalLocomotion(num_envs=2))
         env.reset()
         pose = wp.to_torch(env.state.body_q)
-        indices = env.scene.entities["robot"].bodies[:, 0]
+        indices = env.scene.entities["robot"].body_indices[:, 0]
         pose[indices, 3:7] = torch.tensor(
             [[0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.0]], device=env.device
         )
@@ -345,7 +382,7 @@ class EnvironmentTests(unittest.TestCase):
         entity = env.scene.entities["robot"]
         torque = transition["physical_state", "robot", "joint_torque"]
         torch.testing.assert_close(
-            torque, wp.to_torch(env.observables.qfrc_actuator)[entity.qd]
+            torque, wp.to_torch(env.observables.qfrc_actuator)[entity.joint_qd_indices]
         )
         velocity = transition["physical_state", "robot", "joint_vel"]
         energy = _reward_term(env, transition, "regularization", "joint_energy1")
@@ -619,7 +656,7 @@ class EnvironmentTests(unittest.TestCase):
             set(extra_env.reset()["physical_state", "robot"].keys()),
             {"body_pose_w"},
         )
-        cfg.physical_fields = (("robot", "missing"),)
+        cfg.output_physical_fields = (("robot", "missing"),)
         with self.assertRaisesRegex(ValueError, "Unknown physical field"):
             StatefulEnvironment(cfg)
 

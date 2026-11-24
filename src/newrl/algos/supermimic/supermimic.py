@@ -146,6 +146,8 @@ class SuperMimicConfig:
         return task
 
     def build(self, env: "StatefulEnvironment") -> "SuperMimic":
+        if env.config.randomization is not None:
+            raise ValueError("SuperMimic requires fixed physical parameters until its dynamics model supports randomization context")
         representation = self.representation.build(env.scene)
         dynamics = ObservationGroup(self.wm_observations)._initialize(env.scene) if self.wm_observations else None
         if dynamics is not None:

@@ -36,6 +36,7 @@ from .mdp.motion_tracking import MotionTrackingMDP
 from .mdp.episode_ends import ClipEnd, TrackingDeviation
 from .mdp.observations import ReferenceMotion
 from .mdp.rewards import JointLimit, TrackBodyMotion
+from .randomization import BodyMassScale, DomainRandomizationConfig, JointGainScale, ShapeFriction
 from .robots import (
     RobotConfig, assetx_as2, assetx_as2w, assetx_as2w_sphere,
     assetx_m20s, assetx_spot, newton_anymal_c,
@@ -74,12 +75,12 @@ class EnvironmentConfig:
     )
     robots: dict[str, Callable[[], RobotConfig]] = field(default_factory=dict)
     mdp: MDP = field(default_factory=MDP)
-    physical_fields: tuple[tuple[str, str], ...] = ()
     output_physical_fields: tuple[tuple[str, str], ...] = ()
     output_mdp_fields: tuple[str, ...] = ()
     name: str = "custom"
     collision: str = "newton"
     sensors: dict[str, SensorConfig] = field(default_factory=dict)
+    randomization: DomainRandomizationConfig | None = None
 
     def __post_init__(self) -> None:
         if self.collision not in ("newton", "mujoco", "newrl"):
@@ -328,6 +329,18 @@ def _velocity_locomotion(
 
 
 from newrl.utils.config import cs
+
+cs.store(
+    "g1",
+    DomainRandomizationConfig(
+        mass=BodyMassScale(body_names="pelvis", bounds=(0.85, 1.15)),
+        friction=ShapeFriction(
+            body_names=r"(left|right)_ankle_roll_link", bounds=(1.0, 1.4)
+        ),
+        gains=JointGainScale(joint_names=".*", bounds=(0.9, 1.1)),
+    ),
+    group="randomization",
+)
 
 cs.store("wall", BorderConfig(), group="terrain.border")
 cs.store("apron", BorderConfig(kind="apron", width=5.0), group="terrain.border")

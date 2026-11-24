@@ -64,7 +64,7 @@ def _resolve_joint_indices(
         selected, _ = entity.find_joints(joint_names, preserve_order)
     except ValueError as exc:
         raise ValueError(f"Invalid joint selection {joint_names!r}: {exc}") from exc
-    return torch.tensor(selected, device=entity.qd.device, dtype=torch.long)
+    return torch.tensor(selected, device=entity.joint_qd_indices.device, dtype=torch.long)
 
 
 @dataclass(frozen=True)
@@ -291,7 +291,7 @@ class BodyAngularVelocity2:
 
     def _initialize(self, scene: "Scene") -> Self:
         velocity = self._velocity_term()._initialize(scene)
-        device = scene.entities[self.entity].bodies.device
+        device = scene.entities[self.entity].body_indices.device
         return replace(self, _velocity=velocity, _axis=torch.tensor(self.axis, device=device))
 
     def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
@@ -333,7 +333,7 @@ class BodyLinearVelocity2:
 
     def _initialize(self, scene: "Scene") -> Self:
         velocity = self._velocity_term()._initialize(scene)
-        device = scene.entities[self.entity].bodies.device
+        device = scene.entities[self.entity].body_indices.device
         return replace(self, _velocity=velocity, _axis=torch.tensor(self.axis, device=device))
 
     def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
@@ -391,9 +391,9 @@ class TrackBodyMotion:
             (anchor,), _ = robot.find_bodies(self.anchor_body)
         return replace(
             self,
-            _indices=torch.tensor(indices, device=robot.q.device),
+            _indices=torch.tensor(indices, device=robot.joint_q_indices.device),
             _anchor=anchor,
-            _com=wp.to_torch(scene.model.body_com)[robot.bodies[0]].clone(),
+            _com=wp.to_torch(scene.model.body_com)[robot.body_indices[0]].clone(),
         )
 
     def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
@@ -462,8 +462,8 @@ class JointLimit:
 
         robot = scene.entities[self.entity]
         indices = _resolve_joint_indices(robot, self.joint_names, self.preserve_order)
-        lo = wp.to_torch(scene.model.joint_limit_lower)[robot.qd[0]].index_select(-1, indices).clone()
-        hi = wp.to_torch(scene.model.joint_limit_upper)[robot.qd[0]].index_select(-1, indices).clone()
+        lo = wp.to_torch(scene.model.joint_limit_lower)[robot.joint_qd_indices[0]].index_select(-1, indices).clone()
+        hi = wp.to_torch(scene.model.joint_limit_upper)[robot.joint_qd_indices[0]].index_select(-1, indices).clone()
         center, half = (lo + hi) / 2, (hi - lo) * self.soft_limit_factor / 2
         return replace(self, _indices=indices, _lower=center - half, _upper=center + half)
 

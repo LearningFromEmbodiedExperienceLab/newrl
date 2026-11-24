@@ -28,8 +28,13 @@ class SolverAdapter(Protocol):
 
     def checkpoint_views(self) -> dict[str, torch.Tensor]: ...
 
+    def refresh_model(self, flags: int) -> None: ...
+
 
 class MujocoSim:
+    def refresh_model(self, flags: int) -> None:
+        self.solver.notify_model_changed(flags)
+
     def __init__(
         self,
         config: "MujocoSimConfig",
@@ -121,6 +126,9 @@ class MujocoSim:
 
 
 class SteelSim:
+    def refresh_model(self, flags: int) -> None:
+        self.solver.notify_model_changed(flags)
+
     def __init__(
         self, config: "SteelSimConfig", scene: "Scene", contacts: newton.Contacts | None, needs_torque: bool, needs_contacts: bool, *, deterministic: bool
     ) -> None:
@@ -169,7 +177,7 @@ class SteelSim:
                 .contiguous(),
                 dtype=wp.int32,
             )
-            for name in ("q", "qd", "targets")
+            for name in ("joint_q_indices", "joint_qd_indices", "joint_target_indices")
         )
 
     def step(

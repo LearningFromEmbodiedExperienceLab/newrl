@@ -111,7 +111,7 @@ class GaussianCamera:
         }[config.mode]
         self.model = model
         (body,), _ = entity.find_bodies(config.body)
-        self.body_ids = entity.bodies[:, body]
+        self.body_ids = entity.body_indices[:, body]
         self._bodies = wp.from_torch(self.body_ids.to(torch.int32))
         self.shape = torch.Size((config.height, config.width))
         rotation = wp.quat_rpy(*map(float, config.rpy))

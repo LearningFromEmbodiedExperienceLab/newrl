@@ -71,10 +71,10 @@ class TermSelectionTests(unittest.TestCase):
 
     def setUp(self):
         robot = RobotEntity(
-            targets=None, root_q=None, default_position=None, action=None,
+            joint_target_indices=None, root_q_indices=None, default_position=None, action=None,
             joint_names=('robot/right_knee','robot/left_knee','robot/waist'),
             body_names=('robot/right_foot','robot/base','robot/left_foot'),
-            q=torch.arange(3).unsqueeze(0),qd=torch.arange(3).unsqueeze(0),bodies=torch.arange(3).unsqueeze(0),
+            joint_q_indices=torch.arange(3).unsqueeze(0),joint_qd_indices=torch.arange(3).unsqueeze(0),body_indices=torch.arange(3).unsqueeze(0),
             joint_mirror={'right_knee':('left_knee',1),'left_knee':('right_knee',1),'waist':('waist',1)},
         )
         model = SimpleNamespace(

@@ -105,7 +105,7 @@ class TerrainContact:
     def __init__(self, config: TerrainContactConfig, entity: "RobotEntity") -> None:
         self.config = config
         indices, _ = entity.find_bodies(config.body_names)
-        self.body_ids = entity.bodies[:, indices]
+        self.body_ids = entity.body_indices[:, indices]
 
     def initialize(self, scene: "Scene") -> None:
         model = scene.model

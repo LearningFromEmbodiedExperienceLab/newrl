@@ -101,7 +101,7 @@ class DepthCamera:
         self.config = config
         self.model = model
         (body,), _ = entity.find_bodies(config.body)
-        self.body_ids = entity.bodies[:, body]
+        self.body_ids = entity.body_indices[:, body]
         self._bodies = wp.from_torch(self.body_ids.to(torch.int32), dtype=wp.int32)
         self.shape = torch.Size((config.height, config.width))
         # Convert Newton's camera axes to the mount's forward-left-up axes.

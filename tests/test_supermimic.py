@@ -37,9 +37,9 @@ class RepresentationTests(unittest.TestCase):
         model = builder.finalize(device='cpu')
         q_indices = torch.tensor([builder.joint_q_start[j] for j in (hinge, slide)])
         robot = RobotEntity(
-            targets=None, default_position=None, action=None,
-            root_q=torch.arange(7).unsqueeze(0), bodies=torch.arange(4).unsqueeze(0),
-            q=q_indices.unsqueeze(0), qd=q_indices.unsqueeze(0), joint_names=('hinge', 'slide'),
+            joint_target_indices=None, default_position=None, action=None,
+            root_q_indices=torch.arange(7).unsqueeze(0), body_indices=torch.arange(4).unsqueeze(0),
+            joint_q_indices=q_indices.unsqueeze(0), joint_qd_indices=q_indices.unsqueeze(0), joint_names=('hinge', 'slide'),
             body_names=('pelvis', 'arm', 'fixed', 'slider'),
         )
         self.scene = SimpleNamespace(model=model, entities={'robot':robot})
@@ -111,7 +111,7 @@ class RepresentationTests(unittest.TestCase):
                               actor_hidden=(16,), critic_hidden=(16,), wm_hidden=(16,), wm_observations={})
         mdp = MDP(observations={'state':ObservationGroup({'q':EntityField('robot','joint_pos')})})._initialize(self.scene)
         env = SimpleNamespace(scene=self.scene, mdp=mdp, device=torch.device('cpu'), action_dim=2,
-                              config=SimpleNamespace(output_physical_fields=(), terrain='plane'), output_mdp_fields=())
+                              config=SimpleNamespace(output_physical_fields=(), terrain='plane', randomization=None), output_mdp_fields=())
         with self.assertRaisesRegex(ValueError, 'prepare_task'):
             cfg.build(env)
         env.config.output_physical_fields = cfg.representation.physical_fields

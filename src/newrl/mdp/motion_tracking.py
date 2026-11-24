@@ -33,9 +33,9 @@ class MotionTrackingMDP(MDP):
     def _initialize(self, scene: "Scene") -> Self:
         bound = super()._initialize(scene)
         robot = scene.entities[self.entity]
-        if robot.root_q is None or robot.root_qd is None:
+        if robot.root_q_indices is None or robot.root_qd_indices is None:
             raise ValueError("MotionTrackingMDP requires one free-root robot")
-        device = robot.q.device
+        device = robot.joint_q_indices.device
         motion = LAFAN1Dataset(self.dataset, fps=1 / scene.control_dt, device=device)
         joints = [name.rsplit("/", 1)[-1] for name in robot.joint_names]
         bodies = [name.rsplit("/", 1)[-1] for name in robot.body_names]
@@ -50,7 +50,7 @@ class MotionTrackingMDP(MDP):
         for key in ("body_pose_w", "body_twist_w"):
             motion.data[key] = motion.data[key].index_select(-2, body_ids)
         bound._motion = motion
-        bound._root_com = wp.to_torch(scene.model.body_com)[robot.bodies[0, bodies.index(self.root_body)]].clone()
+        bound._root_com = wp.to_torch(scene.model.body_com)[robot.body_indices[0, bodies.index(self.root_body)]].clone()
         return bound
 
     def initial_state(self, num_envs: int, action_dim: int, device: torch.device) -> TensorDict:

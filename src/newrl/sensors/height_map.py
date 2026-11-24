@@ -79,7 +79,7 @@ class HeightMap:
         self.config = config
         self.model = model
         (body,), _ = entity.find_bodies(config.body)
-        self._bodies = wp.from_torch(entity.bodies[:, body].to(torch.int32), dtype=wp.int32)
+        self._bodies = wp.from_torch(entity.body_indices[:, body].to(torch.int32), dtype=wp.int32)
         self.shape = torch.Size((config.rows, config.cols))
 
     def initialize(self, scene: "Scene") -> None:

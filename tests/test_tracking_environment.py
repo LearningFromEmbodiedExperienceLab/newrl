@@ -149,12 +149,12 @@ class TrackingEnvironmentTests(unittest.TestCase):
                 env = StatelessEnvironment(config)
                 sim, mdp, _ = env.reset()
                 robot = env.scene.entities["robot"]
-                torch.testing.assert_close(wp.to_torch(env.state.joint_qd)[robot.qd], torch.full((2, 29), .2, device=env.device))
+                torch.testing.assert_close(wp.to_torch(env.state.joint_qd)[robot.joint_qd_indices], torch.full((2, 29), .2, device=env.device))
                 expected = torch.tensor([1., 2., 3., .2, .3, .4], device=env.device).expand(2, -1)
-                torch.testing.assert_close(wp.to_torch(env.state.joint_qd)[robot.root_qd], expected)
+                torch.testing.assert_close(wp.to_torch(env.state.joint_qd)[robot.root_qd_indices], expected)
                 # FK must have incorporated root and joint reset velocities.
                 pelvis = next(i for i, name in enumerate(robot.body_names) if name.rsplit("/", 1)[-1] == "pelvis")
-                torch.testing.assert_close(wp.to_torch(env.state.body_qd)[robot.bodies[:, pelvis]], expected)
+                torch.testing.assert_close(wp.to_torch(env.state.body_qd)[robot.body_indices[:, pelvis]], expected)
                 action = TensorDict({"action": torch.zeros(2, 29, device=env.device)}, [2])
                 next_sim, next_mdp, transition = env.step(sim, mdp, action)
                 env.mdp.velocities = False
@@ -162,8 +162,8 @@ class TrackingEnvironmentTests(unittest.TestCase):
                 partial, partial_mdp, _ = env.reset(next_sim, next_mdp, env_ids=ids)
                 for key in next_sim.keys():
                     torch.testing.assert_close(partial[key][1], next_sim[key][1], atol=0, rtol=0)
-                self.assertTrue((wp.to_torch(env.state.joint_qd)[robot.qd[0]] == 0).all())
-                self.assertTrue((wp.to_torch(env.state.joint_qd)[robot.root_qd[0]] == 0).all())
+                self.assertTrue((wp.to_torch(env.state.joint_qd)[robot.joint_qd_indices[0]] == 0).all())
+                self.assertTrue((wp.to_torch(env.state.joint_qd)[robot.root_qd_indices[0]] == 0).all())
                 # A branch/reset must not change replay of the original checkpoint.
                 replay_sim, replay_mdp, replay = env.step(sim, mdp, action)
                 torch.testing.assert_close(replay_sim, next_sim)

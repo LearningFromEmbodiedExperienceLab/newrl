@@ -10,7 +10,6 @@ from tensordict import TensorDict
 from .configs import EnvironmentConfig
 from .mdp.base import MDP
 from .scene import Scene
-from .sensors import FrameCamera, TerrainContact
 from .solver_adapters import MujocoSimConfig
 from .terrain_collision import HybridTerrainCollision
 from .utils.profiling import StageProfiler
@@ -32,27 +31,13 @@ class _EnvironmentCore:
         self.config = config
         self.num_envs = config.num_envs
         self.scene = Scene(config)
-        self.mdp = (mdp if mdp is not None else config.mdp)._initialize(self.scene)
-        self.scene.resolve_physical_fields(config.physical_fields)
-        self.output_physical_plan = self.scene.resolve_physical_fields(
-            config.output_physical_fields
-        )
+        self.model = self.scene.model
+        self.device = torch.device(wp.device_to_torch(self.model.device))
+        with self._stream():
+            self.mdp = self.scene._initialize(mdp if mdp is not None else config.mdp)
         self.output_mdp_fields = tuple(
             dict.fromkeys(("episode_step", *config.output_mdp_fields))
         )
-        required = self.mdp.physical_fields
-        requested = (
-            None
-            if required is None
-            else required
-            | frozenset(config.physical_fields)
-            | frozenset(config.output_physical_fields)
-        )
-        read_plan = self.scene.physical_read_plan = self.scene.resolve_physical_fields(
-            requested
-        )
-        self.model = self.scene.model
-        self.device = torch.device(wp.device_to_torch(self.model.device))
         if config.collision == "newrl":
             self.collision = HybridTerrainCollision(
                 self.model, self.scene.terrain_shapes, deterministic=config.deterministic
@@ -64,30 +49,11 @@ class _EnvironmentCore:
         else:
             self.collision = None
         contacts = self.collision.contacts() if self.collision is not None else None
-        needs_torque = any(
-            "joint_torque" in fields for fields in read_plan.values()
-        )
-        active_sensors = {
-            name: sensor
-            for name, sensor in self.scene.sensors.items()
-            if name in read_plan
-        }
-        for sensor in active_sensors.values():
-            sensor.initialize(self.scene)
-        self._contact_sensors = {
-            name: sensor for name, sensor in active_sensors.items()
-            if isinstance(sensor, TerrainContact)
-        }
-        self._cameras = {
-            name: sensor for name, sensor in active_sensors.items()
-            if isinstance(sensor, FrameCamera)
-        }
-        self._camera_bvh_refit = any(camera.requires_bvh_refit for camera in self._cameras.values())
         self._solver = config.solver.build(
             self.scene,
             contacts,
-            needs_torque,
-            bool(self._contact_sensors),
+            self.scene.needs_torque,
+            bool(self.scene.contact_sensors),
             deterministic=config.deterministic,
             use_mujoco_contacts=config.collision == "mujoco",
         )
@@ -100,7 +66,7 @@ class _EnvironmentCore:
         self._physics_warmed_up = False
         self.control = self.model.control()
         self.action_sizes = [
-            entity.q.shape[1] for entity in self.scene.entities.values()
+            entity.joint_q_indices.shape[1] for entity in self.scene.entities.values()
         ]
         self.action_dim = sum(self.action_sizes)
         self.control_dt = self.scene.control_dt
@@ -135,10 +101,10 @@ class _EnvironmentCore:
         reset: bool = False,
         reset_mask: torch.Tensor | None = None,
     ) -> None:
-        if self._camera_bvh_refit:
+        if self.scene.camera_bvh_refit:
             self.model.bvh_refit_shapes(self.state)
             self.model.bvh_refit_particles(self.state)
-        for name, camera in self._cameras.items():
+        for name, camera in self.scene.cameras.items():
             with self._profile_stage(f"camera/{name}"):
                 camera.sample(self.state, reset=reset, reset_mask=reset_mask)
 
@@ -149,13 +115,13 @@ class _EnvironmentCore:
         *,
         profile: bool = False,
     ) -> tuple[newton.State, newton.State]:
-        for sensor in self._contact_sensors.values():
+        for sensor in self.scene.contact_sensors.values():
             sensor.begin_step()
         for substep in range(self.config.substeps):
             final = substep == self.config.substeps - 1
             sample_contacts = any(
                 sensor.track_history or final
-                for sensor in self._contact_sensors.values()
+                for sensor in self.scene.contact_sensors.values()
             )
             with self._profile_stage("collision") if profile else nullcontext():
                 state.clear_forces()
@@ -174,7 +140,7 @@ class _EnvironmentCore:
                 with (
                     self._profile_stage("contact_sensor") if profile else nullcontext()
                 ):
-                    for sensor in self._contact_sensors.values():
+                    for sensor in self.scene.contact_sensors.values():
                         if sensor.track_history or final:
                             sensor.update(
                                 self.contacts,
@@ -217,13 +183,9 @@ class _EnvironmentCore:
         if missing:
             raise ValueError(f"Unknown output MDP fields: {missing}")
         result["mdp_state"] = mdp_state.select(*self.output_mdp_fields).clone()
-        if self.output_physical_plan:
+        if self.scene.output_physical_fields:
             result["physical_state"] = physical_state.select(
-                *(
-                    (entity, field)
-                    for entity, fields in self.output_physical_plan.items()
-                    for field in fields
-                )
+                *self.scene.output_physical_fields
             ).clone()
         return result
 
@@ -253,7 +215,7 @@ class _EnvironmentCore:
         reset_dofs = mask[dof_world]
         if self.observables is not None:
             wp.to_torch(self.observables.qfrc_actuator)[reset_dofs] = 0
-        for sensor in self._contact_sensors.values():
+        for sensor in self.scene.contact_sensors.values():
             sensor.reset(ids)
         # Reset velocities default to zero, independently of model defaults.
         wp.to_torch(self.state.joint_qd)[reset_dofs] = 0
@@ -275,9 +237,9 @@ class _EnvironmentCore:
         )
         targets = wp.to_torch(self.control.joint_target_q)
         for entity in self.scene.entities.values():
-            targets[entity.targets[ids]] = entity.default_position[ids]
+            targets[entity.joint_target_indices[ids]] = entity.default_position[ids]
             if entity.velocity_mask is not None:
-                wp.to_torch(self.control.joint_target_qd)[entity.qd[ids]] = 0.0
+                wp.to_torch(self.control.joint_target_qd)[entity.joint_qd_indices[ids]] = 0.0
         self._sample_cameras(
             reset=True, reset_mask=None if env_ids is None else mask[:-1]
         )
@@ -365,17 +327,22 @@ class StatelessEnvironment(_EnvironmentCore):
             for name, array in arrays.items()
         }
         views.update(self._solver.checkpoint_views())
+        if (randomization := self.scene.randomization) is not None:
+            views.update({
+                f"randomization:{name}": value
+                for name, value in randomization.values.items()
+            })
         views.update(
             {
                 f"contact_{field}:{name}": view
-                for name, sensor in self._contact_sensors.items()
+                for name, sensor in self.scene.contact_sensors.items()
                 for field, view in sensor.checkpoint_views().items()
             }
         )
         views.update(
             {
                 f"camera_{field}:{name}": view
-                for name, sensor in self._cameras.items()
+                for name, sensor in self.scene.cameras.items()
                 for field, view in sensor.checkpoint_views().items()
             }
         )
@@ -402,7 +369,16 @@ class StatelessEnvironment(_EnvironmentCore):
                 or value.device != view.device
             ):
                 raise ValueError(f"Invalid simulator checkpoint field {name!r}")
+        if (randomization := self.scene.randomization) is not None:
+            values = {
+                name: sim_state[f"randomization:{name}"]
+                for name in randomization.values
+            }
+            if randomization.restore(values):
+                self._solver.refresh_model(randomization.flags)
         for name, view in views.items():
+            if name.startswith("randomization:"):
+                continue
             view.copy_(sim_state[name])
 
     @torch.no_grad()
@@ -416,7 +392,9 @@ class StatelessEnvironment(_EnvironmentCore):
         if env_ids is not None and (sim_state is None or mdp_state is None):
             raise ValueError("A selective reset requires both input checkpoints")
         with self._stream():
-            if env_ids is not None:
+            if env_ids is not None or (
+                sim_state is not None and self.scene.randomization is not None
+            ):
                 with self._profile_stage("checkpoint_restore"):
                     self._restore(sim_state)
             with self._profile_stage("reset"):

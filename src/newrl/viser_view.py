@@ -136,9 +136,9 @@ class ViserPlayback:
             if follow:
                 robot = self._robots[robot_name]
                 root = (
-                    wp.to_torch(state.joint_q)[robot.root_q[world]]
-                    if robot.root_q is not None
-                    else body_q[robot.bodies[world:world + 1, 0]][0]
+                    wp.to_torch(state.joint_q)[robot.root_q_indices[world]]
+                    if robot.root_q_indices is not None
+                    else body_q[robot.body_indices[world:world + 1, 0]][0]
                 )
                 poses.append(root)
             poses = torch.stack(poses).cpu().numpy()

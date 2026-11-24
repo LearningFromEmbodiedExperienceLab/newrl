@@ -11,31 +11,34 @@ import warp as wp
 from tensordict import TensorDict
 
 from .mdp.actions import JointPositionAction
+from .randomization import DomainRandomization
 from .robots import scalar_joints
-from .sensors import Sensor
+from .sensors import FrameCamera, Sensor, TerrainContact
 from .terrains import Terrain, TerrainConfig
 from .utils.symmetry import SymmetryTransform
 from .utils.string import resolve_scene_names
 
 if TYPE_CHECKING:
     from newrl.configs import EnvironmentConfig
+    from newrl.mdp.base import MDP
 
 
 @dataclass
 class RobotEntity:
     joint_names: tuple[str, ...]
     body_names: tuple[str, ...]
-    q: torch.Tensor
-    qd: torch.Tensor
-    targets: torch.Tensor
-    bodies: torch.Tensor
-    root_q: torch.Tensor | None
+    joint_q_indices: torch.Tensor
+    joint_qd_indices: torch.Tensor
+    joint_target_indices: torch.Tensor
+    body_indices: torch.Tensor
+    root_q_indices: torch.Tensor | None
     default_position: torch.Tensor
     action: JointPositionAction
     joint_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
     body_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
     velocity_mask: torch.Tensor | None = None
-    root_qd: torch.Tensor | None = None
+    root_qd_indices: torch.Tensor | None = None
+    model_parameters: dict[str, torch.Tensor] = field(default_factory=dict)
 
     def write_joint_state(
         self, state: newton.State, env_ids: torch.Tensor | slice, *,
@@ -43,23 +46,23 @@ class RobotEntity:
     ) -> None:
         """Write selected worlds' scalar joint coordinates in entity order."""
         if joint_pos is not None:
-            wp.to_torch(state.joint_q)[self.q[env_ids]] = joint_pos
+            wp.to_torch(state.joint_q)[self.joint_q_indices[env_ids]] = joint_pos
         if joint_vel is not None:
-            wp.to_torch(state.joint_qd)[self.qd[env_ids]] = joint_vel
+            wp.to_torch(state.joint_qd)[self.joint_qd_indices[env_ids]] = joint_vel
 
     def write_root_state(
         self, state: newton.State, env_ids: torch.Tensor | slice, *,
         root_pose: torch.Tensor | None = None, root_twist: torch.Tensor | None = None,
     ) -> None:
         """Write world XYZ/XYZW pose and world COM linear/angular velocity."""
-        if (root_pose is not None and self.root_q is None) or (
-            root_twist is not None and self.root_qd is None
+        if (root_pose is not None and self.root_q_indices is None) or (
+            root_twist is not None and self.root_qd_indices is None
         ):
             raise ValueError("Writing root state requires an entity with one free root")
         if root_pose is not None:
-            wp.to_torch(state.joint_q)[self.root_q[env_ids]] = root_pose
+            wp.to_torch(state.joint_q)[self.root_q_indices[env_ids]] = root_pose
         if root_twist is not None:
-            wp.to_torch(state.joint_qd)[self.root_qd[env_ids]] = root_twist
+            wp.to_torch(state.joint_qd)[self.root_qd_indices[env_ids]] = root_twist
 
     def find_bodies(
         self, names: str | Sequence[str], preserve_order: bool = False
@@ -92,14 +95,18 @@ class RobotEntity:
     ) -> TensorDict:
         # Advanced indexing produces snapshots, safe across state-buffer swaps.
         sources = {
-            "joint_pos": (state.joint_q, self.q),
-            "joint_vel": (state.joint_qd, self.qd),
-            "body_pose_w": (state.body_q, self.bodies),
-            "body_twist_w": (state.body_qd, self.bodies),
+            "joint_pos": (state.joint_q, self.joint_q_indices),
+            "joint_vel": (state.joint_qd, self.joint_qd_indices),
+            "body_pose_w": (state.body_q, self.body_indices),
+            "body_twist_w": (state.body_qd, self.body_indices),
         }
-        values = {}
+        values = {
+            name: self.model_parameters[name]
+            for name in fields
+            if name in self.model_parameters
+        }
         if "projected_gravity" in fields:
-            pose = wp.to_torch(state.body_q)[self.bodies]
+            pose = wp.to_torch(state.body_q)[self.body_indices]
             axis = -pose[..., 3:6]
             gravity = torch.zeros_like(axis)
             gravity[..., 2] = -1.0
@@ -114,7 +121,7 @@ class RobotEntity:
                 raise RuntimeError(
                     "Joint torque requires the solver actuator-force observable"
                 )
-            sources["joint_torque"] = (observables.qfrc_actuator, self.qd)
+            sources["joint_torque"] = (observables.qfrc_actuator, self.joint_qd_indices)
         return TensorDict(
             {
                 name: values[name]
@@ -122,24 +129,25 @@ class RobotEntity:
                 else wp.to_torch(sources[name][0])[sources[name][1]]
                 for name in fields
             },
-            batch_size=[len(self.q)],
-            device=self.q.device,
+            batch_size=[len(self.joint_q_indices)],
+            device=self.joint_q_indices.device,
         )
 
     def write_action(self, control: newton.Control, action: torch.Tensor) -> None:
         position = self.action(action, self.default_position)
         if self.velocity_mask is not None:
             position = torch.where(self.velocity_mask, self.default_position, position)
-            wp.to_torch(control.joint_target_qd)[self.qd] = torch.where(
+            wp.to_torch(control.joint_target_qd)[self.joint_qd_indices] = torch.where(
                 self.velocity_mask, self.action.scale * action, 0.0
             )
-        wp.to_torch(control.joint_target_q)[self.targets] = position
+        wp.to_torch(control.joint_target_q)[self.joint_target_indices] = position
 
 
 class Scene:
     physical_read_plan: dict[str, tuple[str, ...]]
 
     def __init__(self, config: "EnvironmentConfig") -> None:
+        self.config = config
         self.sim_dt = config.sim_dt
         self.control_dt = config.sim_dt * config.substeps
         template = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -208,17 +216,17 @@ class Scene:
             body_ids = worlds * template.body_count + torch.tensor(
                 list(bodies), device=device, dtype=torch.long
             )
-            q = wp.to_torch(model.joint_q_start)[joint_ids].long()
-            qd = wp.to_torch(model.joint_qd_start)[joint_ids].long()
-            targets = wp.to_torch(model.joint_target_q_start)[joint_ids].long()
-            root_q = None
-            root_qd = None
+            joint_q_indices = wp.to_torch(model.joint_q_start)[joint_ids].long()
+            joint_qd_indices = wp.to_torch(model.joint_qd_start)[joint_ids].long()
+            joint_target_indices = wp.to_torch(model.joint_target_q_start)[joint_ids].long()
+            root_q_indices = None
+            root_qd_indices = None
             if len(roots) == 1:
                 root_joint_ids = worlds * template.joint_count + roots[0]
                 root_start = wp.to_torch(model.joint_q_start)[root_joint_ids].long()
-                root_q = root_start + torch.arange(7, device=device)
+                root_q_indices = root_start + torch.arange(7, device=device)
                 root_dof = wp.to_torch(model.joint_qd_start)[root_joint_ids].long()
-                root_qd = root_dof + torch.arange(6, device=device)
+                root_qd_indices = root_dof + torch.arange(6, device=device)
             velocity_mask = None
             if velocity_joints:
                 labels = tuple(template.joint_label[j] for j in joints)
@@ -231,13 +239,13 @@ class Scene:
             self.entities[name] = RobotEntity(
                 joint_names=tuple(template.joint_label[j] for j in joints),
                 body_names=tuple(template.body_label[b] for b in bodies),
-                q=q,
-                qd=qd,
-                targets=targets,
-                bodies=body_ids,
-                root_q=root_q,
-                root_qd=root_qd,
-                default_position=wp.to_torch(model.joint_q)[q],
+                joint_q_indices=joint_q_indices,
+                joint_qd_indices=joint_qd_indices,
+                joint_target_indices=joint_target_indices,
+                body_indices=body_ids,
+                root_q_indices=root_q_indices,
+                root_qd_indices=root_qd_indices,
+                default_position=wp.to_torch(model.joint_q)[joint_q_indices],
                 action=JointPositionAction(
                     torch.tensor(scale, dtype=torch.float32, device=device)
                 ),
@@ -246,11 +254,41 @@ class Scene:
                 velocity_mask=velocity_mask,
             )
 
+        self.randomization: DomainRandomization | None = None
         self.sensors: dict[str, Sensor] = {}
         for name, sensor in config.sensors.items():
             if name in self.entities:
                 raise ValueError(f"Sensor name conflicts with entity {name!r}")
             self.sensors[name] = sensor.build(self)
+
+    def _initialize(self, mdp: "MDP") -> "MDP":
+        """Bind the MDP and initialize the scene reads it and the caller need."""
+        if (config := self.config.randomization) is not None:
+            self.randomization = DomainRandomization(self, config)
+
+        mdp = mdp._initialize(self)
+        outputs = frozenset(self.config.output_physical_fields)
+        self.resolve_physical_fields(outputs)
+        self.output_physical_fields = tuple(sorted(outputs))
+        required = mdp.physical_fields
+        self.physical_read_plan = self.resolve_physical_fields(
+            None if required is None else required | outputs
+        )
+        self.needs_torque = any(
+            "joint_torque" in self.physical_read_plan.get(name, ())
+            for name in self.entities
+        )
+        self.contact_sensors: dict[str, TerrainContact] = {}
+        self.cameras: dict[str, FrameCamera] = {}
+        for name, sensor in self.sensors.items():
+            if name in self.physical_read_plan:
+                sensor.initialize(self)
+                if isinstance(sensor, TerrainContact):
+                    self.contact_sensors[name] = sensor
+                if isinstance(sensor, FrameCamera):
+                    self.cameras[name] = sensor
+        self.camera_bvh_refit = any(camera.requires_bvh_refit for camera in self.cameras.values())
+        return mdp
 
     def action_symmetry_transform(self) -> SymmetryTransform:
         """Build a CPU transform in the same entity and joint order as actions."""
@@ -284,7 +322,10 @@ class Scene:
             "joint_torque",
             "projected_gravity",
         }
-        fields_by_name = {name: tuple(sorted(supported)) for name in self.entities}
+        fields_by_name = {
+            name: tuple(sorted(supported | entity.model_parameters.keys()))
+            for name, entity in self.entities.items()
+        }
         fields_by_name.update(
             {name: sensor.fields for name, sensor in self.sensors.items()}
         )

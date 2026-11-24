@@ -60,6 +60,21 @@ Select Gaussian PPO with `algo=ppo` or the GenPO++ flow policy with
 `algo=genpo`. GenPO adapts the actor learning rate toward `algo.desired_kl`
 using augmented KL.
 
+Enable startup domain randomization for Unitree G1 with MuJoCo Warp or Steel
+(`task.solver=steel`).
+
+```sh
+newrl train task=G1LocoFlat algo=ppo task.randomization=g1
+```
+
+The preset samples pelvis mass and inertia together, foot sliding friction,
+and joint target gains once per world. Samples remain fixed through resets.
+Use `task.randomization.seed` to change the samples. Request
+`("robot", "body_mass_scale")`, `("robot", "shape_friction")`,
+or `("robot", "joint_gain_scale")` in `output_physical_fields` to
+include copies in transition outputs. Stateless checkpoints carry the samples
+and restore the corresponding model parameters before solver history.
+
 Wheeled locomotion presets are available as `task=M20SLocoFlat`,
 `task=AS2WLocoFlat`, and `task=AS2WSphereLocoFlat`. The sphere variant keeps
 the AS2W tire visuals and uses spheres for wheel contacts. Leg actions set
