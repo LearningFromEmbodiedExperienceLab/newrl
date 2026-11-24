@@ -351,6 +351,45 @@ class DepthCameraObservation(_GridObservation):
 
 
 @dataclass(frozen=True)
+class RGBCameraObservation:
+    """Camera RGB in uint8 CHW order before observation grouping."""
+
+    sensor: str
+    _shape: torch.Size | None = field(default=None, init=False, repr=False, compare=False)
+
+    @property
+    def physical_fields(self):
+        return frozenset({(self.sensor, "rgb")})
+
+    @property
+    def shape(self) -> torch.Size:
+        if self._shape is None:
+            raise RuntimeError("Bind the RGB observation to a scene before reading its shape")
+        return self._shape
+
+    def _initialize(self, scene):
+        scene.resolve_physical_fields(self.physical_fields)
+        bound = replace(self)
+        object.__setattr__(bound, "_shape", torch.Size((3, *scene.sensors[self.sensor].shape)))
+        return bound
+
+    def __call__(self, physical_state, mdp_state):
+        return physical_state[self.sensor, "rgb"].movedim(-1, -3)
+
+    def symmetry_transform(self, scene) -> SymmetryTransform:
+        sensor = scene.sensors[self.sensor]
+        config = sensor.config
+        roll, _, yaw = config.rpy
+        if any(abs(value) > 1e-7 for value in (config.pos[1], roll, yaw)):
+            raise ValueError("RGB mirroring requires a centered camera with zero roll and yaw")
+        entity = scene.entities[config.entity]
+        indices = resolve_scene_names(config.body, entity.body_names)
+        entity.body_symmetry_transform(indices, (1,))
+        permutation = torch.arange(self.shape.numel()).reshape(self.shape).flip(-1)
+        return SymmetryTransform(permutation.flatten().tolist(), (1,) * permutation.numel())
+
+
+@dataclass(frozen=True)
 class HeightMapObservation(_GridObservation):
     """Terrain height and optional validity channel in CHW order."""
 

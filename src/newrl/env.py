@@ -10,7 +10,7 @@ from tensordict import TensorDict
 from .configs import EnvironmentConfig
 from .mdp.base import MDP
 from .scene import Scene
-from .sensors import DepthCamera, TerrainContact
+from .sensors import FrameCamera, TerrainContact
 from .solver_adapters import MujocoSimConfig
 from .terrain_collision import HybridTerrainCollision
 from .utils.profiling import StageProfiler
@@ -78,10 +78,11 @@ class _EnvironmentCore:
             name: sensor for name, sensor in active_sensors.items()
             if isinstance(sensor, TerrainContact)
         }
-        self._depth_cameras = {
+        self._cameras = {
             name: sensor for name, sensor in active_sensors.items()
-            if isinstance(sensor, DepthCamera)
+            if isinstance(sensor, FrameCamera)
         }
+        self._camera_bvh_refit = any(camera.requires_bvh_refit for camera in self._cameras.values())
         self._solver = config.solver.build(
             self.scene,
             contacts,
@@ -128,13 +129,13 @@ class _EnvironmentCore:
     def _profile_stage(self, name):
         return nullcontext() if self.profiler is None else self.profiler.stage(name)
 
-    def _sample_depth_cameras(self, *, reset=False, reset_mask=None):
-        if self._depth_cameras:
-            with self._profile_stage("depth_camera"):
-                self.model.bvh_refit_shapes(self.state)
-                self.model.bvh_refit_particles(self.state)
-                for camera in self._depth_cameras.values():
-                    camera.sample(self.state, reset=reset, reset_mask=reset_mask)
+    def _sample_cameras(self, *, reset=False, reset_mask=None):
+        if self._camera_bvh_refit:
+            self.model.bvh_refit_shapes(self.state)
+            self.model.bvh_refit_particles(self.state)
+        for name, camera in self._cameras.items():
+            with self._profile_stage(f"camera/{name}"):
+                camera.sample(self.state, reset=reset, reset_mask=reset_mask)
 
     def _simulate(self, state, state_next, *, profile=False):
         for sensor in self._contact_sensors.values():
@@ -258,7 +259,7 @@ class _EnvironmentCore:
             targets[entity.targets[ids]] = entity.default_position[ids]
             if entity.velocity_mask is not None:
                 wp.to_torch(self.control.joint_target_qd)[entity.qd[ids]] = 0.0
-        self._sample_depth_cameras(
+        self._sample_cameras(
             reset=True, reset_mask=None if env_ids is None else mask[:-1]
         )
         physical_state = self.scene.read(self.state, self.observables)
@@ -283,7 +284,7 @@ class _EnvironmentCore:
             ):
                 entity.write_action(self.control, values)
         self._advance()
-        self._sample_depth_cameras()
+        self._sample_cameras()
         with self._profile_stage("state_read"):
             physical_state = self.scene.read(self.state, self.observables)
         with self._profile_stage("mdp"):
@@ -355,7 +356,7 @@ class StatelessEnvironment(_EnvironmentCore):
         views.update(
             {
                 f"camera_{field}:{name}": view
-                for name, sensor in self._depth_cameras.items()
+                for name, sensor in self._cameras.items()
                 for field, view in sensor.checkpoint_views().items()
             }
         )

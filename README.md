@@ -96,13 +96,20 @@ Use `uv run --extra viser python scripts/play.py task=AnymalLocoFlat viewer=vise
 to open playback in a browser. Viser listens on `127.0.0.1:8080` by default.
 Set `viser_host` and `viser_port` to change the listen address.
 In the browser's **Robot view** panel, choose a world and robot, then enable
-**Follow robot**. If the task configures depth cameras, enable **Camera frustums**
-to see the selected robot's camera mounts and fields of view. Active cameras
-show their latest depth image on the frustum. Near surfaces appear brighter,
-and invalid pixels are black.
+**Follow robot**. Enable **Camera frustums** to see the selected robot's
+camera mount and field of view. Use **Camera** if the robot has several
+cameras. Active cameras show their latest RGB or depth image on the frustum.
+In depth images, near surfaces appear brighter and invalid pixels are black.
 Training defaults to `discard_unused_obs=true` and skips groups outside the
 policy and critic inputs. Playback defaults to `discard_unused_obs=false`,
 which keeps the task's observations available even with a blind checkpoint.
+
+Projects with a static Gaussian splat PLY can use `GaussianCameraConfig`
+from `newrl.sensors` with `RGBCameraObservation` or `DepthCameraObservation`.
+Set `mode` to `rgb`, `depth`, or `rgbd`. Configure `world_from_cloud` to
+align the cloud and install `gsrender[gsplat]` in the project environment.
+Gaussian depth measures expected forward-axis depth and reports pixels below
+`min_alpha` as invalid.
 
 With online W&B logging enabled (`logger.enabled=true`), the trainer queues
 each checkpoint for upload as soon as it is saved. On another machine with

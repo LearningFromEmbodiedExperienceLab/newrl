@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import warp as wp
 
-from .sensors import DepthCamera
+from .sensors import DepthCamera, GaussianCamera
 
 if TYPE_CHECKING:
     import viser
@@ -23,6 +23,7 @@ class _ClientView:
     robot: "viser.GuiDropdownHandle"
     follow: "viser.GuiCheckboxHandle"
     show_frustums: "viser.GuiCheckboxHandle | None"
+    camera: "viser.GuiDropdownHandle | None" = None
     frustums: dict[str, "viser.CameraFrustumHandle"] = field(default_factory=dict)
     follow_target: tuple[int, str] | None = None
     orbit: np.ndarray | None = None
@@ -64,10 +65,11 @@ class ViserPlayback:
             robot: {
                 name: sensor
                 for name, sensor in scene.sensors.items()
-                if isinstance(sensor, DepthCamera) and sensor.config.entity == robot
+                if isinstance(sensor, (DepthCamera, GaussianCamera)) and sensor.config.entity == robot
             }
             for robot in self._robots
         }
+        self._select_camera = any(len(cameras) > 1 for cameras in self._cameras.values())
         self._clients: dict[int, _ClientView] = {}
 
     def update(self, state):
@@ -87,6 +89,10 @@ class ViserPlayback:
                             if any(self._cameras.values())
                             else None
                         ),
+                        camera=(
+                            client.gui.add_dropdown("Camera", ("None",))
+                            if self._select_camera else None
+                        ),
                     )
                 self._clients[client_id] = view
 
@@ -100,6 +106,11 @@ class ViserPlayback:
                 if view.show_frustums is not None and view.show_frustums.value
                 else {}
             )
+            if view.camera is not None:
+                options = tuple(self._cameras[robot_name]) or ("None",)
+                if view.camera.options != options:
+                    view.camera.options = options
+                cameras = {name: sensor for name, sensor in cameras.items() if name == view.camera.value}
             for name in view.frustums.keys() - cameras.keys():
                 view.frustums.pop(name).remove()
             if not follow and not cameras:
@@ -149,9 +160,13 @@ class ViserPlayback:
                     )
                     frustum.wxyz = (rotation[3], rotation[0], rotation[1], rotation[2])
                     if name in self._active_sensors:
-                        depth = sensor.depth_frame(world).cpu().numpy().astype(np.float32)
-                        shade = 255 - 223 * np.clip(depth / sensor.config.max_depth, 0, 1)
-                        shade = np.where(depth > 0, shade, 0).astype(np.uint8)
-                        image = np.repeat(shade[..., None], 3, axis=-1)
+                        if "rgb" in sensor.fields:
+                            image = sensor.rgb_frame(world).cpu().numpy()
+                        else:
+                            depth = sensor.depth_frame(world).cpu().numpy().astype(np.float32)
+                            far = sensor.config.far if isinstance(sensor, GaussianCamera) else sensor.config.max_depth
+                            shade = 255 - 223 * np.clip(depth / far, 0, 1)
+                            shade = np.where(depth > 0, shade, 0).astype(np.uint8)
+                            image = np.repeat(shade[..., None], 3, axis=-1)
                         if not np.array_equal(frustum.image, image):
                             frustum.image = image

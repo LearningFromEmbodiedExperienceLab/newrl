@@ -9,6 +9,7 @@ from newton.sensors import SensorCamera
 from tensordict import TensorDict
 
 from ..utils.string import resolve_scene_names
+from .camera import camera_refresh_mask
 
 _MIN_FP16_DEPTH = wp.constant(2.0 ** -24)
 
@@ -82,6 +83,7 @@ def _store_depth(
 
 class DepthCamera:
     fields = ("depth", "valid")
+    requires_bvh_refit = True
 
     def __init__(self, config, entity, model):
         self.config = config
@@ -115,18 +117,10 @@ class DepthCamera:
 
     def sample(self, state, *, reset=False, reset_mask=None):
         """Refresh due worlds or the worlds selected for an immediate reset frame."""
-        remaining = self._steps_until_refresh
-        due = reset_mask
-        if remaining is not None:
-            if reset:
-                if reset_mask is None:
-                    remaining.fill_(self.config.update_every)
-                else:
-                    remaining.masked_fill_(reset_mask, self.config.update_every)
-            else:
-                remaining.sub_(1)
-                due = remaining == 0
-                remaining.masked_fill_(due, self.config.update_every)
+        due = camera_refresh_mask(
+            self._steps_until_refresh, self.config.update_every,
+            reset=reset, reset_mask=reset_mask,
+        )
 
         world_indices = None
         if due is not None:
