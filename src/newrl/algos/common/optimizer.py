@@ -1,4 +1,4 @@
-"""PPO optimizers with an optional Muon update for hidden weight matrices."""
+"""Optimizers with an optional Muon update for hidden weight matrices."""
 
 import torch
 from torch import nn
@@ -7,9 +7,17 @@ from torch import nn
 class MuonAdamW:
     """Step the two disjoint parameter sets together."""
 
-    def __init__(self, adamw: torch.optim.AdamW, muon: torch.optim.Muon):
+    def __init__(self, adamw: torch.optim.Optimizer, muon: torch.optim.Muon):
         self.adamw = adamw
         self.muon = muon
+
+    @property
+    def optimizers(self):
+        return (self.adamw, self.muon)
+
+    @property
+    def state(self):
+        return {**self.adamw.state, **self.muon.state}
 
     @property
     def param_groups(self):
@@ -70,3 +78,31 @@ def make_optimizer(
             adjust_lr_fn="match_rms_adamw",
         ),
     )
+
+
+def build_optimizer(module, *, lr, kind, adam_betas=(0.9, 0.999), capturable=False):
+    """Reference SuperMimic split: hidden matrices use Muon at weight decay 0.1.
+
+    Boundary matrices marked ``_non_muon``, biases and normalization parameters
+    use Adam (muon_adam) or AdamW (muon). Plain adam and adamw are also available.
+    """
+    if kind not in ('adam', 'adamw', 'muon', 'muon_adam'):
+        raise ValueError(f'Unknown optimizer {kind!r}')
+    parameters = [p for p in module.parameters() if p.requires_grad]
+    if not parameters:
+        raise ValueError('Optimizer requires trainable parameters')
+    matrices, other = [], []
+    for parameter in parameters:
+        target = matrices if kind.startswith('muon') and parameter.ndim == 2 and not getattr(parameter, '_non_muon', False) else other
+        target.append(parameter)
+    muon = torch.optim.Muon(matrices, lr=lr, weight_decay=0.1,
+                            adjust_lr_fn='match_rms_adamw') if matrices else None
+    if not other:
+        return muon
+    adam_type = torch.optim.Adam if kind in ('adam', 'muon_adam') else torch.optim.AdamW
+    adam = adam_type(other, lr=lr, betas=adam_betas,
+                     weight_decay=0.0 if adam_type is torch.optim.Adam else 0.01,
+                     fused=all(p.is_cuda for p in other), capturable=capturable)
+    if not matrices:
+        return adam
+    return MuonAdamW(adam, muon)

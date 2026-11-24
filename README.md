@@ -129,6 +129,38 @@ checkpoint 250. You can omit `algo` to infer it from the checkpoint. Playback
 checks W&B on each launch and reuses downloaded files from
 `.cache/wandb-checkpoints/`.
 
+## Robot asset cache
+
+Robot bundles are fetched and cooked lazily into `.cache/robots` under the
+NewRL checkout (`ROBOT_MODEL_DIR` overrides this location). Complete bundles
+are reused offline, even after recipe or assetx source changes. Missing or
+incomplete bundles are cooked automatically. To apply recipe changes, rebuild
+the selected robots explicitly:
+
+```sh
+newrl assets rebuild spot as2w
+```
+
+Robot names are `g1`, `spot`, `as2`, `as2w`, `as2w_sphere`, and `m20s`.
+Rebuilding may fetch vendor sources through assetx's separate vendor cache.
+
+## MDP term selection
+
+Observation and reward `body_names`/`joint_names` selectors accept a name, a
+full-match regex, or a sequence mixing both. Short names match the final path
+component (`pelvis` matches `robot/pelvis`); queries containing `/` match the
+full label. Results follow scene order by default; `preserve_order=True` follows
+query order. Unmatched or overlapping queries raise an error during scene binding.
+
+```python
+EntityField("robot", "joint_pos", joint_names=".*_knee_joint")
+BodyLinearVelocity("robot", ".*_foot", frame="body")
+JointLimit(2.0, joint_names="(left|right)_knee_joint")
+```
+
+`EntityField` also accepts `body_names` for body pose/twist fields. Selectors
+resolve once during initialization, and observation shapes reflect the selection.
+
 ## G1 motion tracking
 
 ```sh
@@ -166,6 +198,103 @@ Physical reset targets can supply `joint_vel` and `root_twist` alongside
 contains world-frame COM linear velocity followed by angular velocity, matching
 Newton's free-root DOFs. The tracking task converts link-origin motion
 velocities to this convention before resetting.
+
+## SuperMimic
+
+Train the explicit generalized-coordinate world-model baseline with:
+
+```sh
+newrl train task=G1LAFAN1Tracking algo=supermimic
+newrl play checkpoint=outputs_train/G1LAFAN1Tracking/checkpoints/RUN/checkpoint_001000.pt
+```
+
+The learner collects noisy actor actions into a compact real-transition replay,
+fits autoregressive physical dynamics and analytic reward consistency, then
+improves a deterministic actor by differentiating through imagined transitions.
+Independent value heads regress detached lambda returns. The shared MDP computes
+observations, rewards, reference progression, and episode endings in both real
+and imagined transitions. Real terminal successors enter replay before resets;
+model-training windows stop contributing after their first episode boundary.
+
+`algo.warmup_steps`, `buffer_steps`, `wm_window`, `wm_updates`, and `wm_batch`
+control real replay and model fitting. `update_every` controls real collection
+between updates; `horizon` and `imagination_batch` control imagined updates.
+Imagination starts must have enough reference frames remaining. Tracking uses
+differentiable fall survival for policy gradients while real environments retain
+hard termination thresholds; time limits retain value bootstrap.
+
+Observation, action, and return statistics update only from real collection.
+Replay and imagination read frozen statistics. Reward normalization is enabled
+by default: actor/critic rewards use the standard deviation of real discounted
+returns with the reference implementation's maximum-return safeguard.
+`algo.normalize_reward=false` uses raw rewards. Environment rewards remain
+unscaled by timestep; model fitting also uses raw rewards.
+
+The default dynamics inputs include root-frame positions of the 14 G1 tracking
+bodies, in addition to invariant generalized-coordinate features and actions.
+`algo.wm_observations` configures these physical observation terms independently
+of the actor and critic. They are recomputed from predicted physical states
+during imagination, with gradients through FK.
+
+Defaults match the reference explicit/simple learner: Muon for hidden matrices
+and zero-decay Adam for boundary matrices, biases and normalization parameters
+(`algo.optim=muon_adam`, `algo.critic_optim=muon_adam`), BF16 hidden computation
+with FP32 heads/state integration (`algo.amp=bf16`), and compiled dynamics/FK.
+`compile_policy` compiles collection. CUDA learner updates warm up for three
+calls before capture/replay; disable these with `algo.capture_wm_update=false`
+and `algo.capture_policy_critic_update=false`. `algo.compile_world_model=false`
+disables model compilation; `algo.amp=none` selects FP32 throughout.
+The CPU path uses eager FP32 computation without capture.
+
+Checkpoints contain the prepared task, model parameters, normalizers, all three
+optimizers, and learner counters. They support ordinary playback, including a
+different world count. Replay, live simulator state, and RNG streams are not
+saved, so these checkpoints do not provide exact training continuation.
+
+This version requires plane terrain and one free-root robot tree. Nonuniform
+terrain and randomized physics need explicit dynamics context before they can
+be modeled correctly. Latent models and learned reward-head variants from the
+reference implementation are outside this baseline.
+
+MDP evaluation uses `compute_observation`, `compute_reward`,
+`compute_termination`, and `compute_truncation`. These read supplied physical
+and task state without mutation; ending methods return named boolean flags.
+Action-dependent rewards require an `action` entry in the supplied task state.
+`MDP.step(successor_physical_state, mdp_state, action)` performs the transition:
+rewards use decision-time goals/history, then task memory advances, and endings
+and observations use successor memory. Tasks customize `_advance_task_state`.
+The former `advance` and `observe` method names have been removed.
+
+SuperMimic's representation interfaces are available from
+`newrl.algos.supermimic`:
+
+```python
+from newrl.algos.supermimic import SuperMimicConfig
+from newrl.configs import G1MotionTracking
+from newrl.env import StatefulEnvironment
+
+algo = SuperMimicConfig()
+env = StatefulEnvironment(algo.prepare_task(G1MotionTracking(num_envs=4)))
+learner = algo.build(env)
+transition = env.reset()
+state = learner.representation.encode(transition["physical_state"])
+physical = learner.representation.decode(state)
+memory = env.mdp.restore_replay_state(transition["mdp_state"])
+```
+
+The representation selects physical outputs independently of actor/critic
+observation groups. This version exports full body snapshots, then stores compact
+root/joint state through `encode`. `decode` reconstructs body poses, COM twists,
+and projected gravity with differentiable Torch FK using Newton scene metadata.
+It supports one free-root tree with fixed, revolute, and prismatic descendants.
+Tasks declare compact `replay_fields` and rebuild derived state with
+`restore_replay_state`, without advancing reference time or sampling RNG.
+Custom tasks must include all persistent task/term history in this contract.
+The trainer accepts an optional algorithm `prepare_task` hook and saves the
+prepared task in checkpoints. Imagination binds only the actor/critic observation
+groups, so unused real-environment diagnostics do not impose extra representation
+requirements. Every evaluated term must declare its physical dependencies;
+unsupported fields fail during learner construction.
 
 ## Research projects
 

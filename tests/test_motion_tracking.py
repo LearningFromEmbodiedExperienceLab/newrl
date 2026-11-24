@@ -124,7 +124,7 @@ class MotionTrackingTests(unittest.TestCase):
         mdp._refresh_reference(state)
         physical["robot", "body_pose_w"] = state["reference", "body_pose_w"].clone()
         original = state.clone()
-        successor, transition = mdp.advance(physical, state, torch.ones(2, 29))
+        successor, transition = mdp.step(physical, state, torch.ones(2, 29))
         torch.testing.assert_close(state, original)
         torch.testing.assert_close(transition["reward", "tracking"], torch.tensor([[1., -2.9], [1., -2.9]]))
         self.assertTrue(transition["truncated"].all())
@@ -133,7 +133,7 @@ class MotionTrackingTests(unittest.TestCase):
         self.assertEqual(transition["observation", "command"].shape, (2, 85))
         self.assertTrue((successor["episode_step"] == 1).all())
         self.assertTrue((successor["previous_action"] == 1).all())
-        next_again, output_again = mdp.advance(physical, state, torch.ones(2, 29))
+        next_again, output_again = mdp.step(physical, state, torch.ones(2, 29))
         torch.testing.assert_close(next_again, successor)
         torch.testing.assert_close(output_again, transition)
 

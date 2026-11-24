@@ -7,7 +7,7 @@ import torch
 
 from newrl.utils.string import resolve_scene_names
 
-from .observations import BodyAngularVelocity, BodyLinearVelocity
+from .observations import BodyAngularVelocity, BodyLinearVelocity, EntityField
 
 
 def _weighted_range(weight: float, maximum: float = inf) -> tuple[float, float]:
@@ -49,12 +49,12 @@ class ActionRate:
         return -self.weight * delta.square().sum(dim=-1, keepdim=True)
 
 
-def _resolve_joint_indices(entity, joint_names: str | Sequence[str]) -> torch.Tensor:
+def _resolve_joint_indices(entity, joint_names: str | Sequence[str], preserve_order=False) -> torch.Tensor:
     """Full-match joint labels, or their final path component, in scene order."""
     try:
-        selected = resolve_scene_names(joint_names, entity.joint_names)
+        selected = resolve_scene_names(joint_names, entity.joint_names, preserve_order)
     except ValueError as exc:
-        raise ValueError(f"No joints match {joint_names!r}") from exc
+        raise ValueError(f"Invalid joint selection {joint_names!r}: {exc}") from exc
     return torch.tensor(selected, device=entity.qd.device, dtype=torch.long)
 
 
@@ -63,6 +63,7 @@ class _JointTerm:
     weight: float
     entity: str = "robot"
     joint_names: str | Sequence[str] = ".*"
+    preserve_order: bool = field(default=False, kw_only=True)
     _indices: torch.Tensor | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -79,7 +80,7 @@ class _JointTerm:
         entity = scene.entities[self.entity]
         bound = replace(self)
         object.__setattr__(
-            bound, "_indices", _resolve_joint_indices(entity, self.joint_names)
+            bound, "_indices", _resolve_joint_indices(entity, self.joint_names, self.preserve_order)
         )
         return bound
 
@@ -122,6 +123,10 @@ class JointAcc2(_JointTerm):
         default=None, init=False, repr=False, compare=False
     )
 
+    @property
+    def state_history(self):
+        return {"previous_joint_vel": EntityField(self.entity, "joint_vel")}
+
     def _initialize(self, scene):
         if scene.control_dt <= 0:
             raise ValueError("control_dt must be positive")
@@ -135,12 +140,10 @@ class JointAcc2(_JointTerm):
         velocity = physical_state[self.entity, "joint_vel"]
         previous = mdp_state.get("previous_joint_vel", velocity)
         selected = self._select(velocity)
-        first_step = mdp_state["episode_step"] == 1
+        first_step = mdp_state["episode_step"] == 0
         delta = torch.where(
             first_step, torch.zeros_like(selected), selected - self._select(previous)
         )
-        # Keep every joint so later selections read the same history.
-        mdp_state["previous_joint_vel"] = velocity.detach().clone()
         acceleration = delta / self._control_dt
         return -self.weight * acceleration.square().sum(dim=-1, keepdim=True)
 
@@ -269,6 +272,7 @@ class BodyAngularVelocity2:
     weight: float
     axis: tuple[float, float, float] = (1.0, 1.0, 1.0)
     frame: str = "world"
+    preserve_order: bool = field(default=False, kw_only=True)
     _velocity: BodyAngularVelocity = field(
         init=False, repr=False, compare=False
     )
@@ -279,7 +283,7 @@ class BodyAngularVelocity2:
     def __post_init__(self):
         if len(self.axis) != 3 or not all(isfinite(scale) for scale in self.axis):
             raise ValueError("axis must contain three finite component scales")
-        velocity = BodyAngularVelocity(self.entity, self.body_names, frame=self.frame)
+        velocity = BodyAngularVelocity(self.entity, self.body_names, frame=self.frame, preserve_order=self.preserve_order)
         object.__setattr__(self, "_velocity", velocity)
 
     @property
@@ -313,6 +317,7 @@ class BodyLinearVelocity2:
     weight: float
     axis: tuple[float, float, float] = (1.0, 1.0, 1.0)
     frame: str = "world"
+    preserve_order: bool = field(default=False, kw_only=True)
     _velocity: BodyLinearVelocity = field(init=False, repr=False, compare=False)
     _axis: torch.Tensor | None = field(
         default=None, init=False, repr=False, compare=False
@@ -321,7 +326,7 @@ class BodyLinearVelocity2:
     def __post_init__(self):
         if len(self.axis) != 3 or not all(isfinite(scale) for scale in self.axis):
             raise ValueError("axis must contain three finite component scales")
-        velocity = BodyLinearVelocity(self.entity, self.body_names, frame=self.frame)
+        velocity = BodyLinearVelocity(self.entity, self.body_names, frame=self.frame, preserve_order=self.preserve_order)
         object.__setattr__(self, "_velocity", velocity)
 
     @property
@@ -361,6 +366,7 @@ class TrackBodyMotion:
     entity: str = "robot"
     body_names: str | Sequence[str] = ".*"
     anchor_body: str | None = None
+    preserve_order: bool = field(default=False, kw_only=True)
     _indices: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
     _anchor: int | None = field(default=None, init=False, repr=False, compare=False)
     _com: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
@@ -389,7 +395,7 @@ class TrackBodyMotion:
 
         robot = scene.entities[self.entity]
         bound = replace(self)
-        indices = resolve_scene_names(self.body_names, robot.body_names)
+        indices = resolve_scene_names(self.body_names, robot.body_names, self.preserve_order)
         object.__setattr__(bound, "_indices", torch.tensor(indices, device=robot.q.device))
         if self.anchor_body is not None:
             anchor, = resolve_scene_names(self.anchor_body, robot.body_names)
@@ -440,6 +446,9 @@ class JointLimit:
     weight: float
     entity: str = "robot"
     soft_limit_factor: float = 0.9
+    joint_names: str | Sequence[str] = field(default='.*', kw_only=True)
+    preserve_order: bool = field(default=False, kw_only=True)
+    _indices: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
     _lower: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
     _upper: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -459,10 +468,12 @@ class JointLimit:
         import warp as wp
 
         robot = scene.entities[self.entity]
-        lo = wp.to_torch(scene.model.joint_limit_lower)[robot.qd[0]].clone()
-        hi = wp.to_torch(scene.model.joint_limit_upper)[robot.qd[0]].clone()
+        indices = _resolve_joint_indices(robot, self.joint_names, self.preserve_order)
+        lo = wp.to_torch(scene.model.joint_limit_lower)[robot.qd[0]].index_select(-1, indices).clone()
+        hi = wp.to_torch(scene.model.joint_limit_upper)[robot.qd[0]].index_select(-1, indices).clone()
         center, half = (lo + hi) / 2, (hi - lo) * self.soft_limit_factor / 2
         bound = replace(self)
+        object.__setattr__(bound, '_indices', indices)
         object.__setattr__(bound, "_lower", center - half)
         object.__setattr__(bound, "_upper", center + half)
         return bound
@@ -470,5 +481,5 @@ class JointLimit:
     def __call__(self, physical_state, mdp_state):
         if self._lower is None:
             raise RuntimeError("Bind JointLimit before evaluating it")
-        q = physical_state[self.entity, "joint_pos"]
+        q = physical_state[self.entity, "joint_pos"].index_select(-1, self._indices)
         return -self.weight * ((self._lower - q).relu() + (q - self._upper).relu()).sum(-1, keepdim=True)

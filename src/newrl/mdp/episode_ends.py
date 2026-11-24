@@ -66,9 +66,10 @@ class TrackingDeviation:
     body: BodyHeight
     quantity: str = "height"
     threshold: float = 0.25
+    softness: float = 0.02
 
     def __post_init__(self):
-        if self.quantity not in ("height", "tilt") or self.threshold <= 0:
+        if self.quantity not in ("height", "tilt") or self.threshold <= 0 or self.softness <= 0:
             raise ValueError("Tracking deviation requires height/tilt and a positive threshold")
 
     @property
@@ -78,7 +79,7 @@ class TrackingDeviation:
     def _initialize(self, scene):
         return replace(self, body=self.body._initialize(scene))
 
-    def __call__(self, physical_state, mdp_state):
+    def error(self, physical_state, mdp_state):
         pose = physical_state[self.body.entity, "body_pose_w"].index_select(-2, self.body._indices)[..., 0, :]
         target = mdp_state["reference", "root_pose"]
         if self.quantity == "height":
@@ -87,4 +88,10 @@ class TrackingDeviation:
             actual_z = 2 * pose[..., 3:5].square().sum(-1, keepdim=True) - 1
             target_z = 2 * target[..., 3:5].square().sum(-1, keepdim=True) - 1
             error = (actual_z - target_z).abs()
-        return error > self.threshold
+        return error
+
+    def __call__(self, physical_state, mdp_state):
+        return self.error(physical_state, mdp_state) > self.threshold
+
+    def survival(self, physical_state, mdp_state):
+        return ((self.threshold - self.error(physical_state, mdp_state)) / self.softness).sigmoid()

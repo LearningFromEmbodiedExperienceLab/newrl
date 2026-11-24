@@ -14,6 +14,10 @@ def main(argv: list[str] | None = None) -> None:
     ):
         command = commands.add_parser(name, help=description)
         command.add_argument("overrides", nargs=argparse.REMAINDER, metavar="key=value")
+    assets = commands.add_parser('assets', help='Manage cached robot assets')
+    asset_commands = assets.add_subparsers(dest='assets_command', required=True)
+    rebuild = asset_commands.add_parser('rebuild', help='Explicitly rebuild cooked robot bundles')
+    rebuild.add_argument('names', nargs='+', metavar='ROBOT')
     project = commands.add_parser("project", help="Manage research projects")
     project_commands = project.add_subparsers(dest="project_command", required=True)
     create = project_commands.add_parser("create", help="Scaffold a standalone project")
@@ -41,6 +45,15 @@ def main(argv: list[str] | None = None) -> None:
             run(args.overrides)
         except ConfigError as error:
             parser.error(str(error))
+    elif args.command == 'assets':
+        from newrl.assets import RECIPES, cooked_robot
+        from newrl.robots import robot_model_dir
+
+        unknown = set(args.names) - RECIPES.keys()
+        if unknown:
+            assets.error(f"Unknown robots: {', '.join(sorted(unknown))}. Choose from: {', '.join(RECIPES)}")
+        for name in dict.fromkeys(args.names):
+            print(f'Rebuilt {name}: {cooked_robot(name, robot_model_dir(), rebuild=True)}')
     else:
         from newrl.projects import create_project, install_project, list_projects, remove_project
 

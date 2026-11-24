@@ -6,6 +6,7 @@ Vendor trees come from assetx. Cooked bundles are written under
 
 from pathlib import Path
 from dataclasses import replace
+import json
 import tempfile
 import mujoco
 
@@ -195,11 +196,33 @@ RECIPES = {
 }
 
 
-def cooked_robot(name: str, cache: Path) -> Path:
-    """Cook ``name`` into ``cache`` with assetx, fetching the vendor tree if needed."""
+def cooked_robot(name: str, cache: Path, *, rebuild: bool = False) -> Path:
+    """Reuse complete bundles; fetch/cook only missing bundles or explicit rebuilds.
+
+    Assetx hashes the entire recipe module and its library sources. That hash
+    must not invalidate ready robot assets during ordinary task startup.
+    """
     if name not in RECIPES:
         raise KeyError(f"No robot recipe {name!r}")
-    return cook(name, cache / name, get_recipe=RECIPES.get, usd=True)
+    bundle = Path(cache) / name
+    if not rebuild:
+        try:
+            manifest = json.loads((bundle / 'assetx.json').read_text())
+            complete = (
+                isinstance(manifest, dict)
+                and manifest.get('recipe') == name
+                and isinstance(manifest.get('formats'), list)
+                and 'usd' in manifest.get('formats', [])
+                and (bundle / 'model.xml').is_file()
+                and (bundle / 'model.urdf').is_file()
+                and len([path for path in (bundle / 'usd').glob('*.usdc') if path.is_file()]) == 1
+            )
+            if complete:
+                return bundle
+        except (OSError, ValueError):
+            pass
+    # Force also repairs incomplete bundles whose source hash is still current.
+    return cook(name, bundle, get_recipe=RECIPES.get, usd=True, force=True)
 
 
 def cooked_usd(bundle: Path) -> Path:

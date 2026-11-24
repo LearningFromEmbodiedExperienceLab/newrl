@@ -6,7 +6,7 @@ from pathlib import Path
 import newton
 import torch
 
-from newrl.algos.interfaces import OnPolicyConfig
+from newrl.algos.interfaces import LearnerConfig
 from newrl.commands import with_used_observations
 from newrl.configs import EnvironmentConfig
 from newrl.env import StatefulEnvironment
@@ -42,7 +42,7 @@ class PlayConfig:
     checkpoint: str | None = None
     num_envs: int | None = None
     deterministic: bool = True
-    algo: OnPolicyConfig | None = field(default=None, metadata={"preset_group": "algo"})
+    algo: LearnerConfig | None = field(default=None, metadata={"preset_group": "algo"})
     viser_host: str = "127.0.0.1"
     viser_port: int = 8080
     discard_unused_obs: bool = False
@@ -78,7 +78,7 @@ def play(cfg: PlayConfig) -> None:
         if task is None:
             task = replace(load(saved_config["task"]), num_envs=4)
         algo = load(saved_config["algo"])
-        if not isinstance(algo, OnPolicyConfig):
+        if not isinstance(algo, LearnerConfig):
             raise ValueError(f"Unsupported checkpoint algorithm {type(algo).__name__}")
         if cfg.algo is not None and cfg.algo.algo_id != algo.algo_id:
             raise ValueError(
@@ -92,6 +92,9 @@ def play(cfg: PlayConfig) -> None:
         raise ValueError("Specify task=<preset> or checkpoint=<path>")
     if cfg.num_envs is not None:
         task = replace(task, num_envs=cfg.num_envs)
+    prepare_task = getattr(algo, 'prepare_task', None)
+    if prepare_task is not None:
+        task = prepare_task(task)
     if cfg.discard_unused_obs:
         task = with_used_observations(task, algo)
 

@@ -17,6 +17,10 @@ _AXIAL_SIGNS = (-1, 1, -1)
 class EntityField:
     entity: str
     field: str
+    joint_names: str | Sequence[str] | None = field(default=None, kw_only=True)
+    body_names: str | Sequence[str] | None = field(default=None, kw_only=True)
+    preserve_order: bool = field(default=False, kw_only=True)
+    _indices: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
     _shape: torch.Size | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -35,7 +39,20 @@ class EntityField:
             "body_twist_w": torch.Size((len(entity.body_names), 6)),
         }
         bound = replace(self)
-        object.__setattr__(bound, "_shape", shapes[self.field])
+        shape = shapes[self.field]
+        if self.joint_names is not None and not self.field.startswith('joint_'):
+            raise ValueError('joint_names requires a joint field')
+        if self.body_names is not None and not self.field.startswith('body_'):
+            raise ValueError('body_names requires a body field')
+        names = self.joint_names if self.field.startswith('joint_') else self.body_names
+        if names is not None:
+            joint = self.field.startswith('joint_')
+            labels = entity.joint_names if joint else entity.body_names
+            selected = resolve_scene_names(names, labels, self.preserve_order)
+            indices = torch.tensor(selected, device=(entity.q if joint else entity.bodies).device, dtype=torch.long)
+            object.__setattr__(bound, '_indices', indices)
+            shape = torch.Size((len(selected), *shape[1:]))
+        object.__setattr__(bound, "_shape", shape)
         return bound
 
     @property
@@ -48,12 +65,19 @@ class EntityField:
         return self._shape
 
     def __call__(self, physical_state, mdp_state):
-        return physical_state[self.entity, self.field]
+        values = physical_state[self.entity, self.field]
+        if self._indices is None:
+            return values
+        return values.index_select(-1 if self.field.startswith('joint_') else -2, self._indices)
 
     def symmetry_transform(self, scene) -> SymmetryTransform:
         if self.field not in ("joint_pos", "joint_vel", "joint_torque"):
             raise ValueError(f"No reflection defined for entity field {self.field!r}")
-        return scene.entities[self.entity].joint_symmetry_transform()
+        entity = scene.entities[self.entity]
+        if self._indices is None:
+            return entity.joint_symmetry_transform()
+        labels = [entity.joint_names[index] for index in self._indices.tolist()]
+        return SymmetryTransform.from_names(labels, entity.joint_mirror)
 
 
 @dataclass(frozen=True)
@@ -96,6 +120,7 @@ class _BodyObservation:
 
     entity: str
     body_names: str | Sequence[str]
+    preserve_order: bool = field(default=False, kw_only=True)
     _indices: torch.Tensor | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -121,9 +146,9 @@ class _BodyObservation:
         if not names:
             raise ValueError(f"Empty body selection for {self.entity!r}")
         try:
-            selected = resolve_scene_names(names, entity.body_names)
+            selected = resolve_scene_names(names, entity.body_names, self.preserve_order)
         except ValueError as exc:
-            raise ValueError(f"No bodies match {names!r} on {self.entity!r}") from exc
+            raise ValueError(f"Invalid body selection {names!r} on {self.entity!r}: {exc}") from exc
 
         bound = replace(self)
         body_indices = tuple(selected)
@@ -213,6 +238,33 @@ class BodyHeight(_BodyObservation):
 
     def __call__(self, physical_state, mdp_state):
         return self._read(physical_state, "body_pose_w")[..., 2]
+
+
+@dataclass(frozen=True)
+class BodyPosition(_BodyObservation):
+    """Selected body origins expressed relative to a root in its full frame."""
+
+    root_body: str = "pelvis"
+    _root: int | None = field(default=None, init=False, repr=False, compare=False)
+    _mirror_signs = _POLAR_SIGNS
+
+    @property
+    def physical_fields(self):
+        return frozenset({(self.entity, "body_pose_w")})
+
+    def _initialize(self, scene):
+        bound = super()._initialize(scene)
+        root, = resolve_scene_names(self.root_body, scene.entities[self.entity].body_names)
+        object.__setattr__(bound, '_root', root)
+        return bound
+
+    def __call__(self, physical_state, mdp_state):
+        pose = self._read(physical_state, "body_pose_w")
+        root = physical_state[self.entity, 'body_pose_w'][..., self._root, :]
+        return quat_rotate_inverse(
+            root[..., None, 3:].expand_as(pose[..., 3:]),
+            pose[..., :3] - root[..., None, :3],
+        )
 
 
 @dataclass(frozen=True)

@@ -78,6 +78,16 @@ a partial reset.
 - Evaluate rewards against the command used to choose the action. Apply
   command changes after scoring and before building the next observation.
   The scene supplies projected gravity when requested by the physical read plan.
+- `MDP.step(successor_physical_state, mdp_state, action)` owns task transitions
+  and returns `(next_mdp_state, transition)` without mutating its inputs. Its
+  shared implementation scores decision-time goals/history, advances counters,
+  task memory and history, then evaluates successor endings and observations.
+  Tasks customize `_advance_task_state` instead of reimplementing assembly.
+  `compute_observation`, `compute_reward`, `compute_termination`, and
+  `compute_truncation` are pure evaluations: never mutate state or sample RNG.
+  Terms needing physical history declare `state_history` readers; the MDP
+  initializes and selectively resets that history, updates it after scoring,
+  and includes it in replay state. Preserve gradients through imagined history.
 - Term interfaces live in [terms.py](src/newrl/mdp/terms.py). Resolve scene
   indices once in `_initialize(scene)`. Observation `shape` excludes the world dimension
   and is available after scene binding for scene-dependent terms. All batched

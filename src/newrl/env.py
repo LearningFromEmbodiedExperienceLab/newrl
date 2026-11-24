@@ -280,7 +280,7 @@ class _EnvironmentCore:
         )
         physical_state = self.scene.read(self.state, self.observables)
         result = TensorDict(
-            {"observation": self.mdp.observe(physical_state, next_mdp_state)},
+            {"observation": self.mdp.compute_observation(physical_state, next_mdp_state)},
             batch_size=[self.num_envs],
             device=self.device,
         )
@@ -304,7 +304,7 @@ class _EnvironmentCore:
         with self._profile_stage("state_read"):
             physical_state = self.scene.read(self.state, self.observables)
         with self._profile_stage("mdp"):
-            next_mdp_state, result = self.mdp.advance(physical_state, mdp_state, action)
+            next_mdp_state, result = self.mdp.step(physical_state, mdp_state, action)
             transition = self._transition(physical_state, next_mdp_state, result)
         return next_mdp_state, transition
 

@@ -24,6 +24,68 @@ from newrl.mdp.rewards import (
 
 
 class MDPTests(unittest.TestCase):
+    def test_history_updates_only_on_step_and_retains_imagination_gradients(self):
+        robot = SimpleNamespace(
+            q=torch.zeros(1, 2, dtype=torch.long), qd=torch.zeros(1, 2, dtype=torch.long),
+            joint_names=('robot/a', 'robot/b'), body_names=(),
+        )
+        mdp = MDP(
+            rewards={'regularization': RewardGroup({'acceleration': JointAcc2(1.)})},
+            truncations={'timeout': Timeout(3)},
+        )
+        self.assertIn('previous_joint_vel', mdp.replay_fields)
+        mdp = mdp._initialize(SimpleNamespace(entities={'robot': robot}, control_dt=.5))
+        initial = mdp.initial_state(2, 2, torch.device('cpu'))
+        first_velocity = torch.tensor([[1., 2.], [3., 4.]], requires_grad=True)
+        physical = TensorDict({'robot': {'joint_vel': first_velocity}}, [2])
+        state, transition = mdp.step(physical, initial, torch.zeros(2, 2))
+        torch.testing.assert_close(transition['reward', 'regularization'], torch.zeros(2, 1))
+        torch.testing.assert_close(state['previous_joint_vel'], first_velocity)
+        self.assertIn('previous_joint_vel', mdp.replay_fields)
+        torch.testing.assert_close(initial['previous_joint_vel'], torch.zeros(2, 2))
+        physical = TensorDict({'robot': {'joint_vel': first_velocity.detach() + torch.tensor([1., 2.])}}, [2])
+        decision = state.clone()
+        decision['action'] = torch.zeros(2, 2)
+        original = decision.clone()
+        for compute in (mdp.compute_reward, mdp.compute_observation, mdp.compute_termination, mdp.compute_truncation):
+            first, second = compute(physical, decision), compute(physical, decision)
+            torch.testing.assert_close(first, second)
+            torch.testing.assert_close(decision, original)
+        reward = mdp.compute_reward(physical, decision)['regularization']
+        torch.testing.assert_close(reward, torch.full((2, 1), -20.))
+        reward.sum().backward()
+        torch.testing.assert_close(first_velocity.grad, torch.tensor([[8., 16.], [8., 16.]]))
+        reset, _ = mdp.reset(state, torch.tensor([0]))
+        torch.testing.assert_close(reset['previous_joint_vel'][0], torch.zeros(2))
+        torch.testing.assert_close(reset[1], state[1])
+
+    def test_velocity_rewards_use_old_command_and_endings_use_new_command(self):
+        from newrl.mdp.velocity import VelocityMDP
+
+        def command(physical, state):
+            return state['velocity_command']
+        command.shape = torch.Size((3,))
+        command.physical_fields = frozenset()
+        def reward(physical, state):
+            return -(physical['velocity'] - state['velocity_command']).square().sum(-1, keepdim=True)
+        def ending(physical, state):
+            return state['velocity_command'][..., :1] < 2
+        mdp = VelocityMDP(
+            hold_steps=1, observations={'command': ObservationGroup({'command': command})},
+            rewards={'tracking': RewardGroup({'tracking': reward})}, terminations={'new_command': ending},
+        )
+        state = mdp.initial_state(2, 2, torch.device('cpu'))
+        state['velocity_command'] = torch.tensor([[7., 8., 9.], [7., 8., 9.]])
+        state['command_steps_left'][:] = 1
+        original = state.clone()
+        successor, transition = mdp.step(TensorDict({'velocity': state['velocity_command'].clone()}, [2]), state, torch.ones(2, 2))
+        torch.testing.assert_close(state, original)
+        torch.testing.assert_close(transition['reward', 'tracking'], torch.zeros(2, 1))
+        torch.testing.assert_close(transition['velocity_command'], state['velocity_command'])
+        torch.testing.assert_close(transition['observation', 'command'], successor['velocity_command'])
+        self.assertTrue(transition['terminated'].all())
+        self.assertTrue((successor['episode_step'] == 1).all())
+
     def test_scalar_shapes_for_multidimensional_batches(self):
         mdp = MDP(truncations={"timeout": Timeout(3)})
         state = TensorDict(
@@ -34,11 +96,14 @@ class MDPTests(unittest.TestCase):
             batch_size=[2, 3],
         )
         physical = TensorDict({}, batch_size=[2, 3])
-        result = mdp.step(physical, state)
+        original = state.clone()
+        successor, result = mdp.step(physical, state, torch.zeros(2, 3, 2))
         self.assertEqual(list(result["reward"].keys()), [])
         for key in ("terminated", "truncated", "done"):
             self.assertEqual(result[key].shape, (2, 3, 1))
-        torch.testing.assert_close(result["truncated"], state["episode_step"] >= 3)
+        torch.testing.assert_close(result["truncated"], successor["episode_step"] >= 3)
+        torch.testing.assert_close(successor["episode_step"], state["episode_step"] + 1)
+        torch.testing.assert_close(state, original)
 
     def test_fall_and_observations_share_only_current_physical_features(self):
         scene = SimpleNamespace(
@@ -71,10 +136,10 @@ class MDPTests(unittest.TestCase):
             batch_size=[1],
         )
         action = torch.zeros(1, 1)
-        next_mdp_state, first = mdp.advance(physical_state, mdp_state, action)
+        next_mdp_state, first = mdp.step(physical_state, mdp_state, action)
         self.assertFalse(first["terminated"].item())
         pose[..., 2] = 0.2
-        _, second = mdp.advance(physical_state, next_mdp_state, action)
+        _, second = mdp.step(physical_state, next_mdp_state, action)
         self.assertTrue(second["terminated"].item())
         torch.testing.assert_close(
             second["observation", "state"][:, :1], torch.tensor([[0.2]])
@@ -102,7 +167,7 @@ class MDPTests(unittest.TestCase):
         )._initialize(SimpleNamespace())
         mdp_state = mdp.initial_state(2, 1, torch.device("cpu"))
         physical_state = TensorDict({}, batch_size=[2])
-        _, transition = mdp.advance(physical_state, mdp_state, torch.zeros(2, 1))
+        _, transition = mdp.step(physical_state, mdp_state, torch.zeros(2, 1))
         torch.testing.assert_close(
             transition["reward", "task"], torch.tensor([[1.0, 0.5], [1.0, 0.5]])
         )
@@ -229,12 +294,12 @@ class JointPenaltyTests(unittest.TestCase):
         torch.testing.assert_close(hip_only, torch.tensor([[-0.5]]))
 
         acceleration_penalty = _bind_joints(JointAcc2(weight=1.0))(physical, mdp_state)
-        # Squared change is 0 and 4. The carried velocity becomes the current one.
+        # Squared change is 0 and 4. Evaluation must leave history unchanged.
         torch.testing.assert_close(acceleration_penalty, torch.tensor([[-10000.0]]))
         torch.testing.assert_close(
-            mdp_state["previous_joint_vel"], torch.tensor([[1.0, -2.0]])
+            mdp_state["previous_joint_vel"], torch.tensor([[1.0, 0.0]])
         )
-        mdp_state["episode_step"] = torch.tensor([[1]])
+        mdp_state["episode_step"] = torch.tensor([[0]])
         opening = _bind_joints(JointAcc2(weight=1.0))(physical, mdp_state)
         torch.testing.assert_close(opening, torch.zeros(1, 1))
 

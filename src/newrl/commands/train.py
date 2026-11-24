@@ -10,7 +10,7 @@ from setproctitle import setproctitle
 import torch
 from tensordict import TensorDict
 
-from newrl.algos.interfaces import OnPolicyConfig, OnPolicyLearner
+from newrl.algos.interfaces import LearnerConfig, Learner
 from newrl.algos.rollout import collect_rollout
 from newrl.commands import with_used_observations
 from newrl.configs import EnvironmentConfig
@@ -27,7 +27,7 @@ TRAIN_OUTPUT_DIR = Path("outputs_train")
 @dataclass
 class TrainConfig:
     task: EnvironmentConfig
-    algo: OnPolicyConfig = field(metadata={"preset_group": "algo"})
+    algo: LearnerConfig = field(metadata={"preset_group": "algo"})
     seed: int = 0
     iterations: int = 2000
     logger: WandbConfig = field(default_factory=WandbConfig)
@@ -74,7 +74,7 @@ def _make_logger(cfg: TrainConfig, *, run_id: str | None = None) -> RunLogger:
 
 def _save_checkpoint(
     directory: Path,
-    policy: OnPolicyLearner,
+    policy: Learner,
     cfg: TrainConfig,
     iteration: int,
     frames: int,
@@ -162,9 +162,19 @@ class EpisodeStats:
 
 @main(TrainConfig)
 def train(cfg: TrainConfig) -> None:
+    from newrl.algos.supermimic import SuperMimicConfig
+
+    if isinstance(cfg.algo, SuperMimicConfig):
+        from newrl.commands.train_supermimic import train_supermimic
+
+        return train_supermimic(cfg)
     title = f"{cfg.task.name}-{cfg.algo.name}-ETA:"
     setproctitle(f"{title}--:--:--")
     run_id = token_hex(4)
+    prepare_task = getattr(cfg.algo, "prepare_task", None)
+    if prepare_task is not None:
+        # Retain the prepared task in logger/checkpoint config as well as the env.
+        cfg = replace(cfg, task=prepare_task(cfg.task))
     checkpoint_dir = (
         _task_output_dir(cfg.task.name) / "checkpoints" / run_id
         if cfg.checkpoint_interval

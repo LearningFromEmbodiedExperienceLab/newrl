@@ -76,6 +76,13 @@ class VelocityMDP(MDP):
         )
         return mdp_state
 
+    @property
+    def replay_fields(self):
+        return (
+            *super().replay_fields, "command_rng", "reset_rng",
+            "command_steps_left", "velocity_command", "spawn_height",
+        )
+
     def reset(self, mdp_state, ids):
         next_mdp_state, poses = super().reset(mdp_state, ids)
         if self._nominal_pose is None or self._joint_limits is None:
@@ -110,11 +117,12 @@ class VelocityMDP(MDP):
         poses[self.entity] = pose
         return next_mdp_state, poses
 
-    def _after_step(self, mdp_state, transition):
-        transition["velocity_command"] = mdp_state["velocity_command"]
-        steps_left = (mdp_state["command_steps_left"] - 1).clamp_min(0)
-        mdp_state["command_steps_left"] = steps_left
-        self._sample_command(mdp_state, (steps_left == 0) & ~transition["done"])
+    def _advance_task_state(self, physical_state, state):
+        command = state["velocity_command"]
+        steps_left = (state["command_steps_left"] - 1).clamp_min(0)
+        state["command_steps_left"] = steps_left
+        self._sample_command(state, steps_left == 0)
+        return {"velocity_command": command}
 
     def _sample_command(self, mdp_state, selected):
         previous = mdp_state["velocity_command"]

@@ -1,8 +1,38 @@
-"""Match query patterns against scene labels."""
+"""Resolve exact names or full-match regexes against scene labels."""
 
 import re
 from collections.abc import Sequence
 from typing import Any
+
+
+def _resolve_names(keys, names, preserve_order, *, strict=True, scene_labels=False):
+    queries = (keys,) if isinstance(keys, str) else tuple(keys)
+    patterns = []
+    for query in queries:
+        try:
+            patterns.append(re.compile(query))
+        except re.error as error:
+            raise ValueError(f'Invalid name pattern {query!r}: {error}') from error
+    matches = [[] for _ in queries]
+    selected = []
+    for index, name in enumerate(names):
+        matched = None
+        for query_index, pattern in enumerate(patterns):
+            candidate = name.rsplit('/', 1)[-1] if scene_labels and '/' not in queries[query_index] else name
+            if pattern.fullmatch(candidate) is None:
+                continue
+            if matched is not None:
+                raise ValueError(f'Multiple patterns match {name!r}: {queries[matched]!r} and {queries[query_index]!r}')
+            matched = query_index
+            matches[query_index].append(name)
+        if matched is not None:
+            selected.append((index, matched))
+    if strict and not all(matches):
+        missed = [query for query, found in zip(queries, matches, strict=True) if not found]
+        raise ValueError(f'Patterns {missed} matched nothing. Available names: {list(names)}. Patterns must match whole names.')
+    if preserve_order:
+        selected.sort(key=lambda pair: pair[1])
+    return [index for index, _ in selected], [query for _, query in selected]
 
 
 def resolve_matching_names(
@@ -10,43 +40,13 @@ def resolve_matching_names(
     list_of_strings: Sequence[str],
     preserve_order: bool = False,
 ) -> tuple[list[int], list[str]]:
-    """Match regular expressions against strings.
+    """Resolve names/regexes in scene order, or query order when requested.
 
-    Each target may match only one pattern, and every pattern must match at least
-    once. Results follow the target order. ``preserve_order`` returns them in
-    pattern order instead.
+    Every query must match; a name matching multiple queries is an error.
+    Regexes use fullmatch, so use ``.*`` to match a prefix or suffix.
     """
-    if isinstance(keys, str):
-        keys = [keys]
-    index_list: list[int] = []
-    names_list: list[str] = []
-    key_idx_list: list[int] = []
-    matched_by = [None for _ in list_of_strings]
-    keys_matched: list[list[str]] = [[] for _ in keys]
-    for target_index, candidate in enumerate(list_of_strings):
-        for key_index, pattern in enumerate(keys):
-            if not re.fullmatch(pattern, candidate):
-                continue
-            if matched_by[target_index]:
-                raise ValueError(
-                    f"Multiple matches for {candidate!r}: "
-                    f"{matched_by[target_index]!r} and {pattern!r}"
-                )
-            matched_by[target_index] = pattern
-            index_list.append(target_index)
-            names_list.append(candidate)
-            key_idx_list.append(key_index)
-            keys_matched[key_index].append(candidate)
-    if preserve_order:
-        order = sorted(range(len(index_list)), key=key_idx_list.__getitem__)
-        index_list = [index_list[i] for i in order]
-        names_list = [names_list[i] for i in order]
-    if not all(keys_matched):
-        missed = [pattern for pattern, found in zip(keys, keys_matched) if not found]
-        raise ValueError(
-            f"Patterns {missed} matched nothing. Available strings: {list(list_of_strings)}"
-        )
-    return index_list, names_list
+    indices, _ = _resolve_names(keys, list_of_strings, preserve_order)
+    return indices, [list_of_strings[index] for index in indices]
 
 
 def resolve_matching_names_values(
@@ -55,62 +55,25 @@ def resolve_matching_names_values(
     preserve_order: bool = False,
     strict: bool = True,
 ) -> tuple[list[int], list[str], list[Any]]:
-    """Match dictionary keys as patterns and return indices, names, and values."""
+    """Resolve dictionary patterns with the same ordering and ambiguity rules."""
     if not isinstance(data, dict):
-        raise TypeError(f"data must be a dictionary, got {type(data).__name__}")
-    index_list: list[int] = []
-    names_list: list[str] = [] 
-    values_list: list[Any] = []
-    key_idx_list: list[int] = []
-    matched_by = [None for _ in list_of_strings]
-    keys_matched: list[list[str]] = [[] for _ in data]
-    items = list(data.items())
-    for target_index, candidate in enumerate(list_of_strings):
-        for key_index, (pattern, value) in enumerate(items):
-            if not re.fullmatch(pattern, candidate):
-                continue
-            if matched_by[target_index]:
-                raise ValueError(
-                    f"Multiple matches for {candidate!r}: "
-                    f"{matched_by[target_index]!r} and {pattern!r}"
-                )
-            matched_by[target_index] = pattern
-            index_list.append(target_index)
-            names_list.append(candidate)
-            values_list.append(value)
-            key_idx_list.append(key_index)
-            keys_matched[key_index].append(candidate)
-    if preserve_order:
-        order = sorted(range(len(index_list)), key=key_idx_list.__getitem__)
-        index_list = [index_list[i] for i in order]
-        names_list = [names_list[i] for i in order]
-        values_list = [values_list[i] for i in order]
-    if strict and not all(keys_matched):
-        missed = [pattern for pattern, found in zip(data, keys_matched) if not found]
-        raise ValueError(
-            f"Patterns {missed} matched nothing. Available strings: {list(list_of_strings)}"
-        )
-    return index_list, names_list, values_list
+        raise TypeError(f'data must be a dictionary, got {type(data).__name__}')
+    indices, queries = _resolve_names(tuple(data), list_of_strings, preserve_order, strict=strict)
+    values = tuple(data.values())
+    return indices, [list_of_strings[index] for index in indices], [values[query] for query in queries]
 
 
-def resolve_scene_names(patterns: str | Sequence[str], labels: Sequence[str]) -> list[int]:
-    """Match patterns against a scene label or its final path component.
+def resolve_scene_names(
+    patterns: str | Sequence[str], labels: Sequence[str], preserve_order: bool = False,
+) -> list[int]:
+    """Resolve scene names or regexes, accepting unqualified leaf names.
 
-    A pattern containing ``/`` is matched against the full label. Any other
-    pattern is matched against the final component, so ``base`` selects
-    ``robot/base``. Results are unique and follow scene order.
+    Queries containing ``/`` match full labels; others match the final path
+    component (``base`` selects ``robot/base``). Preserve scene order by default,
+    or query order with ``preserve_order=True``. Every query must match and
+    overlapping queries are rejected, including overlaps across full/leaf names.
     """
     queries = (patterns,) if isinstance(patterns, str) else tuple(patterns)
     if not queries:
-        raise ValueError("Selection must contain at least one pattern")
-    leaves = [label.rsplit("/", 1)[-1] for label in labels]
-    leaf_patterns = [pattern for pattern in queries if "/" not in pattern]
-    full_patterns = [pattern for pattern in queries if "/" in pattern]
-    selected: set[int] = set()
-    if leaf_patterns:
-        indices, _ = resolve_matching_names(leaf_patterns, leaves)
-        selected.update(indices)
-    if full_patterns:
-        indices, _ = resolve_matching_names(full_patterns, labels)
-        selected.update(indices)
-    return sorted(selected)
+        raise ValueError('Selection must contain at least one pattern')
+    return _resolve_names(queries, labels, preserve_order, scene_labels=True)[0]

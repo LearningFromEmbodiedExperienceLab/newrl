@@ -57,6 +57,17 @@ class MotionTrackingMDP(MDP):
         state["clip_end"] = torch.zeros_like(worlds, dtype=torch.bool)
         return state
 
+    @property
+    def replay_fields(self):
+        return (*super().replay_fields, "motion_id", "motion_t", "reset_rng")
+
+    def restore_replay_state(self, state):
+        restored = super().restore_replay_state(state)
+        if self._motion is None:
+            raise RuntimeError("Bind MotionTrackingMDP before restoring replay state")
+        self._refresh_reference(restored)
+        return restored
+
     def reset(self, mdp_state, ids):
         state, poses = super().reset(mdp_state, ids)
         if self._motion is None:
@@ -91,26 +102,9 @@ class MotionTrackingMDP(MDP):
         state["future_reference"] = future.select("root_pose", "joint_pos")
         state["clip_end"] = state["motion_t"] >= (motion.clip_end[ids] - motion.clip_start[ids] - 1).unsqueeze(-1)
 
-    def advance(self, physical_state, mdp_state, action):
-        # Score decision-time references, then advance references for endings/obs.
-        state = mdp_state.clone()
-        state["episode_step"] += 1
-        state["action"] = action
-        reward = {name: group(physical_state, state) for name, group in self.rewards.items()}
+    def _advance_task_state(self, physical_state, state):
         ids = state["motion_id"].squeeze(-1)
         last = (self._motion.clip_end[ids] - self._motion.clip_start[ids] - 1).unsqueeze(-1)
         state["motion_t"] = torch.minimum(state["motion_t"] + 1, last)
         self._refresh_reference(state)
-        termination_terms = self._evaluate(self.terminations, physical_state, state)
-        truncation_terms = self._evaluate(self.truncations, physical_state, state)
-        terminated = self._any(termination_terms, state)
-        truncated = self._any(truncation_terms, state)
-        del state["action"]
-        state["previous_action"] = action
-        transition = TensorDict({
-            "reward": TensorDict(reward, batch_size=state.batch_size),
-            "termination_terms": termination_terms, "truncation_terms": truncation_terms,
-            "terminated": terminated, "truncated": truncated, "done": terminated | truncated,
-            "observation": self.observe(physical_state, state),
-        }, batch_size=state.batch_size)
-        return state, transition
+        return {}

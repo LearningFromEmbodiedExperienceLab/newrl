@@ -1,4 +1,9 @@
-"""Structural interfaces for terms evaluated by an MDP."""
+"""Pure term evaluations: inputs must never be mutated or RNG advanced.
+
+Terms may declare ``state_history`` as a mapping from task-state keys to
+observation readers. The MDP binds those readers, initializes/resets history,
+and records successor values after scoring, preserving imagination gradients.
+"""
 
 from typing import Protocol
 

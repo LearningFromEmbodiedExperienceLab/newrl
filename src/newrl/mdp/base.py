@@ -154,12 +154,13 @@ class MDP:
     rewards: dict[str, RewardGroup] = field(default_factory=dict)
     terminations: dict[str, EpisodeEndTerm] = field(default_factory=dict)
     truncations: dict[str, EpisodeEndTerm] = field(default_factory=dict)
+    _history: dict[str, ObservationTerm] = field(default_factory=dict, init=False, repr=False)
 
     def _initialize(self, scene):
         """Bind terms that supply a scene initialization hook."""
         _require_groups(self.observations, "observation", ObservationGroup)
         _require_groups(self.rewards, "reward", RewardGroup)
-        return replace(
+        bound = replace(
             self,
             observations={
                 name: _bind(group, scene) for name, group in self.observations.items()
@@ -172,6 +173,17 @@ class MDP:
                 name: _bind(term, scene) for name, term in self.truncations.items()
             },
         )
+        terms = [term for group in (*bound.observations.values(), *bound.rewards.values()) for term in group.terms.values()]
+        terms.extend((*bound.terminations.values(), *bound.truncations.values()))
+        for term in terms:
+            for name, reader in getattr(term, "state_history", {}).items():
+                if name in ("episode_step", "previous_action", "action"):
+                    raise ValueError(f"Reserved MDP history name {name!r}")
+                reader = _bind(reader, scene)
+                if name in bound._history and bound._history[name] != reader:
+                    raise ValueError(f"Conflicting MDP history sources for {name!r}")
+                bound._history[name] = reader
+        return bound
 
     @property
     def physical_fields(self) -> frozenset[tuple[str, str]] | None:
@@ -183,6 +195,7 @@ class MDP:
         ]
         terms.extend(self.terminations.values())
         terms.extend(self.truncations.values())
+        terms.extend(self._history.values())
         fields = set()
         for term in terms:
             required = getattr(term, "physical_fields", None)
@@ -200,10 +213,27 @@ class MDP:
                     (num_envs, 1), dtype=torch.long, device=device
                 ),
                 "previous_action": torch.zeros((num_envs, action_dim), device=device),
+                **{name: torch.zeros((num_envs, *reader.shape), device=device) for name, reader in self._history.items()},
             },
             batch_size=[num_envs],
             device=device,
         )
+
+    @property
+    def replay_fields(self) -> tuple[str, ...]:
+        """Compact task memory needed to reconstruct replay decision states."""
+        # Task preparation runs before scene binding, when reader shapes are
+        # unavailable but every history key must already be discoverable.
+        history = dict.fromkeys(self._history)
+        terms = [term for group in (*self.observations.values(), *self.rewards.values()) for term in group.terms.values()]
+        terms.extend((*self.terminations.values(), *self.truncations.values()))
+        for term in terms:
+            history.update(dict.fromkeys(getattr(term, "state_history", {})))
+        return ("episode_step", "previous_action", *history)
+
+    def restore_replay_state(self, state: TensorDict) -> TensorDict:
+        """Rebuild task state without advancing time or sampling randomness."""
+        return state.clone()
 
     def reset(
         self, mdp_state: TensorDict, ids: torch.Tensor | slice
@@ -212,77 +242,93 @@ class MDP:
         next_mdp_state = mdp_state.clone()
         next_mdp_state["episode_step"][ids] = 0
         next_mdp_state["previous_action"][ids] = 0
+        for name in self._history:
+            next_mdp_state[name][ids] = 0
         return next_mdp_state, {}
 
-    def advance(
+    def step(
         self, physical_state: TensorDict, mdp_state: TensorDict, action: torch.Tensor
     ) -> tuple[TensorDict, TensorDict]:
-        next_mdp_state = mdp_state.clone()
-        next_mdp_state["episode_step"] += 1
-        next_mdp_state["action"] = action
-        transition = self.step(physical_state, next_mdp_state)
-        self._after_step(next_mdp_state, transition)
-        del next_mdp_state["action"]
-        next_mdp_state["previous_action"] = action
-        transition["observation"] = self.observe(physical_state, next_mdp_state)
-        return next_mdp_state, transition
+        """Advance task memory using successor physics, without resetting.
 
-    def _after_step(self, mdp_state: TensorDict, transition: TensorDict) -> None:
-        """Update MDP state after scoring, before building the next observation."""
-
-    def observe(
-        self,
-        physical_state: TensorDict,
-        mdp_state: TensorDict,
-    ) -> TensorDict:
-        return TensorDict(
+        Rewards see decision-time goals, counters and history, plus the executed
+        action. Endings and observations see successor task state. Inputs are
+        never mutated; tensor operations retain gradients for imagination.
+        """
+        state = mdp_state.clone()
+        state["action"] = action
+        reward = self.compute_reward(physical_state, state)
+        del state["action"]
+        state["episode_step"] += 1
+        state["previous_action"] = action
+        for name, reader in self._history.items():
+            state[name] = reader(physical_state, mdp_state).clone()
+        extra = self._advance_task_state(physical_state, state)
+        termination_terms = self.compute_termination(physical_state, state)
+        truncation_terms = self.compute_truncation(physical_state, state)
+        terminated = self._any(termination_terms, state)
+        truncated = self._any(truncation_terms, state)
+        return state, TensorDict(
             {
-                name: group(physical_state, mdp_state)
-                for name, group in self.observations.items()
-            },
-            batch_size=mdp_state.batch_size,
-            device=mdp_state.device,
-        )
-
-    def step(
-        self,
-        physical_state: TensorDict,
-        mdp_state: TensorDict,
-    ) -> TensorDict:
-        reward = TensorDict(
-            {
-                name: group(physical_state, mdp_state)
-                for name, group in self.rewards.items()
-            },
-            batch_size=mdp_state.batch_size,
-            device=mdp_state.device,
-        )
-        termination_terms = self._evaluate(
-            self.terminations, physical_state, mdp_state
-        )
-        truncation_terms = self._evaluate(self.truncations, physical_state, mdp_state)
-        terminated = self._any(termination_terms, mdp_state)
-        truncated = self._any(truncation_terms, mdp_state)
-        return TensorDict(
-            {
+                **extra,
                 "reward": reward,
                 "termination_terms": termination_terms,
                 "truncation_terms": truncation_terms,
                 "terminated": terminated,
                 "truncated": truncated,
                 "done": terminated | truncated,
+                "observation": self.compute_observation(physical_state, state),
             },
-            batch_size=mdp_state.batch_size,
-            device=mdp_state.device,
+            batch_size=state.batch_size, device=state.device,
         )
+
+    def _advance_task_state(self, physical_state: TensorDict, state: TensorDict) -> dict:
+        """Update owned successor memory after scoring; return extra transition fields."""
+        return {}
+
+    def compute_observation(self, physical_state: TensorDict, mdp_state: TensorDict) -> TensorDict:
+        """Evaluate observation groups without changing either input."""
+        return TensorDict(
+            {name: group(physical_state, mdp_state) for name, group in self.observations.items()},
+            batch_size=mdp_state.batch_size, device=mdp_state.device,
+        )
+
+    def compute_reward(self, physical_state: TensorDict, mdp_state: TensorDict) -> TensorDict:
+        """Evaluate reward groups; action-dependent terms require mdp_state.action."""
+        return TensorDict(
+            {name: group(physical_state, mdp_state) for name, group in self.rewards.items()},
+            batch_size=mdp_state.batch_size, device=mdp_state.device,
+        )
+
+    def compute_termination(self, physical_state: TensorDict, mdp_state: TensorDict) -> TensorDict:
+        """Evaluate named boolean termination terms without advancing state."""
+        return self._evaluate(self.terminations, physical_state, mdp_state)
+
+    def compute_truncation(self, physical_state: TensorDict, mdp_state: TensorDict) -> TensorDict:
+        """Evaluate named boolean truncation terms without advancing state."""
+        return self._evaluate(self.truncations, physical_state, mdp_state)
+
+    def compute_survival(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
+        """Differentiable imagined continuation where terms support it; excludes truncation."""
+        survival = torch.ones((*mdp_state.batch_size, 1), device=mdp_state.device)
+        for term in self.terminations.values():
+            compute = getattr(term, 'survival', None)
+            value = (~term(physical_state, mdp_state)).float() if compute is None else compute(physical_state, mdp_state)
+            _check_column_shape({'survival': value}, survival.shape)
+            survival = survival * value
+        return survival
 
     @staticmethod
     def _evaluate(terms, physical_state, mdp_state):
-        return TensorDict(
+        values = TensorDict(
             {name: term(physical_state, mdp_state) for name, term in terms.items()},
             batch_size=mdp_state.batch_size,
             device=mdp_state.device,
         )
+        _check_column_shape(values, (*mdp_state.batch_size, 1))
+        if any(value.dtype != torch.bool for value in values.values()):
+            raise TypeError("Episode-end terms must return boolean tensors")
+        return values
 
     @staticmethod
     def _any(terms, mdp_state):

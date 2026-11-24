@@ -103,7 +103,7 @@ def locomotion_mdp(mdp_type: type[MDP] = MDP, base: str = "base") -> MDP:
                 }
             ),
         },
-        rewards={"survival": RewardGroup({"survival": Survival(weight=1.0)})},
+        # rewards={"survival": RewardGroup({"survival": Survival(weight=1.0)})},
         truncations={"timeout": Timeout(1000)},
     )
 
@@ -111,10 +111,8 @@ def locomotion_mdp(mdp_type: type[MDP] = MDP, base: str = "base") -> MDP:
 def G1MotionTracking(**overrides) -> EnvironmentConfig:
     """50 Hz G1 tracking of the official retargeted LAFAN1 library."""
     bodies = (
-        "pelvis", "left_hip_roll_link", "left_knee_link", "left_ankle_roll_link",
-        "right_hip_roll_link", "right_knee_link", "right_ankle_roll_link", "torso_link",
-        "left_shoulder_roll_link", "left_elbow_link", "left_wrist_yaw_link",
-        "right_shoulder_roll_link", "right_elbow_link", "right_wrist_yaw_link",
+        "pelvis", "torso_link",
+        "(left|right)_(hip_roll|knee|ankle_roll|shoulder_roll|elbow|wrist_yaw)_link",
     )
     mdp = locomotion_mdp(MotionTrackingMDP, base="pelvis")
     mdp.observations["command"] = ObservationGroup({"reference": ReferenceMotion()})
