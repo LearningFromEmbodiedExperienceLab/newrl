@@ -1,4 +1,4 @@
-"""Fetch and cook Spot and AS2 into this repository's cache.
+"""Lazily fetch and cook robot assets into this repository's cache.
 
 Vendor trees come from assetx. Cooked bundles are written under
 ``<repo>/.cache/robots`` and are not read from another project.
@@ -13,6 +13,7 @@ from assetx import (
     ApproximateWithCapsule,
     AddJoint,
     Compose,
+    EditBodies,
     GeomsToBody,
     JointCfg,
     MujocoAsset,
@@ -44,6 +45,11 @@ UNITREE_AS2W = (
 DEEP_M20S = (
     "https://github.com/DeepRoboticsLab/deep_robotics_model/tree/"
     "a547a0289deb7cda23578b252b4d54debfdcec19/M20S/mjcf"
+)
+MJLAB_G1 = (
+    "https://github.com/mujocolab/mjlab/tree/"
+    "1f48001802bd89257537c2dc16979d41b9686e86/"
+    "src/mjlab/asset_zoo/robots/unitree_g1/xmls"
 )
 
 _SPOT_LEGS = ("fl", "fr", "hl", "hr")
@@ -167,7 +173,20 @@ def build_as2w_sphere(vendor_dir: Path) -> MujocoAsset:
     return build_as2w(vendor_dir, sphere_wheels=True)
 
 
+def build_g1(vendor_dir: Path) -> MujocoAsset:
+    return Compose([
+        NormalizeGeomNames(),
+        NormalizeJointNames(),
+        RemoveSensors(names=[".*"]),
+        RemoveActuators(names=[".*"]),
+        RemoveSceneSettings(),
+        # RobotConfig.position owns the root placement.
+        EditBodies("pelvis", pos=[0.0, 0.0, 0.0]),
+    ]).transform(MujocoAsset.from_file(vendor_dir / "g1.xml"))
+
+
 RECIPES = {
+    "g1": Recipe("g1", build_g1, MJLAB_G1),
     "spot": Recipe("spot", build_spot, MENAGERIE_SPOT),
     "as2": Recipe("as2", build_as2, UNITREE_AS2),
     "as2w": Recipe("as2w", build_as2w, UNITREE_AS2W),

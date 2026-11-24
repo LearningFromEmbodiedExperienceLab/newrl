@@ -1,5 +1,6 @@
 """Newton robot asset factories and position actuator configuration."""
 
+import math
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -30,6 +31,17 @@ class ActuatorGroup:
     effort_limit: float | None = None
     velocity_limit: float | None = None
     friction: float | None = None
+    viscous_damping: float | None = None
+    """Passive velocity damping; None preserves the imported asset value.
+
+    ``damping`` above is the active PD derivative gain.
+    """
+
+    def __post_init__(self):
+        if self.viscous_damping is not None and (
+            not math.isfinite(self.viscous_damping) or self.viscous_damping < 0
+        ):
+            raise ValueError("viscous_damping must be finite and non-negative")
 
 
 @dataclass(frozen=True)
@@ -87,15 +99,15 @@ class RobotConfig:
         joints = scalar_joints(builder)
         labels = [builder.joint_label[joint] for joint in joints]
         position = _resolve_values(self.joint_position, labels, "joint_position")
-        stiffness, damping, armature, effort, velocity, friction = self._gains(labels)
+        stiffness, damping, armature, effort, velocity, friction, viscous = self._gains(labels)
         velocity_indices = set()
         if self.velocity_joints:
             velocity_indices = set(resolve_scene_names(self.velocity_joints, labels))
         values = zip(
-            joints, position, stiffness, damping, armature, effort, velocity, friction,
+            joints, position, stiffness, damping, armature, effort, velocity, friction, viscous,
             strict=True,
         )
-        for index, (joint, pos, ke, kd, arm, limit, speed, joint_friction) in enumerate(values):
+        for index, (joint, pos, ke, kd, arm, limit, speed, joint_friction, passive_damping) in enumerate(values):
             q = builder.joint_q_start[joint]
             dof = builder.joint_qd_start[joint]
             builder.joint_q[q] = pos
@@ -114,6 +126,8 @@ class RobotConfig:
                 builder.joint_velocity_limit[dof] = speed
             if joint_friction is not None:
                 builder.joint_friction[dof] = joint_friction
+            if passive_damping is not None:
+                builder.joint_damping[dof] = passive_damping
         return builder
 
     def action_scales(self, labels: Sequence[str]) -> tuple[float, ...]:
@@ -128,6 +142,7 @@ class RobotConfig:
                 [None] * len(labels),
                 [None] * len(labels),
                 [None] * len(labels),
+                [None] * len(labels),
             )
         stiffness = [None] * len(labels)
         damping = [None] * len(labels)
@@ -135,6 +150,7 @@ class RobotConfig:
         effort = [None] * len(labels)
         velocity = [None] * len(labels)
         friction = [None] * len(labels)
+        viscous = [None] * len(labels)
         claimed = [None] * len(labels)
         for group in self.actuators:
             for index in resolve_scene_names(group.joint_names, labels):
@@ -149,10 +165,11 @@ class RobotConfig:
                 effort[index] = group.effort_limit
                 velocity[index] = group.velocity_limit
                 friction[index] = group.friction
+                viscous[index] = group.viscous_damping
         missing = [label for label, owner in zip(labels, claimed) if owner is None]
         if missing:
             raise ValueError(f"Actuator groups do not cover {missing}")
-        return stiffness, damping, armature, effort, velocity, friction
+        return stiffness, damping, armature, effort, velocity, friction, viscous
 
 
 def _resolve_values(spec: ValueSpec, labels: Sequence[str], name: str) -> list[float]:
@@ -228,6 +245,65 @@ def newton_anymal_c() -> RobotConfig:
             "RF_FOOT": ("LF_FOOT", 1),
             "LH_FOOT": ("RH_FOOT", 1),
             "RH_FOOT": ("LH_FOOT", 1),
+        },
+    )
+
+
+def assetx_g1() -> RobotConfig:
+    """mjlab's 29-DoF G1 with its bent-knee pose and implicit motor gains."""
+    bundle = cooked_robot("g1", robot_model_dir())
+    # Reflected motor inertias from mjlab's unitree_g1/g1_constants.py.
+    armature_5020 = 0.139e-4 * ((1 + 46 / 18) * 4.5) ** 2 + 0.017e-4 * 4.5**2 + 0.169e-4
+    armature_7520_14 = (
+        0.489e-4 * (4.5 * (1 + 48 / 22)) ** 2
+        + 0.098e-4 * (1 + 48 / 22)**2 + 0.533e-4
+    )
+    armature_7520_22 = 0.489e-4 * (4.5 * 5)**2 + 0.109e-4 * 5**2 + 0.738e-4
+    armature_4010 = 0.068e-4 * (5 * 5)**2
+    frequency = 10 * 2 * math.pi
+    actuators = tuple(
+        ActuatorGroup(
+            names,
+            stiffness=armature * frequency**2,
+            damping=4 * armature * frequency,
+            armature=armature,
+            effort_limit=effort,
+            velocity_limit=speed,
+        )
+        for names, armature, effort, speed in (
+            (
+                (".*_elbow_joint", ".*_shoulder_(pitch|roll|yaw)_joint", ".*_wrist_roll_joint"),
+                armature_5020, 25.0, 37.0,
+            ),
+            ((".*_hip_(pitch|yaw)_joint", "waist_yaw_joint"), armature_7520_14, 88.0, 32.0),
+            ((".*_hip_roll_joint", ".*_knee_joint"), armature_7520_22, 139.0, 20.0),
+            ((".*_wrist_(pitch|yaw)_joint",), armature_4010, 5.0, 22.0),
+            # Parallel linkages use two 5020 motors per joint.
+            (
+                ("waist_(pitch|roll)_joint", ".*_ankle_(pitch|roll)_joint"),
+                2 * armature_5020, 50.0, 37.0,
+            ),
+        )
+    )
+    return RobotConfig(
+        asset=cooked_usd(bundle),
+        position=(0.0, 0.0, 0.76),
+        joint_position={
+            ".*_hip_pitch_joint": -0.312,
+            ".*_knee_joint": 0.669,
+            ".*_ankle_pitch_joint": -0.363,
+            ".*_elbow_joint": 0.6,
+            ".*_shoulder_pitch_joint": 0.2,
+            "left_shoulder_roll_joint": 0.2,
+            "right_shoulder_roll_joint": -0.2,
+            ".*_(hip_roll|hip_yaw|ankle_roll|shoulder_yaw|wrist_roll|wrist_pitch|wrist_yaw)_joint": 0.0,
+            "waist_(yaw|roll|pitch)_joint": 0.0,
+        },
+        actuators=actuators,
+        action_scale={
+            pattern: 0.25 * group.effort_limit / group.stiffness
+            for group in actuators
+            for pattern in group.joint_names
         },
     )
 

@@ -1,6 +1,5 @@
 """Play a trained policy or roll out zero actions with optional visualization."""
 
-import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -59,7 +58,7 @@ class PlayConfig:
             raise ValueError("viser_port must be between 1 and 65535")
 
 
-@config_main(PlayConfig)
+@config_main(PlayConfig, defaults={"task.num_envs": 4})
 def play(cfg: PlayConfig) -> None:
     if cfg.algo is not None and cfg.checkpoint is None:
         raise ValueError("algo requires a checkpoint")
@@ -152,8 +151,4 @@ def play(cfg: PlayConfig) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     load_projects()
-    argv = sys.argv[1:] if argv is None else argv
-    # Apply the play default only when the CLI selects a task preset.
-    if any(token.startswith("task=") for token in argv):
-        argv = ["task.num_envs=4", *argv]
     play(argv)

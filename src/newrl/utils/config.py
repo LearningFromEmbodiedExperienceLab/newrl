@@ -25,6 +25,9 @@ that shell argument when they contain commas or parentheses.
 Use ``resolve(Config, argv)`` from Python, or decorate a command with
 ``@main(Config)`` to pass it the resolved dataclass. A decorated command
 accepts ``config_out=path`` to save the resolved config before running.
+Pass ``defaults={"task.num_envs": 4}`` to either API for typed composition
+defaults. These apply after preset selection and before explicit field overrides;
+paths through absent optional configs are skipped.
 Use ``save_config`` and ``load_config`` for files, and ``dump`` and ``load``
 for in-memory JSON-compatible data. Type tags preserve dataclasses, tuples,
 and slices across a round trip. Dataclass fields with ``init=False`` are
@@ -38,7 +41,7 @@ import importlib
 import json
 import sys
 import types
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from functools import wraps
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin, get_type_hints
@@ -88,6 +91,10 @@ class ConfigStore:
 
 
 cs = ConfigStore()
+
+
+class ConfigError(ValueError):
+    """Invalid command-line configuration, suitable for a CLI usage error."""
 
 
 def save_config(path: str | Path, config: Any) -> None:
@@ -156,8 +163,17 @@ def load(value: Any) -> Any:
     return value
 
 
-def resolve(config_cls: type, argv: Sequence[str]) -> Any:
-    """Resolve CLI overrides. Field metadata can declare an explicit preset group."""
+def resolve(
+    config_cls: type,
+    argv: Sequence[str],
+    *,
+    defaults: Mapping[str, Any] | None = None,
+) -> Any:
+    """Resolve presets, typed defaults, then explicit field overrides.
+
+    Defaults map dotted field paths to Python values. Paths through an absent
+    optional config are skipped. Field metadata can declare a preset group.
+    """
     assignments = [_split_assignment(token) for token in argv]
     hints = get_type_hints(config_cls)
     fields = dataclasses.fields(config_cls)
@@ -182,7 +198,7 @@ def resolve(config_cls: type, argv: Sequence[str]) -> Any:
         candidates = tuple(
             option for option in options if dataclasses.is_dataclass(option)
         )
-        if candidates and (key, raw) in cs:
+        if candidates and cs.names(key) and isinstance(parse_literal(raw), str):
             preset = cs.get(key, raw)
             if not isinstance(preset, candidates):
                 raise TypeError(f"Preset {key}={raw} is incompatible with {hint}")
@@ -213,10 +229,16 @@ def resolve(config_cls: type, argv: Sequence[str]) -> Any:
         if len(parts) > 1:
             for index in range(len(parts)):
                 group = ".".join(parts[index:])
-                if (group, raw) in cs:
+                if cs.names(group) and isinstance(parse_literal(raw), str):
                     config = _assign(config, parts, raw, selection=cs.get(group, raw))
                     consumed.add(key)
                     break
+    for key, value in (defaults or {}).items():
+        if key in consumed:
+            continue
+        config = _assign(
+            config, key.split("."), "", selection=copy.deepcopy(value), skip_none=True
+        )
     for key, raw in assignments:
         if key in consumed:
             continue
@@ -224,13 +246,13 @@ def resolve(config_cls: type, argv: Sequence[str]) -> Any:
     return config
 
 
-def main(config_cls: type, *, defaults: Sequence[str] = ()) -> Callable:
+def main(config_cls: type, *, defaults: Mapping[str, Any] | None = None) -> Callable:
     """Call ``fn(config)`` after resolving CLI overrides.
 
-    ``defaults`` are applied before the command line, so an explicit
-    ``task.num_envs=1`` still replaces a play default of 4. ``config_out=path``
-    is removed from the overrides and, when present, the resolved dataclass is
-    written there as tagged JSON.
+    ``defaults={"task.num_envs": 4}`` applies after preset selection and before
+    explicit field overrides. Absent optional configs are left absent.
+    ``config_out=path`` is removed from the overrides and, when present, the
+    resolved dataclass is written there as tagged JSON.
     """
 
     def decorate(fn: Callable) -> Callable:
@@ -244,7 +266,11 @@ def main(config_cls: type, *, defaults: Sequence[str] = ()) -> Callable:
                     config_out = token.split("=", 1)[1]
                 else:
                     overrides.append(token)
-            config = resolve(config_cls, [*defaults, *overrides])
+            try:
+                config = resolve(config_cls, overrides, defaults=defaults)
+            except (KeyError, TypeError, ValueError) as error:
+                message = error.args[0] if isinstance(error, KeyError) else str(error)
+                raise ConfigError(message) from error
             if config_out:
                 save_config(config_out, config)
             return fn(config)
@@ -254,14 +280,19 @@ def main(config_cls: type, *, defaults: Sequence[str] = ()) -> Callable:
     return decorate
 
 
-def _assign(obj: Any, parts: list[str], raw: str, *, selection: Any = _MISSING) -> Any:
+def _assign(
+    obj: Any, parts: list[str], raw: str, *,
+    selection: Any = _MISSING, skip_none: bool = False,
+) -> Any:
+    if obj is None and skip_none:
+        return None
     head, *rest = parts
     if isinstance(obj, dict):
         if head not in obj:
             raise KeyError(f"Unknown config key {head!r}")
         updated = dict(obj)
         updated[head] = (
-            _assign(obj[head], rest, raw, selection=selection)
+            _assign(obj[head], rest, raw, selection=selection, skip_none=skip_none)
             if rest
             else (
                 selection if selection is not _MISSING else _parse_like(obj[head], raw)
@@ -275,7 +306,9 @@ def _assign(obj: Any, parts: list[str], raw: str, *, selection: Any = _MISSING) 
         raise KeyError(f"{type(obj).__name__} has no field {head!r}")
     if rest:
         return dataclasses.replace(
-            obj, **{head: _assign(getattr(obj, head), rest, raw, selection=selection)}
+            obj, **{head: _assign(
+                getattr(obj, head), rest, raw, selection=selection, skip_none=skip_none
+            )}
         )
     value = selection if selection is not _MISSING else parse_literal(raw)
     return dataclasses.replace(obj, **{head: coerce(value, hints[head])})

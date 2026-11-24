@@ -2,6 +2,8 @@
 
 import tempfile
 import unittest
+import io
+from contextlib import redirect_stderr
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +33,52 @@ class _Holder:
 
 
 class ConfigTests(unittest.TestCase):
+    def test_unknown_presets_report_the_group_and_available_choices(self):
+        from newrl.commands.play import PlayConfig
+        from newrl.utils.config import resolve
+
+        for config_type, overrides, group, choice in (
+            (PlayConfig, ["task.num_envs=4", "task=NoSuchTask", "algo=ppo"], "task", "AnymalLocoFlat"),
+            (TrainConfig, ["task=NoSuchTask", "algo=ppo"], "task", "AnymalLocoFlat"),
+            (PlayConfig, ["task=AnymalLocoFlat", "algo=NoSuchAlgo"], "algo", "ppo"),
+            (PlayConfig, ["task=AnymalLocoFlat", "task.solver.iterations=7", "task.solver=NoSuchSolver"], "solver", "steel"),
+            (PlayConfig, ["task=AnymalLocoFlat", "task.terrain.border=NoSuchBorder", "task.terrain=rough_easy"], "terrain.border", "wall"),
+        ):
+            with self.subTest(overrides=overrides), self.assertRaises(KeyError) as caught:
+                resolve(config_type, overrides)
+            self.assertIn(f"Unknown {group} config", str(caught.exception))
+            self.assertIn(choice, str(caught.exception))
+
+    def test_cli_unknown_task_prints_usage_without_a_traceback(self):
+        from newrl.cli import main as cli
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as caught:
+            cli(["play", "task=NoSuchTask", "algo=ppo"])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("Unknown task config 'NoSuchTask'", stderr.getvalue())
+        self.assertIn("AnymalLocoFlat", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+        self.assertNotIn("NoneType", stderr.getvalue())
+
+    def test_optional_task_still_allows_none_and_checkpoint_playback(self):
+        from newrl.commands.play import PlayConfig
+        from newrl.utils.config import resolve
+
+        for overrides in (["checkpoint=policy.pt"], ["task=None", "checkpoint=policy.pt"]):
+            self.assertIsNone(resolve(PlayConfig, overrides).task)
+
+    def test_command_errors_are_not_wrapped_as_config_errors(self):
+        from newrl.utils.config import ConfigError
+
+        @main(TrainConfig)
+        def entry(cfg):
+            raise ValueError("runtime failure")
+
+        with self.assertRaisesRegex(ValueError, "runtime failure") as caught:
+            entry(["task=AnymalLocoFlat", "algo=ppo"])
+        self.assertNotIsInstance(caught.exception, ConfigError)
+
     def test_collision_mode_is_independent_of_solver(self):
         from newrl.utils.config import resolve
 
@@ -167,7 +215,7 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(called)
 
     def test_default_override_yields_to_the_command_line(self):
-        @main(TrainConfig, defaults=("task.num_envs=4",))
+        @main(TrainConfig, defaults={"task.num_envs": 4})
         def entry(cfg: TrainConfig):
             return cfg
 
@@ -180,6 +228,49 @@ class ConfigTests(unittest.TestCase):
             ).task.num_envs,
             2,
         )
+
+    def test_structured_defaults_follow_nested_preset_selection(self):
+        from newrl.commands.play import PlayConfig
+        from newrl.utils.config import resolve
+
+        defaults = {"task.solver.iterations": 7, "task.num_envs": 4}
+        for overrides, iterations in (
+            (["task.solver=steel", "task=AnymalLocoFlat"], 7),
+            (["task.solver.iterations=9", "task.solver=steel", "task=AnymalLocoFlat"], 9),
+        ):
+            cfg = resolve(PlayConfig, overrides, defaults=defaults)
+            self.assertIsInstance(cfg.task.solver, SteelSimConfig)
+            self.assertEqual(cfg.task.solver.iterations, iterations)
+        self.assertEqual(defaults, {"task.solver.iterations": 7, "task.num_envs": 4})
+
+    def test_play_defaults_skip_absent_task_and_save_resolved_values(self):
+        from newrl.commands.play import PlayConfig
+
+        @main(PlayConfig, defaults={"task.num_envs": 4})
+        def entry(cfg):
+            return cfg
+
+        self.assertIsNone(entry(["checkpoint=policy.pt"]).task)
+        self.assertIsNone(entry(["task=None", "checkpoint=policy.pt"]).task)
+        self.assertIsNone(entry([]).task)
+        for overrides, expected in (
+            (["task=AnymalLocoFlat"], 4),
+            (["task.num_envs=2", "task=AnymalLocoFlat"], 2),
+        ):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "config.json"
+                cfg = entry([*overrides, f"config_out={path}"])
+                self.assertEqual(cfg.task.num_envs, expected)
+                self.assertEqual(load_config(path).task.num_envs, expected)
+
+    def test_play_main_passes_overrides_without_rewriting(self):
+        from newrl.commands import play as module
+
+        overrides = ["task=AnymalLocoFlat", "task.num_envs=2"]
+        with patch.object(module, "load_projects"), patch.object(module, "play") as play:
+            module.main(overrides)
+            play.assert_called_once_with(overrides)
+        self.assertEqual(overrides, ["task=AnymalLocoFlat", "task.num_envs=2"])
 
     def test_disabled_logger_does_not_open_a_run(self):
         with patch("wandb.init") as init:

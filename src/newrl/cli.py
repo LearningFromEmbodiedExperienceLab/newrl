@@ -30,14 +30,17 @@ def main(argv: list[str] | None = None) -> None:
     remove.add_argument("-y", "--yes", action="store_true", help="Confirm deletion without prompting")
     args = parser.parse_args(argv)
 
-    if args.command == "train":
-        from newrl.commands.train import main as train
+    if args.command in ("train", "play"):
+        from newrl.utils.config import ConfigError
 
-        train(args.overrides)
-    elif args.command == "play":
-        from newrl.commands.play import main as play
-
-        play(args.overrides)
+        if args.command == "train":
+            from newrl.commands.train import main as run
+        else:
+            from newrl.commands.play import main as run
+        try:
+            run(args.overrides)
+        except ConfigError as error:
+            parser.error(str(error))
     else:
         from newrl.projects import create_project, install_project, list_projects, remove_project
 
