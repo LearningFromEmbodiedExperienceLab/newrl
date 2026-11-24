@@ -1,12 +1,16 @@
-"""Create standalone extension projects and load installed registrations."""
+"""Manage standalone project checkouts and load installed registrations."""
 
 import json
 import keyword
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import tomllib
 from importlib.metadata import entry_points
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from newrl.utils.config import cs
 
@@ -33,6 +37,80 @@ def load_projects() -> None:
             _loaded_projects.add(project.name)
 
 
+def project_directory(directory: Path | None = None) -> Path:
+    """Resolve the shared parent for created and cloned projects."""
+    if directory is not None:
+        return directory.expanduser().resolve()
+    core = Path(__file__).resolve().parents[2]
+    checkout = (core / "pyproject.toml").is_file() and (core / "src/newrl").is_dir()
+    return ((core.parent if checkout else Path.cwd()) / "newrl-projects").resolve()
+
+
+def list_projects(directory: Path | None = None) -> list[Path]:
+    """Find local project checkouts declaring a NewRL registration."""
+    parent = project_directory(directory)
+    if not parent.exists():
+        return []
+    projects = []
+    for root in sorted(parent.iterdir()):
+        metadata = root / "pyproject.toml"
+        if not root.is_dir() or not metadata.is_file():
+            continue
+        try:
+            config = tomllib.loads(metadata.read_text(encoding="utf-8"))
+        except tomllib.TOMLDecodeError:
+            continue
+        if config.get("project", {}).get("entry-points", {}).get(PROJECT_ENTRY_POINTS):
+            projects.append(root)
+    return projects
+
+
+def install_project(url: str, directory: Path | None = None) -> Path:
+    """Clone a project and install it in its own Python environment."""
+    parsed = urlsplit(url)
+    path = parsed.path
+    if url.startswith("git@") and ":" in url:
+        path = url.split(":", 1)[1]
+    elif parsed.scheme not in ("https", "ssh") or not parsed.hostname:
+        raise ValueError("Use an HTTPS or SSH Git repository URL")
+    name = path.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+        raise ValueError("Repository URL must end with a project name")
+    parent = project_directory(directory)
+    root = parent / name
+    if root.exists() or root.is_symlink():
+        raise FileExistsError(root)
+    parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".newrl-install-", dir=parent) as temporary:
+        clone = Path(temporary) / name
+        subprocess.run(["git", "clone", "--", url, str(clone)], check=True)
+        if clone not in list_projects(Path(temporary)):
+            raise ValueError("Repository must declare a newrl.projects entry point in pyproject.toml")
+        clone.rename(root)
+    try:
+        subprocess.run(["uv", "venv", "--python", "3.13", ".venv"], cwd=root, check=True)
+        subprocess.run(
+            ["uv", "pip", "install", "--python", str(root / ".venv/bin/python"), "-e", "."],
+            cwd=root, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError(
+            f"Cloned project to {root}, but environment setup failed. "
+            "Adjust its package sources and follow its README to finish installation."
+        ) from error
+    return root
+
+
+def remove_project(name: str, directory: Path | None = None) -> Path:
+    """Delete a named project checkout, including its environment and local data."""
+    parent = project_directory(directory)
+    root = parent / name
+    if root.parent != parent or root.is_symlink() or root not in list_projects(parent):
+        raise ValueError("Choose a project name shown by newrl project list")
+    shutil.rmtree(root)
+    return root
+
+
 def create_project(name: str, directory: Path | None = None) -> Path:
     """Scaffold a package without installing dependencies or creating a lockfile."""
     if (
@@ -45,9 +123,7 @@ def create_project(name: str, directory: Path | None = None) -> Path:
     core = Path(__file__).resolve().parents[2]
     core_pyproject = core / "pyproject.toml"
     checkout = core_pyproject.is_file() and (core / "src/newrl").is_dir()
-    if directory is None:
-        directory = (core.parent if checkout else Path.cwd()) / "newrl-projects"
-    root = directory.expanduser().resolve() / name
+    root = project_directory(directory) / name
 
     sources = {}
     if checkout:
