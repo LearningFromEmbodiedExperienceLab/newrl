@@ -21,3 +21,6 @@ wheels/
 # Local UI settings and dependency lockfile
 /imgui.ini
 /uv.lock
+
+# Codex
+.codex/

@@ -1,6 +1,7 @@
 """NewRL playback controls layered on Newton's Viser viewer."""
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING
 
@@ -24,6 +25,8 @@ class _ClientView:
     follow: "viser.GuiCheckboxHandle"
     show_frustums: "viser.GuiCheckboxHandle | None"
     camera: "viser.GuiDropdownHandle | None" = None
+    show_gaussians: "viser.GuiCheckboxHandle | None" = None
+    gaussians: dict[str, "viser.GaussianSplatHandle"] = field(default_factory=dict)
     frustums: dict[str, "viser.CameraFrustumHandle"] = field(default_factory=dict)
     follow_target: tuple[int, str] | None = None
     orbit: np.ndarray | None = None
@@ -53,7 +56,7 @@ class _ClientView:
 
 
 class ViserPlayback:
-    """Follow robots and draw their sensor frustums per browser client."""
+    """Follow robots and draw sensor frustums and Gaussian clouds per client."""
 
     def __init__(self, viewer, scene):
         self._server = viewer.server
@@ -93,6 +96,13 @@ class ViserPlayback:
                             client.gui.add_dropdown("Camera", ("None",))
                             if self._select_camera else None
                         ),
+                        show_gaussians=(
+                            client.gui.add_checkbox("Gaussian scene", initial_value=False)
+                            if any(
+                                isinstance(sensor, GaussianCamera)
+                                for cameras in self._cameras.values() for sensor in cameras.values()
+                            ) else None
+                        ),
                     )
                 self._clients[client_id] = view
 
@@ -101,16 +111,15 @@ class ViserPlayback:
             follow = view.follow.value
             if not follow:
                 view.follow_target = None
-            cameras = (
-                self._cameras[robot_name]
-                if view.show_frustums is not None and view.show_frustums.value
-                else {}
-            )
+            cameras = self._cameras[robot_name]
             if view.camera is not None:
                 options = tuple(self._cameras[robot_name]) or ("None",)
                 if view.camera.options != options:
                     view.camera.options = options
                 cameras = {name: sensor for name, sensor in cameras.items() if name == view.camera.value}
+            self._update_gaussians(client, view, cameras, world)
+            if view.show_frustums is None or not view.show_frustums.value:
+                cameras = {}
             for name in view.frustums.keys() - cameras.keys():
                 view.frustums.pop(name).remove()
             if not follow and not cameras:
@@ -170,3 +179,41 @@ class ViserPlayback:
                             image = np.repeat(shade[..., None], 3, axis=-1)
                         if not np.array_equal(frustum.image, image):
                             frustum.image = image
+
+    def _update_gaussians(self, client, view, cameras, world):
+        """Upload a cloud on demand and place it in the selected display world."""
+        sensor = next(
+            (sensor for sensor in cameras.values() if isinstance(sensor, GaussianCamera)),
+            None,
+        )
+        enabled = view.show_gaussians is not None and view.show_gaussians.value
+        source = str(Path(sensor.config.source).expanduser().resolve()) if enabled and sensor else None
+        for path, handle in view.gaussians.items():
+            handle.visible = path == source
+        if source is None:
+            return
+        handle = view.gaussians.get(source)
+        if handle is None:
+            from gsrender.ply import read_ply
+            from viser.transforms import SO3
+
+            cloud = read_ply(Path(source))
+            # Covariance = R diag(scale**2) R.T. Chunk conversion to bound
+            # temporary memory for reconstructed scenes with millions of splats.
+            covariances = np.empty((len(cloud.means), 3, 3), dtype=np.float32)
+            for start in range(0, len(cloud.means), 65536):
+                rows = slice(start, start + 65536)
+                rotations = SO3(cloud.quats_xyzw[rows][:, [3, 0, 1, 2]]).as_matrix()
+                axes = rotations * cloud.scales[rows, None, :]
+                covariances[rows] = axes @ axes.transpose(0, 2, 1)
+            handle = client.scene.add_gaussian_splats(
+                f"/newrl/gaussians/{len(view.gaussians)}",
+                centers=cloud.means,
+                covariances=covariances,
+                rgbs=np.clip(0.5 + 0.28209479177387814 * cloud.sh_dc, 0, 1),
+                opacities=cloud.opacities[:, None],
+            )
+            view.gaussians[source] = handle
+        transform = sensor.config.world_from_cloud
+        handle.position = np.asarray(transform[:3]) + self._offsets[world]
+        handle.wxyz = (transform[6], *transform[3:6])

@@ -99,6 +99,9 @@ In the browser's **Robot view** panel, choose a world and robot, then enable
 **Follow robot**. Enable **Camera frustums** to see the selected robot's
 camera mount and field of view. Use **Camera** if the robot has several
 cameras. Active cameras show their latest RGB or depth image on the frustum.
+For a Gaussian camera, enable **Gaussian scene** to display its full splat cloud
+in the selected world. The first enable loads and uploads the cloud to that
+browser client, which can take time for large scenes.
 In depth images, near surfaces appear brighter and invalid pixels are black.
 Training defaults to `discard_unused_obs=true` and skips groups outside the
 policy and critic inputs. Playback defaults to `discard_unused_obs=false`,
