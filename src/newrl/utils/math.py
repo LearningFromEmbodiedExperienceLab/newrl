@@ -28,6 +28,18 @@ def quat_rotate_inverse(quat: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     return vec - quat[..., 3:] * t + xyz.cross(t, dim=-1)
 
 
+def quat_conjugate(quat: torch.Tensor) -> torch.Tensor:
+    return torch.cat((-quat[..., :3], quat[..., 3:]), dim=-1)
+
+
+def quat_to_6d(quat: torch.Tensor) -> torch.Tensor:
+    """First two rotation-matrix columns, concatenated as two 3D vectors."""
+    x = torch.zeros_like(quat[..., :3])
+    y = torch.zeros_like(x)
+    x[..., 0], y[..., 1] = 1, 1
+    return torch.cat((quat_rotate(quat, x), quat_rotate(quat, y)), dim=-1)
+
+
 def yaw_rotate(yaw: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
     """Rotate vectors about Z by yaw angles in radians."""
     yaw = yaw.reshape(vec.shape[:-1])

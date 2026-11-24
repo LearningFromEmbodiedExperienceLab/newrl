@@ -18,6 +18,7 @@ from .mdp.observations import (
     velocity_command,
 )
 from .mdp.rewards import (
+    Survival,
     ActionRate,
     FeetAirTime,
     FootSlip,
@@ -29,9 +30,14 @@ from .mdp.rewards import (
     BodyLinearVelocity2,
 )
 from .mdp.velocity import VelocityMDP
+from .mdp.motion_tracking import MotionTrackingMDP
+from .mdp.episode_ends import ClipEnd, TrackingDeviation
+from .mdp.observations import ReferenceMotion
+from .mdp.rewards import JointLimit, TrackBodyMotion
 from .robots import (
     RobotConfig, assetx_as2, assetx_as2w, assetx_as2w_sphere,
     assetx_m20s, assetx_spot, newton_anymal_c,
+    assetx_g1,
 )
 from .sensors import SensorConfig, TerrainContactConfig
 from .solver_adapters import MujocoSimConfig, SteelSimConfig
@@ -97,8 +103,41 @@ def locomotion_mdp(mdp_type: type[MDP] = MDP, base: str = "base") -> MDP:
                 }
             ),
         },
+        rewards={"survival": RewardGroup({"survival": Survival(weight=1.0)})},
         truncations={"timeout": Timeout(1000)},
     )
+
+
+def G1MotionTracking(**overrides) -> EnvironmentConfig:
+    """50 Hz G1 tracking of the official retargeted LAFAN1 library."""
+    dt = 0.02
+    bodies = (
+        "pelvis", "left_hip_roll_link", "left_knee_link", "left_ankle_roll_link",
+        "right_hip_roll_link", "right_knee_link", "right_ankle_roll_link", "torso_link",
+        "left_shoulder_roll_link", "left_elbow_link", "left_wrist_yaw_link",
+        "right_shoulder_roll_link", "right_elbow_link", "right_wrist_yaw_link",
+    )
+    mdp = locomotion_mdp(MotionTrackingMDP, base="pelvis")
+    mdp.observations["command"] = ObservationGroup({"reference": ReferenceMotion()})
+    mdp.rewards["tracking"] = RewardGroup({
+        "body_pos": TrackBodyMotion(dt, 0.3, "position", body_names=bodies, anchor_body="pelvis"),
+        "body_ori": TrackBodyMotion(dt, 0.4, "orientation", body_names=bodies, anchor_body="pelvis"),
+        "body_lin_vel": TrackBodyMotion(dt, 1.0, "linear_velocity", body_names=bodies),
+        "body_ang_vel": TrackBodyMotion(dt, 3.14, "angular_velocity", body_names=bodies),
+        "root_pos": TrackBodyMotion(0.5 * dt, 0.3, body_names="pelvis"),
+        "root_ori": TrackBodyMotion(0.5 * dt, 0.4, "orientation", body_names="pelvis"),
+        "action_rate": ActionRate(0.1 * dt),
+        "joint_limit": JointLimit(2.0 * dt),
+    })
+    mdp.terminations = {
+        "height": TrackingDeviation(BodyHeight("robot", "pelvis")),
+        "tilt": TrackingDeviation(BodyHeight("robot", "pelvis"), "tilt", 0.8),
+    }
+    mdp.truncations["clip_end"] = ClipEnd()
+    mdp.truncations["timeout"] = Timeout(500)
+    options = dict(num_envs=4096, robots={"robot": assetx_g1}, mdp=mdp, name="G1LAFAN1Tracking")
+    options.update(overrides)
+    return EnvironmentConfig(**options)
 
 
 def AnymalLocomotion(
@@ -197,6 +236,7 @@ def _quadruped_locomotion(
         }
     )
     mdp.rewards = {
+        **mdp.rewards,
         "tracking": RewardGroup(
             {
                 "track_xy_velocity": TrackVelocity(
@@ -294,6 +334,7 @@ for name, factory in (
     ("AS2LocoFlat", AS2Locomotion),
     ("AS2WLocoFlat", AS2WLocomotion),
     ("M20SLocoFlat", M20SLocomotion),
+    ("G1LAFAN1Tracking", G1MotionTracking),
 ):
     cs.store(name, factory(name=name, num_envs=4096), group="task")
 

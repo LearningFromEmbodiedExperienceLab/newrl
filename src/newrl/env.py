@@ -236,6 +236,13 @@ class _EnvironmentCore:
         for sensor in self._contact_sensors.values():
             sensor.reset(ids)
         joint_q = wp.to_torch(self.state.joint_q)
+        joint_qd = wp.to_torch(self.state.joint_qd)
+        # Reset velocities default to zero, independently of model defaults.
+        dof_starts = wp.to_torch(self.model.joint_qd_start).long()
+        dof_world = torch.repeat_interleave(
+            wp.to_torch(self.model.joint_world).long(), dof_starts[1:] - dof_starts[:-1]
+        )
+        joint_qd[mask[dof_world]] = 0
         for name, pose in poses.items():
             entity = self.scene.entities[name]
             if "joint_pos" in pose:
@@ -246,6 +253,15 @@ class _EnvironmentCore:
                         f"Entity {name!r} requires one free root for root pose resets"
                     )
                 joint_q[entity.root_q[ids]] = pose["root_pose"]
+            if "joint_vel" in pose:
+                joint_qd[entity.qd[ids]] = pose["joint_vel"]
+            if "root_twist" in pose:
+                if entity.root_qd is None:
+                    raise ValueError(
+                        f"Entity {name!r} requires one free root for root velocity resets"
+                    )
+                # Newton free-root DOFs: world COM linear velocity, then angular velocity.
+                joint_qd[entity.root_qd[ids]] = pose["root_twist"]
         joint_mask = mask[wp.to_torch(self.model.joint_world).long()]
         newton.eval_fk(
             self.model,

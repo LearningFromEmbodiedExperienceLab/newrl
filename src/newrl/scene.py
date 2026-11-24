@@ -29,6 +29,7 @@ class RobotEntity:
     joint_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
     body_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
     velocity_mask: torch.Tensor | None = None
+    root_qd: torch.Tensor | None = None
 
     def joint_symmetry_transform(self) -> SymmetryTransform:
         return SymmetryTransform.from_names(self.joint_names, self.joint_mirror)
@@ -162,10 +163,13 @@ class Scene:
             qd = wp.to_torch(model.joint_qd_start)[joint_ids].long()
             targets = wp.to_torch(model.joint_target_q_start)[joint_ids].long()
             root_q = None
+            root_qd = None
             if len(roots) == 1:
                 root_joint_ids = worlds * template.joint_count + roots[0]
                 root_start = wp.to_torch(model.joint_q_start)[root_joint_ids].long()
                 root_q = root_start + torch.arange(7, device=device)
+                root_dof = wp.to_torch(model.joint_qd_start)[root_joint_ids].long()
+                root_qd = root_dof + torch.arange(6, device=device)
             velocity_mask = None
             if velocity_joints:
                 labels = tuple(template.joint_label[j] for j in joints)
@@ -183,6 +187,7 @@ class Scene:
                 targets=targets,
                 bodies=body_ids,
                 root_q=root_q,
+                root_qd=root_qd,
                 default_position=wp.to_torch(model.joint_q)[q],
                 action=JointPositionAction(
                     torch.tensor(scale, dtype=torch.float32, device=device)

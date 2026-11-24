@@ -19,6 +19,21 @@ def _weighted_range(weight: float, maximum: float = inf) -> tuple[float, float]:
 
 
 @dataclass(frozen=True)
+class Survival:
+    """Constant reward on every transition, including terminal transitions."""
+
+    weight: float = 1.0
+    physical_fields: ClassVar[frozenset] = frozenset()
+
+    @property
+    def range(self) -> tuple[float, float]:
+        return self.weight, self.weight
+
+    def __call__(self, physical_state, mdp_state):
+        return torch.full_like(mdp_state["episode_step"], self.weight, dtype=torch.float32)
+
+
+@dataclass(frozen=True)
 class ActionRate:
     """Penalize squared changes in normalized action per environment."""
 
@@ -329,3 +344,131 @@ class BodyLinearVelocity2:
         velocity = self._velocity(physical_state, mdp_state)
         squared_speed = (velocity * self._axis).square().sum(dim=(-2, -1))
         return -self.weight * squared_speed.unsqueeze(-1)
+
+
+@dataclass(frozen=True)
+class TrackBodyMotion:
+    """Exponential mean squared tracking error for selected link origins.
+
+    Position/orientation targets may be aligned to an anchor's current XY/yaw,
+    retaining reference height. Velocity targets remain in the world frame.
+    Weights include any desired control-dt scaling, like other NewRL terms.
+    """
+
+    weight: float
+    sigma: float
+    quantity: str = "position"
+    entity: str = "robot"
+    body_names: str | Sequence[str] = ".*"
+    anchor_body: str | None = None
+    _indices: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
+    _anchor: int | None = field(default=None, init=False, repr=False, compare=False)
+    _com: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        if not isfinite(self.sigma) or self.sigma <= 0:
+            raise ValueError("Tracking sigma must be finite and positive")
+        if self.quantity not in ("position", "orientation", "linear_velocity", "angular_velocity"):
+            raise ValueError(f"Unknown tracking quantity {self.quantity!r}")
+        if self.anchor_body is not None and "velocity" in self.quantity:
+            raise ValueError("Velocity tracking uses unanchored world targets")
+
+    @property
+    def physical_fields(self):
+        fields = {(self.entity, "body_pose_w")}
+        if "velocity" in self.quantity:
+            fields.add((self.entity, "body_twist_w"))
+        return frozenset(fields)
+
+    @property
+    def range(self):
+        return _weighted_range(self.weight, 1.0)
+
+    def _initialize(self, scene):
+        import warp as wp
+
+        robot = scene.entities[self.entity]
+        bound = replace(self)
+        indices = resolve_scene_names(self.body_names, robot.body_names)
+        object.__setattr__(bound, "_indices", torch.tensor(indices, device=robot.q.device))
+        if self.anchor_body is not None:
+            anchor, = resolve_scene_names(self.anchor_body, robot.body_names)
+            object.__setattr__(bound, "_anchor", anchor)
+        object.__setattr__(bound, "_com", wp.to_torch(scene.model.body_com)[robot.bodies[0]].clone())
+        return bound
+
+    def __call__(self, physical_state, mdp_state):
+        from newrl.utils.math import quat_conjugate, quat_mul, quat_rotate, yaw_quat
+
+        if self._indices is None:
+            raise RuntimeError("Bind TrackBodyMotion before evaluating it")
+        pose = physical_state[self.entity, "body_pose_w"]
+        target_pose = mdp_state["reference", "body_pose_w"]
+        actual = pose.index_select(-2, self._indices)
+        target = target_pose.index_select(-2, self._indices)
+        if self._anchor is not None:
+            anchor = self._anchor
+            rotation = yaw_quat(quat_mul(pose[..., anchor, 3:], quat_conjugate(target_pose[..., anchor, 3:])))
+            origin = torch.cat((pose[..., anchor, :2], target_pose[..., anchor, 2:3]), -1)
+            position = origin.unsqueeze(-2) + quat_rotate(rotation.unsqueeze(-2).expand_as(target[..., 3:]), target[..., :3] - target_pose[..., anchor:anchor + 1, :3])
+            orientation = quat_mul(rotation.unsqueeze(-2), target[..., 3:])
+            target = torch.cat((position, orientation), -1)
+        if self.quantity == "position":
+            error = (actual[..., :3] - target[..., :3]).square().sum(-1)
+        elif self.quantity == "orientation":
+            relative = quat_mul(actual[..., 3:], quat_conjugate(target[..., 3:]))
+            angle = 2 * torch.atan2(relative[..., :3].norm(dim=-1), relative[..., 3].abs())
+            error = angle.square()
+        else:
+            twist = physical_state[self.entity, "body_twist_w"]
+            if self.quantity == "linear_velocity":
+                com = self._com.expand_as(pose[..., :3])
+                offset = quat_rotate(pose[..., 3:], com)
+                velocity = twist[..., :3] - torch.linalg.cross(twist[..., 3:], offset)
+                target_velocity = mdp_state["reference", "body_twist_w"][..., :3]
+            else:
+                velocity = twist[..., 3:]
+                target_velocity = mdp_state["reference", "body_twist_w"][..., 3:]
+            error = (velocity.index_select(-2, self._indices) - target_velocity.index_select(-2, self._indices)).square().sum(-1)
+        return self.weight * (-error.mean(-1, keepdim=True) / self.sigma**2).exp()
+
+
+@dataclass(frozen=True)
+class JointLimit:
+    """Penalize distance outside a centered fraction of the joint ranges."""
+
+    weight: float
+    entity: str = "robot"
+    soft_limit_factor: float = 0.9
+    _lower: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
+    _upper: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        if not 0 < self.soft_limit_factor <= 1:
+            raise ValueError("soft_limit_factor must lie in (0, 1]")
+
+    @property
+    def physical_fields(self):
+        return frozenset({(self.entity, "joint_pos")})
+
+    @property
+    def range(self):
+        return _weighted_range(-self.weight)
+
+    def _initialize(self, scene):
+        import warp as wp
+
+        robot = scene.entities[self.entity]
+        lo = wp.to_torch(scene.model.joint_limit_lower)[robot.qd[0]].clone()
+        hi = wp.to_torch(scene.model.joint_limit_upper)[robot.qd[0]].clone()
+        center, half = (lo + hi) / 2, (hi - lo) * self.soft_limit_factor / 2
+        bound = replace(self)
+        object.__setattr__(bound, "_lower", center - half)
+        object.__setattr__(bound, "_upper", center + half)
+        return bound
+
+    def __call__(self, physical_state, mdp_state):
+        if self._lower is None:
+            raise RuntimeError("Bind JointLimit before evaluating it")
+        q = physical_state[self.entity, "joint_pos"]
+        return -self.weight * ((self._lower - q).relu() + (q - self._upper).relu()).sum(-1, keepdim=True)

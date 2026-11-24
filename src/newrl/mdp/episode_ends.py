@@ -47,3 +47,44 @@ class TiltTermination:
     def __call__(self, physical_state, mdp_state):
         gravity = self.gravity(physical_state, mdp_state)
         return -gravity[:, :1, 2] < self.min_upright_cosine
+
+
+@dataclass(frozen=True)
+class ClipEnd:
+    """Truncate at the last reference frame without crossing clip boundaries."""
+
+    physical_fields: ClassVar[frozenset] = frozenset()
+
+    def __call__(self, physical_state, mdp_state):
+        return mdp_state["clip_end"]
+
+
+@dataclass(frozen=True)
+class TrackingDeviation:
+    """Terminate on reference-relative root height or projected-gravity error."""
+
+    body: BodyHeight
+    quantity: str = "height"
+    threshold: float = 0.25
+
+    def __post_init__(self):
+        if self.quantity not in ("height", "tilt") or self.threshold <= 0:
+            raise ValueError("Tracking deviation requires height/tilt and a positive threshold")
+
+    @property
+    def physical_fields(self):
+        return self.body.physical_fields
+
+    def _initialize(self, scene):
+        return replace(self, body=self.body._initialize(scene))
+
+    def __call__(self, physical_state, mdp_state):
+        pose = physical_state[self.body.entity, "body_pose_w"].index_select(-2, self.body._indices)[..., 0, :]
+        target = mdp_state["reference", "root_pose"]
+        if self.quantity == "height":
+            error = (pose[..., 2:3] - target[..., 2:3]).abs()
+        else:
+            actual_z = 2 * pose[..., 3:5].square().sum(-1, keepdim=True) - 1
+            target_z = 2 * target[..., 3:5].square().sum(-1, keepdim=True) - 1
+            error = (actual_z - target_z).abs()
+        return error > self.threshold

@@ -129,6 +129,43 @@ checkpoint 250. You can omit `algo` to infer it from the checkpoint. Playback
 checks W&B on each launch and reuses downloaded files from
 `.cache/wandb-checkpoints/`.
 
+## G1 motion tracking
+
+```sh
+newrl train task=G1LAFAN1Tracking algo=ppo
+newrl play task=G1LAFAN1Tracking
+```
+
+The tracking task lazily downloads the official G1-retargeted LAFAN1 CSVs from
+[LAFAN1_Retargeting_Dataset](https://huggingface.co/datasets/lvhaidong/LAFAN1_Retargeting_Dataset)
+into `.cache/lafan1` under the NewRL checkout. It retains the upstream README
+and license beside the CSVs. The first run resamples the 30 Hz motions to the
+task control rate (50 Hz by default), computes body poses with the cooked G1
+model, and caches poses and finite-difference velocities. No mjlab installation
+is required. Processing and downloads happen when the environment is built,
+not when task presets are imported.
+
+Set `LAFAN1_DATASET=/path/to/g1` to use a local directory of official CSVs,
+one CSV file, or a processed NewRL NPZ. `task.mdp.dataset=/path/to/data` takes
+precedence over the environment variable. Processed caches are keyed by CSV
+content, model XML, frame rate, and processing version.
+
+Resets sample a clip and a nonfinal frame, including joint and root velocities.
+Reference state and per-world reset RNG are checkpointed; clip ends truncate
+without crossing into another motion. The actor receives proprioception, root
+velocity/height, and ten future root/joint targets. Rewards track body and root
+poses and world-frame link velocities, with action-rate and soft joint-limit
+penalties. Body pose rewards align reference XY/yaw to the current pelvis;
+root pose rewards retain the global reference. Rewards use the decision-time
+reference; endings and observations use the advanced reference. Reward weights
+in this preset include the default 0.02-second control interval.
+
+Physical reset targets can supply `joint_vel` and `root_twist` alongside
+`joint_pos` and `root_pose`. Omitted velocities default to zero. `root_twist`
+contains world-frame COM linear velocity followed by angular velocity, matching
+Newton's free-root DOFs. The tracking task converts link-origin motion
+velocities to this convention before resetting.
+
 ## Research projects
 
 Install NewRL in your current environment to expose the `newrl` command.

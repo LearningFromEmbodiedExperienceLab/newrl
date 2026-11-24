@@ -394,3 +394,58 @@ class HeightMapObservation(_GridObservation):
     """Terrain height and optional validity channel in CHW order."""
 
     value_field: ClassVar[str] = "height"
+
+
+@dataclass(frozen=True)
+class ReferenceMotion:
+    """Current reference root and future root/joints in the robot root frame."""
+
+    entity: str = "robot"
+    root_body: str = "pelvis"
+    goal_frames: int = 10
+    _root: int | None = field(default=None, init=False, repr=False, compare=False)
+    _joints: int | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        if self.goal_frames < 1:
+            raise ValueError("goal_frames must be positive")
+
+    @property
+    def physical_fields(self):
+        return frozenset({(self.entity, "body_pose_w")})
+
+    @property
+    def shape(self):
+        if self._joints is None:
+            raise RuntimeError("Bind ReferenceMotion before reading its shape")
+        return torch.Size((9 + self.goal_frames * (9 + self._joints),))
+
+    def _initialize(self, scene):
+        robot = scene.entities[self.entity]
+        root, = resolve_scene_names(self.root_body, robot.body_names)
+        bound = replace(self)
+        object.__setattr__(bound, "_root", root)
+        object.__setattr__(bound, "_joints", robot.q.shape[-1])
+        return bound
+
+    def __call__(self, physical_state, mdp_state):
+        from newrl.utils.math import quat_conjugate, quat_mul, quat_to_6d
+
+        if self._root is None:
+            raise RuntimeError("Bind ReferenceMotion before evaluating it")
+        root = physical_state[self.entity, "body_pose_w"][..., self._root, :]
+        reference = mdp_state["reference", "root_pose"]
+        current = torch.cat((
+            quat_rotate_inverse(root[..., 3:], reference[..., :3] - root[..., :3]),
+            quat_to_6d(quat_mul(quat_conjugate(root[..., 3:]), reference[..., 3:])),
+        ), -1)
+        future = mdp_state["future_reference"]
+        if future.batch_size[-1] != self.goal_frames:
+            raise ValueError("ReferenceMotion goal_frames differs from MotionTrackingMDP")
+        q = root[..., None, 3:].expand_as(future["root_pose"][..., 3:])
+        goals = torch.cat((
+            quat_rotate_inverse(q, future["root_pose"][..., :3] - root[..., None, :3]),
+            quat_to_6d(quat_mul(quat_conjugate(q), future["root_pose"][..., 3:])),
+            future["joint_pos"],
+        ), -1).flatten(-2)
+        return torch.cat((current, goals), -1)
