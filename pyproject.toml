@@ -13,6 +13,7 @@ dependencies = [
     "imgui_bundle>=1.92.0",
     "newton[sim,importers,onnx]",
     "pyyaml>=6.0",
+    "setproctitle>=1.3.7",
     "ovrtx>=0.7.0.1794596436",
     "ovstage>=0.4.0.1794520352",
     "pyglet>=2.1.6,<3",

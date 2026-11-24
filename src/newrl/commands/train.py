@@ -6,6 +6,7 @@ from pathlib import Path
 from secrets import token_hex
 from time import perf_counter
 
+from setproctitle import setproctitle
 import torch
 from tensordict import TensorDict
 
@@ -161,6 +162,8 @@ class EpisodeStats:
 
 @main(TrainConfig)
 def train(cfg: TrainConfig) -> None:
+    title = f"{cfg.task.name}-{cfg.algo.name}-ETA:"
+    setproctitle(f"{title}--:--:--")
     run_id = token_hex(4)
     checkpoint_dir = (
         _task_output_dir(cfg.task.name) / "checkpoints" / run_id
@@ -188,6 +191,7 @@ def train(cfg: TrainConfig) -> None:
     carry = env.reset()
     episode_stats = EpisodeStats(env.mdp.rewards)
     logger = _make_logger(cfg, run_id=run_id)
+    loop_start = perf_counter()
     try:
         for iteration in range(cfg.iterations):
             sample_memory = profiler is not None and (
@@ -243,6 +247,12 @@ def train(cfg: TrainConfig) -> None:
                 path = _save_checkpoint(checkpoint_dir, policy, cfg, completed, frames)
                 logger.save_checkpoint(path)
                 print(f"Saved checkpoint {path}", flush=True)
+            remaining = round(
+                (perf_counter() - loop_start) / completed * (cfg.iterations - completed)
+            )
+            hours, remainder = divmod(remaining, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            setproctitle(f"{title}{hours:02d}:{minutes:02d}:{seconds:02d}")
     finally:
         logger.finish()
 

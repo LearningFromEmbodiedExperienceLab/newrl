@@ -110,7 +110,6 @@ def locomotion_mdp(mdp_type: type[MDP] = MDP, base: str = "base") -> MDP:
 
 def G1MotionTracking(**overrides) -> EnvironmentConfig:
     """50 Hz G1 tracking of the official retargeted LAFAN1 library."""
-    dt = 0.02
     bodies = (
         "pelvis", "left_hip_roll_link", "left_knee_link", "left_ankle_roll_link",
         "right_hip_roll_link", "right_knee_link", "right_ankle_roll_link", "torso_link",
@@ -120,21 +119,21 @@ def G1MotionTracking(**overrides) -> EnvironmentConfig:
     mdp = locomotion_mdp(MotionTrackingMDP, base="pelvis")
     mdp.observations["command"] = ObservationGroup({"reference": ReferenceMotion()})
     mdp.rewards["tracking"] = RewardGroup({
-        "body_pos": TrackBodyMotion(dt, 0.3, "position", body_names=bodies, anchor_body="pelvis"),
-        "body_ori": TrackBodyMotion(dt, 0.4, "orientation", body_names=bodies, anchor_body="pelvis"),
-        "body_lin_vel": TrackBodyMotion(dt, 1.0, "linear_velocity", body_names=bodies),
-        "body_ang_vel": TrackBodyMotion(dt, 3.14, "angular_velocity", body_names=bodies),
-        "root_pos": TrackBodyMotion(0.5 * dt, 0.3, body_names="pelvis"),
-        "root_ori": TrackBodyMotion(0.5 * dt, 0.4, "orientation", body_names="pelvis"),
-        "action_rate": ActionRate(0.1 * dt),
-        "joint_limit": JointLimit(2.0 * dt),
+        "body_pos": TrackBodyMotion(1.0, 0.3, "position", body_names=bodies, anchor_body="pelvis"),
+        "body_ori": TrackBodyMotion(1.0, 0.4, "orientation", body_names=bodies, anchor_body="pelvis"),
+        "body_lin_vel": TrackBodyMotion(1.0, 1.0, "linear_velocity", body_names=bodies),
+        "body_ang_vel": TrackBodyMotion(1.0, 3.14, "angular_velocity", body_names=bodies),
+        "root_pos": TrackBodyMotion(0.5, 0.3, body_names="pelvis"),
+        "root_ori": TrackBodyMotion(0.5, 0.4, "orientation", body_names="pelvis"),
+        "action_rate": ActionRate(0.05),
+        "joint_limit": JointLimit(2.0),
     })
     mdp.terminations = {
         "height": TrackingDeviation(BodyHeight("robot", "pelvis")),
         "tilt": TrackingDeviation(BodyHeight("robot", "pelvis"), "tilt", 0.8),
     }
     mdp.truncations["clip_end"] = ClipEnd()
-    mdp.truncations["timeout"] = Timeout(500)
+    mdp.truncations["timeout"] = Timeout(1000)
     options = dict(num_envs=4096, robots={"robot": assetx_g1}, mdp=mdp, name="G1LAFAN1Tracking")
     options.update(overrides)
     return EnvironmentConfig(**options)

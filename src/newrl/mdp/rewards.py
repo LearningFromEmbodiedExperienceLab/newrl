@@ -352,7 +352,7 @@ class TrackBodyMotion:
 
     Position/orientation targets may be aligned to an anchor's current XY/yaw,
     retaining reference height. Velocity targets remain in the world frame.
-    Weights include any desired control-dt scaling, like other NewRL terms.
+    Weights apply directly; reward terms never scale rewards by dt.
     """
 
     weight: float

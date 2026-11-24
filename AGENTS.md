@@ -54,6 +54,10 @@ a partial reset.
 
 ## Scene, terrain, and task
 
+- Unlike mjlab or Isaac Lab, NewRL never scales rewards by `dt`. Environment
+  presets and MDP reward terms apply their configured weights directly, without
+  timestep scaling. Any reward scaling is the algorithm or trainer's
+  responsibility, for example scaling by the effective horizon.
 - Define environment presets in [configs.py](src/newrl/configs.py), robot
   asset and actuator settings in [robots.py](src/newrl/robots.py), and
   terrain geometry in [terrain.py](src/newrl/terrain.py). The scene builds

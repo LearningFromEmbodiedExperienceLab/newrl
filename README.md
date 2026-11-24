@@ -158,7 +158,8 @@ poses and world-frame link velocities, with action-rate and soft joint-limit
 penalties. Body pose rewards align reference XY/yaw to the current pelvis;
 root pose rewards retain the global reference. Rewards use the decision-time
 reference; endings and observations use the advanced reference. Reward weights
-in this preset include the default 0.02-second control interval.
+apply directly without timestep scaling. Algorithms or trainers own any reward
+scaling, for example by the effective horizon.
 
 Physical reset targets can supply `joint_vel` and `root_twist` alongside
 `joint_pos` and `root_pose`. Omitted velocities default to zero. `root_twist`
