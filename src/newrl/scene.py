@@ -1,6 +1,9 @@
 """Replicate a Newton scene and expose named robot tensors."""
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import newton
 import torch
@@ -13,6 +16,9 @@ from .sensors import Sensor
 from .terrain import Terrain, TerrainConfig
 from .utils.symmetry import SymmetryTransform
 from .utils.string import resolve_scene_names
+
+if TYPE_CHECKING:
+    from newrl.configs import EnvironmentConfig
 
 
 @dataclass
@@ -31,16 +37,59 @@ class RobotEntity:
     velocity_mask: torch.Tensor | None = None
     root_qd: torch.Tensor | None = None
 
+    def write_joint_state(
+        self, state: newton.State, env_ids: torch.Tensor | slice, *,
+        joint_pos: torch.Tensor | None = None, joint_vel: torch.Tensor | None = None,
+    ) -> None:
+        """Write selected worlds' scalar joint coordinates in entity order."""
+        if joint_pos is not None:
+            wp.to_torch(state.joint_q)[self.q[env_ids]] = joint_pos
+        if joint_vel is not None:
+            wp.to_torch(state.joint_qd)[self.qd[env_ids]] = joint_vel
+
+    def write_root_state(
+        self, state: newton.State, env_ids: torch.Tensor | slice, *,
+        root_pose: torch.Tensor | None = None, root_twist: torch.Tensor | None = None,
+    ) -> None:
+        """Write world XYZ/XYZW pose and world COM linear/angular velocity."""
+        if (root_pose is not None and self.root_q is None) or (
+            root_twist is not None and self.root_qd is None
+        ):
+            raise ValueError("Writing root state requires an entity with one free root")
+        if root_pose is not None:
+            wp.to_torch(state.joint_q)[self.root_q[env_ids]] = root_pose
+        if root_twist is not None:
+            wp.to_torch(state.joint_qd)[self.root_qd[env_ids]] = root_twist
+
+    def find_bodies(
+        self, names: str | Sequence[str], preserve_order: bool = False
+    ) -> tuple[list[int], list[str]]:
+        """Return entity-local body indices and labels matching the queries."""
+        indices = resolve_scene_names(names, self.body_names, preserve_order)
+        return indices, [self.body_names[index] for index in indices]
+
+    def find_joints(
+        self, names: str | Sequence[str], preserve_order: bool = False
+    ) -> tuple[list[int], list[str]]:
+        """Return entity-local scalar joint indices and labels matching the queries."""
+        indices = resolve_scene_names(names, self.joint_names, preserve_order)
+        return indices, [self.joint_names[index] for index in indices]
+
     def joint_symmetry_transform(self) -> SymmetryTransform:
         return SymmetryTransform.from_names(self.joint_names, self.joint_mirror)
 
     def body_symmetry_transform(
-        self, indices, component_signs: tuple[int, ...]
+        self, indices: Sequence[int], component_signs: tuple[int, ...]
     ) -> SymmetryTransform:
         labels = [self.body_names[index] for index in indices]
         return SymmetryTransform.from_names(labels, self.body_mirror, component_signs)
 
-    def read(self, state, fields, observables=None) -> TensorDict:
+    def read(
+        self,
+        state: newton.State,
+        fields: Sequence[str],
+        observables: newton.solvers.SolverMuJoCo.Observables | SimpleNamespace | None = None,
+    ) -> TensorDict:
         # Advanced indexing produces snapshots, safe across state-buffer swaps.
         sources = {
             "joint_pos": (state.joint_q, self.q),
@@ -77,7 +126,7 @@ class RobotEntity:
             device=self.q.device,
         )
 
-    def write_action(self, control, action: torch.Tensor) -> None:
+    def write_action(self, control: newton.Control, action: torch.Tensor) -> None:
         position = self.action(action, self.default_position)
         if self.velocity_mask is not None:
             position = torch.where(self.velocity_mask, self.default_position, position)
@@ -90,7 +139,7 @@ class RobotEntity:
 class Scene:
     physical_read_plan: dict[str, tuple[str, ...]]
 
-    def __init__(self, config):
+    def __init__(self, config: "EnvironmentConfig") -> None:
         self.sim_dt = config.sim_dt
         self.control_dt = config.sim_dt * config.substeps
         template = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -222,7 +271,10 @@ class Scene:
             transforms.append(transform)
         return SymmetryTransform.cat(transforms)
 
-    def resolve_physical_fields(self, requested):
+    def resolve_physical_fields(
+        self,
+        requested: Iterable[tuple[str, str]] | None,
+    ) -> dict[str, tuple[str, ...]]:
         """Validate entity fields and group them into a stable per-entity read plan."""
         supported = {
             "joint_pos",
@@ -249,7 +301,11 @@ class Scene:
             plan.setdefault(entity, []).append(field)
         return {name: tuple(fields) for name, fields in plan.items()}
 
-    def read(self, state, observables) -> TensorDict:
+    def read(
+        self,
+        state: newton.State,
+        observables: newton.solvers.SolverMuJoCo.Observables | SimpleNamespace | None,
+    ) -> TensorDict:
         values = {}
         for name, fields in self.physical_read_plan.items():
             if name in self.entities:

@@ -1,10 +1,11 @@
 """Explicit-world-model SuperMimic: real replay, model fitting and imagined actor/critic updates."""
 
 import copy
-from dataclasses import dataclass, field
-from contextlib import contextmanager
-from typing import ClassVar
 import math
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 from torch import nn
@@ -15,61 +16,102 @@ from newrl.algos.common.modules import MLP, Value
 from newrl.algos.common.normalization import EmpiricalNormalization, ReturnNormalization
 from newrl.algos.common.optimizer import build_optimizer
 from newrl.algos.common.capture import CapturedUpdate
-from newrl.mdp.base import ObservationGroup
+from newrl.mdp.base import ObservationGroup, MDP
 from newrl.mdp.observations import BodyPosition
 from newrl.utils.config import cs
 from .replay import ReplayBuffer
 from .world_models import ExplicitWorldModel
 
-from .representations import GeneralizedCoordinatesConfig
+from .representations import GeneralizedCoordinates, GeneralizedCoordinatesConfig
+
+if TYPE_CHECKING:
+    from newrl.env import StatefulEnvironment
+    from newrl.configs import EnvironmentConfig
 
 
 @dataclass
 class SuperMimicConfig:
+    # Registry identifier used to select the algorithm.
     algo_id: ClassVar[str] = 'supermimic'
+    # Display name for runs and logs.
     name: str = 'supermimic'
+    # Environment steps per world collected before each update.
     update_every: int = 4
+    # Real steps per world collected before the first replay update.
     warmup_steps: int = 32
+    # Replay capacity in control steps per world.
     buffer_steps: int = 1000
+    # Replay windows sampled for each dynamics update.
     wm_batch: int = 2048
+    # Number of transitions per autoregressive training window.
     wm_window: int = 8
+    # Dynamics optimizer steps per collection cycle.
     wm_updates: int = 10
+    # Replay states used to start each imagined rollout batch.
     imagination_batch: int = 4096
+    # Number of imagined transitions before bootstrapping.
     horizon: int = 32
+    # Hidden layer widths of the actor.
     actor_hidden: tuple[int, ...] = (512, 512, 512)
+    # Hidden layer widths of the critic.
     critic_hidden: tuple[int, ...] = (512, 256, 256)
+    # Hidden layer widths of the dynamics network.
     wm_hidden: tuple[int, ...] = (2048, 2048, 2048)
+    # Number of independently trained value heads.
     critic_heads: int = 2
+    # Passes over the imagined transitions.
     critic_epochs: int = 5
+    # Critic minibatches per epoch.
     critic_minibatches: int = 4
+    # Actor optimizer learning rate.
     actor_lr: float = 4e-4
+    # Critic optimizer learning rate.
     critic_lr: float = 4e-4
+    # Dynamics optimizer learning rate.
     wm_lr: float = 4e-4
+    # Per-step reward discount.
     gamma: float = 0.99
+    # Trace decay for imagined critic lambda returns.
     lam: float = 0.95
+    # Standard deviation of Gaussian exploration noise in real collection.
     action_noise: float = 0.1
+    # Maximum gradient norm for each optimizer update.
     grad_clip: float = 1.0
+    # Elementwise actor gradient clamp after norm clipping. Zero disables it.
     actor_grad_clip_value: float = 0.1
+    # Weight of analytic reward error in dynamics training.
     analytic_reward_loss_weight: float = 1.0
+    # Use differentiable continuation weights when available in imagination.
     soft_survival: bool = True
+    # Scale actor and critic rewards using statistics of real discounted returns.
     normalize_reward: bool = True
+    # Optimizer selection for dynamics and actor.
     optim: str = 'muon_adam'
+    # Optimizer selection for the critic ensemble.
     critic_optim: str = 'muon_adam'
+    # CUDA hidden-layer precision. BF16 preserves FP32 output heads.
     amp: str = 'bf16'
+    # Compile the CUDA dynamics prediction and forward kinematics.
     compile_world_model: bool = True
+    # Capture and replay the CUDA dynamics optimizer update.
     capture_wm_update: bool = True
+    # Capture and replay the CUDA actor and critic update.
     capture_policy_critic_update: bool = True
+    # Additional physical observations supplied to the dynamics network.
     wm_observations: dict = field(default_factory=lambda: {
         'body_pos_b': BodyPosition('robot', (
             'pelvis', 'torso_link',
             '(left|right)_(hip_roll|knee|ankle_roll|shoulder_roll|elbow|wrist_yaw)_link',
         )),
     })
+    # Physical state encoding and differentiable reconstruction for imagination.
     representation: GeneralizedCoordinatesConfig = field(default_factory=GeneralizedCoordinatesConfig)
+    # Observation groups concatenated in order for the actor.
     policy_obs_keys: tuple[str, ...] = ('proprio', 'privileged', 'command')
+    # Observation groups concatenated in order for the critic.
     critic_obs_keys: tuple[str, ...] = ('proprio', 'privileged', 'command')
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.optim not in ('adam', 'adamw', 'muon', 'muon_adam') or self.critic_optim not in ('adam', 'adamw', 'muon', 'muon_adam'):
             raise ValueError('Unknown optimizer')
         if self.amp not in ('none', 'bf16'):
@@ -92,7 +134,7 @@ class SuperMimicConfig:
             if not widths or any(type(width) is not int or width < 1 for width in widths):
                 raise ValueError('Network widths must be positive integers')
 
-    def prepare_task(self, task):
+    def prepare_task(self, task: "EnvironmentConfig") -> "EnvironmentConfig":
         """Return an independent task with representation and replay outputs."""
         task = copy.deepcopy(task)
         task.output_physical_fields = tuple(dict.fromkeys((
@@ -103,11 +145,11 @@ class SuperMimicConfig:
         )))
         return task
 
-    def build(self, env):
+    def build(self, env: "StatefulEnvironment") -> "SuperMimic":
         representation = self.representation.build(env.scene)
         dynamics = ObservationGroup(self.wm_observations)._initialize(env.scene) if self.wm_observations else None
         if dynamics is not None:
-            for term in dynamics.terms.values():
+            for _, term in dynamics.terms:
                 required = getattr(term, 'physical_fields', None)
                 if required is None or required - representation.physical_fields:
                     raise ValueError('World-model observations must declare reconstructable physical_fields')
@@ -123,7 +165,7 @@ class SuperMimicConfig:
         if missing_groups:
             raise ValueError(f'Missing learner observation groups: {sorted(missing_groups)}')
         mdp.observations = {name: mdp.observations[name] for name in used}
-        terms = [term for group in (*mdp.observations.values(), *mdp.rewards.values()) for term in group.terms.values()]
+        terms = [term for group in (*mdp.observations.values(), *mdp.rewards.values()) for _, term in group.terms]
         terms.extend((*mdp.terminations.values(), *mdp.truncations.values()))
         histories = set().union(*(set(getattr(term, 'state_history', {})) for term in terms))
         mdp._history = {name: reader for name, reader in mdp._history.items() if name in histories}
@@ -147,7 +189,7 @@ cs.store(SuperMimicConfig.algo_id, SuperMimicConfig(), group='algo')
 
 
 @contextmanager
-def _frozen(*modules):
+def _frozen(*modules: nn.Module) -> Iterator[None]:
     parameters = [(parameter, parameter.requires_grad) for module in modules for parameter in module.parameters()]
     try:
         for parameter, _ in parameters:
@@ -158,7 +200,13 @@ def _frozen(*modules):
             parameter.requires_grad_(requires_grad)
 
 
-def lambda_returns(reward, continuation, values, gamma, lam):
+def lambda_returns(
+    reward: torch.Tensor,
+    continuation: torch.Tensor,
+    values: torch.Tensor,
+    gamma: float,
+    lam: float,
+) -> torch.Tensor:
     """Detached critic targets; truncations retain bootstrap, falls remove it."""
     target = values[:, -1]
     targets = []
@@ -175,7 +223,7 @@ class RewardNormalization(ReturnNormalization):
     bounds, without timestep scaling. A nonpositive task bound falls back to one.
     """
 
-    def __init__(self, gamma, max_step_reward):
+    def __init__(self, gamma: float, max_step_reward: float) -> None:
         super().__init__(gamma)
         if not math.isfinite(max_step_reward) or max_step_reward <= 0:
             raise ValueError('Reward normalization requires a finite positive reward bound')
@@ -184,7 +232,7 @@ class RewardNormalization(ReturnNormalization):
         self.register_buffer('max_return', torch.zeros(()))
 
     @torch.no_grad()
-    def update(self, reward, done):
+    def update(self, reward: torch.Tensor, done: torch.Tensor) -> None:
         previous = self.returns
         values = self._advance(reward, done)
         # Capture reads stable module storage across real collection calls.
@@ -196,7 +244,7 @@ class RewardNormalization(ReturnNormalization):
         self.count.add_(values.numel())
         self.max_return.copy_(torch.maximum(self.max_return, values.abs().max()))
 
-    def scale(self):
+    def scale(self) -> torch.Tensor:
         count = self.count.clamp_min(1)
         variance = (self.square_sum / count - (self.sum / count).square()).clamp_min(0)
         return torch.maximum((variance + self.eps).sqrt(),
@@ -204,7 +252,15 @@ class RewardNormalization(ReturnNormalization):
 
 
 class SuperMimic(nn.Module):
-    def __init__(self, config, mdp, representation, device, action_dim, dynamics):
+    def __init__(
+        self,
+        config: SuperMimicConfig,
+        mdp: MDP,
+        representation: GeneralizedCoordinates,
+        device: torch.device | str,
+        action_dim: int,
+        dynamics: ObservationGroup | None,
+    ) -> None:
         super().__init__()
         self.config, self.mdp = config, mdp
         self.device = torch.device(device)
@@ -225,7 +281,7 @@ class SuperMimic(nn.Module):
             nn.init.zeros_(critic.head.weight)
             nn.init.zeros_(critic.head.bias)
         self.wm = ExplicitWorldModel(representation, action_dim, config.wm_hidden, dynamics, config.amp)
-        reward_bound = sum(max(term.range[1], 0.) for group in mdp.rewards.values() for term in group.terms.values())
+        reward_bound = sum(max(term.range[1], 0.) for group in mdp.rewards.values() for _, term in group.terms)
         self.return_norm = RewardNormalization(config.gamma, reward_bound if config.normalize_reward and reward_bound > 0 else 1.)
         self.to(self.device)
         capture_wm = config.capture_wm_update and self.device.type == 'cuda'
@@ -247,10 +303,10 @@ class SuperMimic(nn.Module):
                                             label='policy/critic')
 
     @property
-    def representation(self):
+    def representation(self) -> GeneralizedCoordinates:
         return self.wm.representation
 
-    def actor_action(self, observation):
+    def actor_action(self, observation: TensorDict) -> torch.Tensor:
         features = self.actor_norm.normalize(stack_groups(observation, self.config.policy_obs_keys))
         with torch.autocast(features.device.type, dtype=torch.bfloat16,
                             enabled=self.config.amp == 'bf16' and features.is_cuda):
@@ -258,7 +314,7 @@ class SuperMimic(nn.Module):
         with torch.autocast(features.device.type, enabled=False):
             return self.actor[-1](hidden.float())
 
-    def value(self, observation):
+    def value(self, observation: TensorDict) -> torch.Tensor:
         features = self.critic_norm.normalize(stack_groups(observation, self.config.critic_obs_keys))
         with torch.autocast(features.device.type, dtype=torch.bfloat16,
                             enabled=self.config.amp == 'bf16' and features.is_cuda):
@@ -267,7 +323,7 @@ class SuperMimic(nn.Module):
             return torch.cat([critic.head(value.float()) for critic, value in zip(self.critics, hidden, strict=True)], -1)
 
     @torch.no_grad()
-    def act(self, tensordict, *, deterministic=False):
+    def act(self, tensordict: TensorDict, *, deterministic: bool = False) -> TensorDict:
         action = self.actor_action(tensordict['observation'])
         if not deterministic:
             action = action + self.config.action_noise * torch.randn_like(action)
@@ -275,7 +331,12 @@ class SuperMimic(nn.Module):
         return tensordict
 
     @torch.no_grad()
-    def collect(self, env, steps, carry=None):
+    def collect(
+        self,
+        env: "StatefulEnvironment",
+        steps: int,
+        carry: TensorDict | None = None,
+    ) -> tuple[TensorDict, TensorDict]:
         if steps < 1:
             raise ValueError('Collection steps must be positive')
         if self.replay is None:
@@ -320,7 +381,7 @@ class SuperMimic(nn.Module):
             self.return_norm.update(raw, batch['done'])
         return batch, carry
 
-    def update_world_model(self):
+    def update_world_model(self) -> dict[str, float]:
         cfg = self.config
         rows = []
         for _ in range(cfg.wm_updates):
@@ -329,7 +390,7 @@ class SuperMimic(nn.Module):
             self.wm_steps += 1
         return {key: value.item() for key, value in torch.stack(rows).mean(0).items()}
 
-    def _update_world_model_batch(self, batch):
+    def _update_world_model_batch(self, batch: TensorDict) -> TensorDict:
         cfg = self.config
         action = torch.where(batch['valid'], batch['action'], 0.)
         prediction = self.wm.rollout(self.mdp, batch['state'][:, 0], batch['mdp_state'][:, 0], action)
@@ -346,7 +407,12 @@ class SuperMimic(nn.Module):
         return TensorDict({'wm/loss':loss.detach(), 'wm/state_loss':state_loss.detach(),
                            'wm/reward_loss':reward_loss.detach(), 'wm/grad_norm':norm.detach()}, [])
 
-    def imagine(self, state, memory, horizon=None):
+    def imagine(
+        self,
+        state: TensorDict,
+        memory: TensorDict,
+        horizon: int | None = None,
+    ) -> TensorDict:
         horizon = self.config.horizon if horizon is None else horizon
         if horizon < 1:
             raise ValueError('Imagination horizon must be positive')
@@ -365,14 +431,14 @@ class SuperMimic(nn.Module):
             continuations.append(continuation)
         return TensorDict({'observation':torch.stack(observations,1), 'reward':torch.stack(rewards,1), 'continuation':torch.stack(continuations,1)}, batch_size=state.batch_size)
 
-    def update_actor_critic(self):
+    def update_actor_critic(self) -> dict[str, float]:
         cfg = self.config
         start = self.replay.sample_starts(cfg.imagination_batch, horizon=cfg.horizon, motion=getattr(self.mdp,'_motion',None))
         metrics = self._policy_update(start['state'], start['mdp_state'])
         self.policy_steps += 1
         return {key: value.item() for key, value in metrics.items()}
 
-    def _update_policy_critic_batch(self, state, memory):
+    def _update_policy_critic_batch(self, state: TensorDict, memory: TensorDict) -> TensorDict:
         cfg = self.config
         capture = self._policy_update.enabled
         self.opt_wm.zero_grad(set_to_none=True)
@@ -419,11 +485,11 @@ class SuperMimic(nn.Module):
             'imagination/survival':alive.detach().mean(), 'reward/scale':scale.detach(),
         }, [])
 
-    def training_state_dict(self):
+    def training_state_dict(self) -> dict[str, Any]:
         return {'policy':self.state_dict(), 'optimizers':{'world_model':self.opt_wm.state_dict(), 'actor':self.opt_actor.state_dict(), 'critic':self.opt_critic.state_dict()},
                 'learner_updates':{'world_model':self.wm_steps,'policy':self.policy_steps}}
 
-    def load_training_state_dict(self, state):
+    def load_training_state_dict(self, state: dict[str, Any]) -> None:
         self.load_state_dict(state['policy'])
         for name, optimizer in (('world_model',self.opt_wm),('actor',self.opt_actor),('critic',self.opt_critic)):
             optimizer.load_state_dict(state['optimizers'][name])

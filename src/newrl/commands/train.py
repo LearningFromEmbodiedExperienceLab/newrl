@@ -37,7 +37,7 @@ class TrainConfig:
     memory_profile_warmup: int = 2
     discard_unused_obs: bool = True
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.checkpoint_interval < 0:
             raise ValueError("checkpoint_interval must be non-negative")
         if self.memory_profile_iters < 0 or self.memory_profile_warmup < 0:
@@ -104,7 +104,7 @@ def _save_checkpoint(
 class EpisodeStats:
     """Carry episode returns across rollouts and report causes for completed episodes."""
 
-    def __init__(self, reward_groups: dict[str, RewardGroup]):
+    def __init__(self, reward_groups: dict[str, RewardGroup]) -> None:
         self.reward_groups = reward_groups
         self.returns: torch.Tensor | None = None
         self.completed_episodes = 0

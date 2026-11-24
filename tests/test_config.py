@@ -33,6 +33,39 @@ class _Holder:
 
 
 class ConfigTests(unittest.TestCase):
+    def test_term_group_config_preserves_order_and_named_overrides(self):
+        from newrl.configs import EnvironmentConfig
+        from newrl.mdp.base import MDP, ObservationGroup, RewardGroup
+        from newrl.mdp.observations import PreviousAction
+        from newrl.mdp.rewards import ActionRate, Survival
+        from newrl.utils.config import dump, load, resolve
+
+        terms = {"survival": Survival(1.0), "action_rate": ActionRate(0.1)}
+        reward = RewardGroup(terms)
+        terms.clear()
+        self.assertEqual(reward.keys, ("survival", "action_rate"))
+        self.assertIsInstance(reward.terms, tuple)
+        saved = dump(reward)
+        saved["fields"]["terms"] = dump(dict(reward.terms))
+        self.assertEqual(load(saved), reward)
+        self.assertEqual(load(dump(reward)), reward)
+
+        task = EnvironmentConfig(mdp=MDP(
+            observations={"proprio": ObservationGroup((("action", PreviousAction()),))},
+            rewards={"regularization": reward},
+        ))
+        @dataclass
+        class Config:
+            task: EnvironmentConfig | None = None
+
+        updated = resolve(
+            Config, ["task.mdp.rewards.regularization.terms.action_rate.weight=0.2"],
+            defaults={"task": task},
+        )
+        updated_reward = updated.task.mdp.rewards["regularization"]
+        self.assertEqual(updated_reward.keys, reward.keys)
+        self.assertEqual(dict(updated_reward.terms)["action_rate"].weight, 0.2)
+
     def test_unknown_presets_report_the_group_and_available_choices(self):
         from newrl.commands.play import PlayConfig
         from newrl.utils.config import resolve

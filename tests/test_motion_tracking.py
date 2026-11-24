@@ -19,6 +19,7 @@ from newrl.mdp.episode_ends import ClipEnd
 from newrl.mdp.motion_tracking import MotionTrackingMDP
 from newrl.mdp.observations import ReferenceMotion
 from newrl.mdp.rewards import ActionRate, TrackBodyMotion
+from newrl.scene import RobotEntity
 from newrl.utils.math import quat_rotate
 
 
@@ -51,7 +52,8 @@ class MotionTrackingTests(unittest.TestCase):
 
     def scene(self):
         joints, bodies = len(JOINT_NAMES), len(self.motion.body_names)
-        robot = SimpleNamespace(
+        robot = RobotEntity(
+            targets=None, default_position=None, action=None,
             joint_names=JOINT_NAMES, body_names=self.motion.body_names,
             q=torch.arange(joints).expand(2, -1), qd=torch.arange(joints).expand(2, -1),
             root_q=torch.arange(7).expand(2, -1), root_qd=torch.arange(6).expand(2, -1),

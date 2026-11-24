@@ -1,5 +1,9 @@
 """Batched pinhole depth camera."""
 
+import newton
+
+from typing import TYPE_CHECKING
+
 from dataclasses import dataclass
 from math import isfinite, pi
 
@@ -8,8 +12,11 @@ import warp as wp
 from newton.sensors import SensorCamera
 from tensordict import TensorDict
 
-from ..utils.string import resolve_scene_names
 from .camera import camera_refresh_mask
+
+if TYPE_CHECKING:
+    from newrl.scene import Scene
+    from newrl.scene import RobotEntity
 
 _MIN_FP16_DEPTH = wp.constant(2.0 ** -24)
 
@@ -35,7 +42,7 @@ class DepthCameraConfig:
     max_depth: float = 8.0
     update_every: int = 1  # Control steps between frames.
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not all(
             len(offset) == 3 and all(map(isfinite, offset))
             for offset in (self.pos, self.rpy)
@@ -48,7 +55,7 @@ class DepthCameraConfig:
         if type(self.update_every) is not int or self.update_every < 1:
             raise ValueError("Camera update_every must be a positive integer")
 
-    def build(self, scene):
+    def build(self, scene: "Scene") -> "DepthCamera":
         return DepthCamera(self, scene.entities[self.entity], scene.model)
 
 
@@ -58,7 +65,7 @@ def _camera_poses(
     bodies: wp.array[wp.int32],
     mount: wp.transform,
     poses: wp.array[wp.transform],
-):
+) -> None:
     world = wp.tid()
     poses[world] = body_q[bodies[world]] * mount
 
@@ -69,7 +76,7 @@ def _store_depth(
     world_indices: wp.array[wp.int32],
     max_depth: float,
     depth: wp.array3d[wp.float16],
-):
+) -> None:
     world, row, col = wp.tid()
     if world_indices[world] < 0:
         return
@@ -85,10 +92,15 @@ class DepthCamera:
     fields = ("depth", "valid")
     requires_bvh_refit = True
 
-    def __init__(self, config, entity, model):
+    def __init__(
+        self,
+        config: DepthCameraConfig,
+        entity: "RobotEntity",
+        model: newton.Model,
+    ) -> None:
         self.config = config
         self.model = model
-        (body,) = resolve_scene_names(config.body, entity.body_names)
+        (body,), _ = entity.find_bodies(config.body)
         self.body_ids = entity.bodies[:, body]
         self._bodies = wp.from_torch(self.body_ids.to(torch.int32), dtype=wp.int32)
         self.shape = torch.Size((config.height, config.width))
@@ -97,7 +109,7 @@ class DepthCamera:
         rotation = wp.quat_rpy(*map(float, config.rpy))
         self.mount_transform = wp.transform(config.pos, rotation * optical)
 
-    def initialize(self, scene):
+    def initialize(self, scene: "Scene") -> None:
         config = self.config
         device = self.model.device
         worlds = self.model.world_count
@@ -115,7 +127,13 @@ class DepthCamera:
             else None
         )
 
-    def sample(self, state, *, reset=False, reset_mask=None):
+    def sample(
+        self,
+        state: newton.State,
+        *,
+        reset: bool = False,
+        reset_mask: torch.Tensor | None = None,
+    ) -> None:
         """Refresh due worlds or the worlds selected for an immediate reset frame."""
         due = camera_refresh_mask(
             self._steps_until_refresh, self.config.update_every,
@@ -150,7 +168,7 @@ class DepthCamera:
             device=self.model.device,
         )
 
-    def checkpoint_views(self):
+    def checkpoint_views(self) -> dict[str, torch.Tensor]:
         views = {"depth": self._depth_view}
         if self._steps_until_refresh is not None:
             views["steps_until_refresh"] = self._steps_until_refresh.unsqueeze(-1)
@@ -160,7 +178,7 @@ class DepthCamera:
         """Return a view of one world's latest cached depth in meters."""
         return self._depth_view[world]
 
-    def read(self, state, fields):
+    def read(self, state: newton.State, fields: tuple[str, ...]) -> TensorDict:
         values = {}
         if "depth" in fields:
             values["depth"] = self._depth_view.clone()

@@ -1,12 +1,16 @@
+from tensordict import TensorDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, Self, TYPE_CHECKING
 
 import torch
 
+from newrl.utils.config import runtime_field
 from newrl.utils.math import quat_rotate_inverse, yaw_rotate
-from newrl.utils.string import resolve_scene_names
 from newrl.utils.symmetry import SymmetryTransform
+
+if TYPE_CHECKING:
+    from newrl.scene import Scene
 
 
 _POLAR_SIGNS = (1, -1, 1)
@@ -20,16 +24,14 @@ class EntityField:
     joint_names: str | Sequence[str] | None = field(default=None, kw_only=True)
     body_names: str | Sequence[str] | None = field(default=None, kw_only=True)
     preserve_order: bool = field(default=False, kw_only=True)
-    _indices: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
-    _shape: torch.Size | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
+    _indices: torch.Tensor | None = runtime_field()
+    _shape: torch.Size | None = runtime_field()
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return frozenset({(self.entity, self.field)})
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         entity = scene.entities[self.entity]
         shapes = {
             "joint_pos": entity.q.shape[1:],
@@ -38,7 +40,7 @@ class EntityField:
             "body_pose_w": torch.Size((len(entity.body_names), 7)),
             "body_twist_w": torch.Size((len(entity.body_names), 6)),
         }
-        bound = replace(self)
+        indices = None
         shape = shapes[self.field]
         if self.joint_names is not None and not self.field.startswith('joint_'):
             raise ValueError('joint_names requires a joint field')
@@ -47,13 +49,11 @@ class EntityField:
         names = self.joint_names if self.field.startswith('joint_') else self.body_names
         if names is not None:
             joint = self.field.startswith('joint_')
-            labels = entity.joint_names if joint else entity.body_names
-            selected = resolve_scene_names(names, labels, self.preserve_order)
+            find = entity.find_joints if joint else entity.find_bodies
+            selected, _ = find(names, self.preserve_order)
             indices = torch.tensor(selected, device=(entity.q if joint else entity.bodies).device, dtype=torch.long)
-            object.__setattr__(bound, '_indices', indices)
             shape = torch.Size((len(selected), *shape[1:]))
-        object.__setattr__(bound, "_shape", shape)
-        return bound
+        return replace(self, _shape=shape, _indices=indices)
 
     @property
     def shape(self) -> torch.Size:
@@ -64,13 +64,13 @@ class EntityField:
             )
         return self._shape
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         values = physical_state[self.entity, self.field]
         if self._indices is None:
             return values
         return values.index_select(-1 if self.field.startswith('joint_') else -2, self._indices)
 
-    def symmetry_transform(self, scene) -> SymmetryTransform:
+    def symmetry_transform(self, scene: "Scene") -> SymmetryTransform:
         if self.field not in ("joint_pos", "joint_vel", "joint_torque"):
             raise ValueError(f"No reflection defined for entity field {self.field!r}")
         entity = scene.entities[self.entity]
@@ -83,14 +83,10 @@ class EntityField:
 @dataclass(frozen=True)
 class PreviousAction:
     physical_fields: ClassVar[frozenset] = frozenset()
-    _size: int | None = field(default=None, init=False, repr=False, compare=False)
+    _size: int | None = runtime_field()
 
-    def _initialize(self, scene):
-        bound = replace(self)
-        object.__setattr__(
-            bound, "_size", sum(entity.q.shape[1] for entity in scene.entities.values())
-        )
-        return bound
+    def _initialize(self, scene: "Scene") -> Self:
+        return replace(self, _size=sum(entity.q.shape[1] for entity in scene.entities.values()))
 
     @property
     def shape(self) -> torch.Size:
@@ -100,10 +96,10 @@ class PreviousAction:
             )
         return torch.Size((self._size,))
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         return mdp_state["previous_action"]
 
-    def symmetry_transform(self, scene) -> SymmetryTransform:
+    def symmetry_transform(self, scene: "Scene") -> SymmetryTransform:
         return scene.action_symmetry_transform()
 
 
@@ -121,12 +117,8 @@ class _BodyObservation:
     entity: str
     body_names: str | Sequence[str]
     preserve_order: bool = field(default=False, kw_only=True)
-    _indices: torch.Tensor | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
-    _body_indices: tuple[int, ...] = field(
-        default=(), init=False, repr=False, compare=False
-    )
+    _indices: torch.Tensor | None = runtime_field()
+    _body_indices: tuple[int, ...] = runtime_field(())
     _components: ClassVar[tuple[int, ...]] = (3,)
     _mirror_signs: ClassVar[tuple[int, ...] | None] = None
 
@@ -138,7 +130,7 @@ class _BodyObservation:
             )
         return torch.Size((self._indices.numel(), *self._components))
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         entity = scene.entities[self.entity]
         names = (
             (self.body_names,) if isinstance(self.body_names, str) else self.body_names
@@ -146,20 +138,17 @@ class _BodyObservation:
         if not names:
             raise ValueError(f"Empty body selection for {self.entity!r}")
         try:
-            selected = resolve_scene_names(names, entity.body_names, self.preserve_order)
+            selected, _ = entity.find_bodies(names, self.preserve_order)
         except ValueError as exc:
             raise ValueError(f"Invalid body selection {names!r} on {self.entity!r}: {exc}") from exc
 
-        bound = replace(self)
         body_indices = tuple(selected)
         indices = torch.tensor(
             body_indices, device=entity.bodies.device, dtype=torch.long
         )
-        object.__setattr__(bound, "_body_indices", body_indices)
-        object.__setattr__(bound, "_indices", indices)
-        return bound
+        return replace(self, _body_indices=body_indices, _indices=indices)
 
-    def _read(self, physical_state, field_name: str) -> torch.Tensor:
+    def _read(self, physical_state: TensorDict, field_name: str) -> torch.Tensor:
         if self._indices is None:
             raise RuntimeError(
                 "Initialize body observations against a scene before evaluation"
@@ -168,7 +157,7 @@ class _BodyObservation:
             physical_state.ndim, self._indices
         )
 
-    def symmetry_transform(self, scene) -> SymmetryTransform:
+    def symmetry_transform(self, scene: "Scene") -> SymmetryTransform:
         if self._mirror_signs is None:
             raise ValueError(f"No reflection defined for {type(self).__name__}")
         return scene.entities[self.entity].body_symmetry_transform(
@@ -180,18 +169,18 @@ class _BodyObservation:
 class _BodyVelocity(_BodyObservation):
     frame: Literal["world", "body", "yaw"] = "world"
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.frame not in ("world", "body", "yaw"):
             raise ValueError(f"Unknown velocity frame {self.frame!r}")
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         fields = {(self.entity, "body_twist_w")}
         if self.frame != "world":
             fields.add((self.entity, "body_pose_w"))
         return frozenset(fields)
 
-    def _velocity(self, physical_state, components: slice) -> torch.Tensor:
+    def _velocity(self, physical_state: TensorDict, components: slice) -> torch.Tensor:
         vector = self._read(physical_state, "body_twist_w")[..., components]
         if self.frame == "world":
             return vector
@@ -206,14 +195,14 @@ class _BodyVelocity(_BodyObservation):
 class BodyLinearVelocity(_BodyVelocity):
     _mirror_signs = _POLAR_SIGNS
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         return self._velocity(physical_state, slice(0, 3))
 
 
 class BodyAngularVelocity(_BodyVelocity):
     _mirror_signs = _AXIAL_SIGNS
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         return self._velocity(physical_state, slice(3, 6))
 
 
@@ -221,10 +210,10 @@ class ProjectedGravity(_BodyObservation):
     _mirror_signs = _POLAR_SIGNS
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return frozenset({(self.entity, "projected_gravity")})
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         return self._read(physical_state, "projected_gravity")
 
 
@@ -233,10 +222,10 @@ class BodyHeight(_BodyObservation):
     _mirror_signs = (1,)
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return frozenset({(self.entity, "body_pose_w")})
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         return self._read(physical_state, "body_pose_w")[..., 2]
 
 
@@ -245,20 +234,19 @@ class BodyPosition(_BodyObservation):
     """Selected body origins expressed relative to a root in its full frame."""
 
     root_body: str = "pelvis"
-    _root: int | None = field(default=None, init=False, repr=False, compare=False)
+    _root: int | None = runtime_field()
     _mirror_signs = _POLAR_SIGNS
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return frozenset({(self.entity, "body_pose_w")})
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         bound = super()._initialize(scene)
-        root, = resolve_scene_names(self.root_body, scene.entities[self.entity].body_names)
-        object.__setattr__(bound, '_root', root)
-        return bound
+        (root,), _ = scene.entities[self.entity].find_bodies(self.root_body)
+        return replace(bound, _root=root)
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         pose = self._read(physical_state, "body_pose_w")
         root = physical_state[self.entity, 'body_pose_w'][..., self._root, :]
         return quat_rotate_inverse(
@@ -275,10 +263,10 @@ class VelocityCommandObservation:
     def shape(self) -> torch.Size:
         return torch.Size((3,))
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         return mdp_state["velocity_command"]
 
-    def symmetry_transform(self, scene) -> SymmetryTransform:
+    def symmetry_transform(self, scene: "Scene") -> SymmetryTransform:
         return SymmetryTransform((0, 1, 2), (1, -1, -1))
 
 
@@ -290,9 +278,7 @@ class ContactObservation:
     """Read a configured contact sensor field as floating-point features."""
 
     sensor: str
-    _shape: torch.Size | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
+    _shape: torch.Size | None = runtime_field()
     field: Literal[
         "loaded",
         "force_w",
@@ -304,7 +290,7 @@ class ContactObservation:
     ] = "loaded"
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return frozenset({(self.sensor, self.field)})
 
     @property
@@ -315,28 +301,19 @@ class ContactObservation:
             )
         return self._shape
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         scene.resolve_physical_fields(self.physical_fields)
         count = scene.sensors[self.sensor].body_ids.shape[1]
-        bound = replace(self)
-        object.__setattr__(
-            bound,
-            "_shape",
-            torch.Size(
-                (count, 3)
-                if self.field in ("force_w", "last_contact_pos_w")
-                else (count,)
-            ),
-        )
-        return bound
+        shape = (count, 3) if self.field in ("force_w", "last_contact_pos_w") else (count,)
+        return replace(self, _shape=torch.Size(shape))
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         return physical_state[self.sensor, self.field].float()
 
-    def symmetry_transform(self, scene) -> SymmetryTransform:
+    def symmetry_transform(self, scene: "Scene") -> SymmetryTransform:
         sensor = scene.sensors[self.sensor]
         entity = scene.entities[sensor.config.entity]
-        indices = resolve_scene_names(sensor.config.body_names, entity.body_names)
+        indices, _ = entity.find_bodies(sensor.config.body_names)
         signs = _POLAR_SIGNS if self.field in ("force_w", "last_contact_pos_w") else (1,)
         return entity.body_symmetry_transform(indices, signs)
 
@@ -345,13 +322,11 @@ class ContactObservation:
 class _GridObservation:
     sensor: str
     include_valid: bool = True
-    _grid_shape: torch.Size | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
+    _grid_shape: torch.Size | None = runtime_field()
     value_field: ClassVar[str]
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         fields = {(self.sensor, self.value_field)}
         if self.include_valid:
             fields.add((self.sensor, "valid"))
@@ -363,26 +338,22 @@ class _GridObservation:
             raise RuntimeError("Bind the grid observation to a scene before reading its shape")
         return torch.Size((2 if self.include_valid else 1, *self._grid_shape))
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         scene.resolve_physical_fields(self.physical_fields)
-        bound = replace(self)
-        object.__setattr__(
-            bound, "_grid_shape", scene.sensors[self.sensor].shape
-        )
-        return bound
+        return replace(self, _grid_shape=scene.sensors[self.sensor].shape)
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         values = physical_state[self.sensor, self.value_field]
         if self.include_valid:
             valid = physical_state[self.sensor, "valid"].to(values.dtype)
             return torch.stack((values, valid), dim=-3)
         return values.unsqueeze(-3)
 
-    def symmetry_transform(self, scene) -> SymmetryTransform:
+    def symmetry_transform(self, scene: "Scene") -> SymmetryTransform:
         sensor = scene.sensors[self.sensor]
         config = sensor.config
         entity = scene.entities[config.entity]
-        indices = resolve_scene_names(config.body, entity.body_names)
+        indices, _ = entity.find_bodies(config.body)
         entity.body_symmetry_transform(indices, (1,))
         permutation = torch.arange(self.shape.numel()).reshape(self.shape).flip(-1)
         return SymmetryTransform(permutation.flatten().tolist(), (1,) * permutation.numel())
@@ -394,7 +365,7 @@ class DepthCameraObservation(_GridObservation):
 
     value_field: ClassVar[str] = "depth"
 
-    def symmetry_transform(self, scene) -> SymmetryTransform:
+    def symmetry_transform(self, scene: "Scene") -> SymmetryTransform:
         config = scene.sensors[self.sensor].config
         roll, _, yaw = config.rpy
         if any(abs(value) > 1e-7 for value in (config.pos[1], roll, yaw)):
@@ -407,10 +378,10 @@ class RGBCameraObservation:
     """Camera RGB in uint8 CHW order before observation grouping."""
 
     sensor: str
-    _shape: torch.Size | None = field(default=None, init=False, repr=False, compare=False)
+    _shape: torch.Size | None = runtime_field()
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return frozenset({(self.sensor, "rgb")})
 
     @property
@@ -419,23 +390,21 @@ class RGBCameraObservation:
             raise RuntimeError("Bind the RGB observation to a scene before reading its shape")
         return self._shape
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         scene.resolve_physical_fields(self.physical_fields)
-        bound = replace(self)
-        object.__setattr__(bound, "_shape", torch.Size((3, *scene.sensors[self.sensor].shape)))
-        return bound
+        return replace(self, _shape=torch.Size((3, *scene.sensors[self.sensor].shape)))
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         return physical_state[self.sensor, "rgb"].movedim(-1, -3)
 
-    def symmetry_transform(self, scene) -> SymmetryTransform:
+    def symmetry_transform(self, scene: "Scene") -> SymmetryTransform:
         sensor = scene.sensors[self.sensor]
         config = sensor.config
         roll, _, yaw = config.rpy
         if any(abs(value) > 1e-7 for value in (config.pos[1], roll, yaw)):
             raise ValueError("RGB mirroring requires a centered camera with zero roll and yaw")
         entity = scene.entities[config.entity]
-        indices = resolve_scene_names(config.body, entity.body_names)
+        indices, _ = entity.find_bodies(config.body)
         entity.body_symmetry_transform(indices, (1,))
         permutation = torch.arange(self.shape.numel()).reshape(self.shape).flip(-1)
         return SymmetryTransform(permutation.flatten().tolist(), (1,) * permutation.numel())
@@ -455,32 +424,29 @@ class ReferenceMotion:
     entity: str = "robot"
     root_body: str = "pelvis"
     goal_frames: int = 10
-    _root: int | None = field(default=None, init=False, repr=False, compare=False)
-    _joints: int | None = field(default=None, init=False, repr=False, compare=False)
+    _root: int | None = runtime_field()
+    _joints: int | None = runtime_field()
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.goal_frames < 1:
             raise ValueError("goal_frames must be positive")
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return frozenset({(self.entity, "body_pose_w")})
 
     @property
-    def shape(self):
+    def shape(self) -> torch.Size:
         if self._joints is None:
             raise RuntimeError("Bind ReferenceMotion before reading its shape")
         return torch.Size((9 + self.goal_frames * (9 + self._joints),))
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         robot = scene.entities[self.entity]
-        root, = resolve_scene_names(self.root_body, robot.body_names)
-        bound = replace(self)
-        object.__setattr__(bound, "_root", root)
-        object.__setattr__(bound, "_joints", robot.q.shape[-1])
-        return bound
+        (root,), _ = robot.find_bodies(self.root_body)
+        return replace(self, _root=root, _joints=robot.q.shape[-1])
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         from newrl.utils.math import quat_conjugate, quat_mul, quat_to_6d
 
         if self._root is None:

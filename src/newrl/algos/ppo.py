@@ -5,7 +5,7 @@ The batch schema lives in ``algos.common.batch``. The trainer owns collection.
 
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, TYPE_CHECKING
 
 import torch
 from tensordict import TensorDict
@@ -33,6 +33,9 @@ from .common.policy_evaluation import clip_bounds, generalized_advantage
 from newrl.utils.config import cs  # noqa: E402
 from newrl.utils.profiling import StageProfiler
 
+if TYPE_CHECKING:
+    from newrl.env import StatefulEnvironment
+
 _ACTIVATIONS = {
     "mish": nn.Mish,
     "relu": nn.ReLU,
@@ -43,33 +46,57 @@ _ACTIVATIONS = {
 
 @dataclass
 class PPOConfig:
+    # Registry identifier used to select the algorithm.
     algo_id: ClassVar[str] = "ppo"
+    # Display name for runs and logs.
     name: str = "ppo"
+    # Environment steps per world collected before each update.
     update_every: int = 32
+    # Passes over the rollout per update.
     num_epochs: int = 2
+    # Minibatches per epoch.
     num_minibatches: int = 8
+    # Learning rate for the actor and critic optimizer.
     lr: float = 5e-4
+    # Optimizer weight decay.
     weight_decay: float = 0.01
+    # Use Muon for eligible matrices and AdamW for the remaining parameters.
     muon: bool = False
+    # Per-step reward discount.
     gamma: float = 0.99
+    # Generalized advantage estimation trace decay.
     lam: float = 0.95
+    # Ratio clip around one, as a symmetric width or (lower, upper) widths.
     clip_eps: float | tuple[float, float] = 0.2
+    # Coefficient of the entropy bonus in the actor loss.
     entropy_coef: float = 0.002
+    # Weight of the critic regression loss.
     value_coef: float = 1.0
+    # Maximum gradient norm, applied separately to actor and critic.
     max_grad_norm: float = 1.0
+    # Floor the summed per-step reward at zero before computing returns.
     clamp_reward: bool = False
+    # Scale rewards by the RMS of real discounted returns.
     normalize_reward: bool = False
+    # Hidden layer widths of the actor.
     actor_hidden: tuple[int, ...] = (512, 512, 256)
+    # Hidden layer widths of the critic.
     critic_hidden: tuple[int, ...] = (512, 512, 256)
+    # Hidden layer activation name.
     activation: str = "mish"
+    # Lower bound on the Gaussian standard deviation.
     min_std: float = 1e-2
+    # Upper bound on the Gaussian standard deviation.
     max_std: float = 1.0
 
+    # Observation groups concatenated in order for the actor.
     policy_obs_keys: tuple[str, ...] = ("proprio", "privileged", "command")
+    # Observation groups concatenated in order for the critic.
     critic_obs_keys: tuple[str, ...] = ("proprio", "privileged", "command")
+    # Collect timing metrics for the learner update.
     profile: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.update_every < 1 or self.num_epochs < 1 or self.num_minibatches < 1:
             raise ValueError(
                 "update_every, num_epochs, and num_minibatches must be positive"
@@ -82,7 +109,7 @@ class PPOConfig:
             )
         clip_bounds(self.clip_eps)
 
-    def build(self, env) -> "PPO":
+    def build(self, env: "StatefulEnvironment") -> "PPO":
         return PPO(
             self,
             policy_dim=group_width(env.mdp, self.policy_obs_keys),
@@ -102,7 +129,7 @@ class PPO(nn.Module):
         policy_dim: int,
         critic_dim: int,
         action_dim: int,
-    ):
+    ) -> None:
         super().__init__()
         self.cfg = cfg
         activation = _ACTIVATIONS[cfg.activation]

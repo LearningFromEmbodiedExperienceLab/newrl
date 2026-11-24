@@ -1,5 +1,7 @@
 """Compact generalized coordinates and differentiable FK from Newton metadata."""
 
+from typing import TYPE_CHECKING
+
 from dataclasses import dataclass
 
 import newton
@@ -9,28 +11,34 @@ import warp as wp
 from tensordict import TensorDict
 
 from newrl.utils.math import normalize, quat_conjugate, quat_mul, quat_rotate, quat_rotate_inverse
-from newrl.utils.string import resolve_scene_names
+
+if TYPE_CHECKING:
+    from newrl.scene import Scene
 
 
 @dataclass(frozen=True)
 class GeneralizedCoordinatesConfig:
+    # Robot entity to encode and reconstruct.
     entity: str = "robot"
+    # Body used as the free root and the local dynamics frame.
     root_body: str = "pelvis"
+    # Loss scales for root position, orientation, linear and angular velocity, then joint
+    # position and velocity.
     state_scales: tuple[float, ...] = (0.25, 0.5, 1.0, 3.14, 0.5, 5.0)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         import math
 
         if len(self.state_scales) != 6 or any(not math.isfinite(v) or v <= 0 for v in self.state_scales):
             raise ValueError('Need six positive finite physical state scales')
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> tuple[tuple[str, str], ...]:
         return tuple((self.entity, name) for name in (
             "joint_pos", "joint_vel", "body_pose_w", "body_twist_w",
         ))
 
-    def build(self, scene):
+    def build(self, scene: "Scene") -> "GeneralizedCoordinates":
         return GeneralizedCoordinates(self, scene)
 
 
@@ -42,11 +50,11 @@ class GeneralizedCoordinates(nn.Module):
     Runtime tensors preserve arbitrary leading batch dimensions and gradients.
     """
 
-    def __init__(self, config, scene):
+    def __init__(self, config: GeneralizedCoordinatesConfig, scene: "Scene") -> None:
         super().__init__()
         self.config = config
         robot, model = scene.entities[config.entity], scene.model
-        self.root, = resolve_scene_names(config.root_body, robot.body_names)
+        (self.root,), _ = robot.find_bodies(config.root_body)
         if robot.root_q is None:
             raise ValueError("Generalized coordinates require one free root")
         self.joint_names, self.body_names = robot.joint_names, robot.body_names
@@ -114,7 +122,7 @@ class GeneralizedCoordinates(nn.Module):
         self.prediction_dim = 12 + 2 * len(self.joint_names)
         self.physical_fields = frozenset(config.physical_fields) | {(config.entity, 'projected_gravity')}
 
-    def encode(self, physical_state):
+    def encode(self, physical_state: TensorDict) -> TensorDict:
         body = physical_state[self.config.entity]
         root = body['body_pose_w'][..., self.root, :]
         twist = body['body_twist_w'][..., self.root, :]
@@ -126,7 +134,7 @@ class GeneralizedCoordinates(nn.Module):
             'joint_pos': body['joint_pos'].clone(), 'joint_vel': body['joint_vel'].clone(),
         }, batch_size=physical_state.batch_size)
 
-    def features(self, state):
+    def features(self, state: TensorDict) -> torch.Tensor:
         root, twist = state['root_pose'], state['root_twist']
         down = torch.zeros_like(root[..., :3]); down[..., 2] = -1
         return torch.cat((
@@ -136,7 +144,7 @@ class GeneralizedCoordinates(nn.Module):
             state['joint_pos'], state['joint_vel'],
         ), -1)
 
-    def apply_prediction(self, state, prediction):
+    def apply_prediction(self, state: TensorDict, prediction: torch.Tensor) -> TensorDict:
         """Direct position/twist increments in the current root frame; joints add."""
         if prediction.shape != (*state.batch_size, self.prediction_dim):
             raise ValueError("Prediction shape does not match representation state")
@@ -152,7 +160,7 @@ class GeneralizedCoordinates(nn.Module):
             'joint_vel': state['joint_vel'] + prediction[..., 12 + joint_count:],
         }, batch_size=state.batch_size)
 
-    def decode(self, state):
+    def decode(self, state: TensorDict) -> TensorDict:
         """Reconstruct canonical body poses/twists and projected gravity in Torch."""
         poses, twists = {}, {}
         poses[self.root], twists[self.root] = state['root_pose'], state['root_twist']
@@ -192,7 +200,12 @@ class GeneralizedCoordinates(nn.Module):
             'projected_gravity': quat_rotate_inverse(pose[..., 3:], down),
         }, batch_size=state.batch_size)}, batch_size=state.batch_size)
 
-    def compute_loss(self, predicted, target, valid):
+    def compute_loss(
+        self,
+        predicted: TensorDict,
+        target: TensorDict,
+        valid: torch.Tensor,
+    ) -> torch.Tensor:
         """Scaled multi-step state error; orientations are quaternion-sign invariant."""
         target = target.detach()
         q = target['root_pose'][..., 3:]

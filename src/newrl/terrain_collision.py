@@ -28,6 +28,8 @@ Each collision update clears the contact buffer and runs three kernels:
   uses to reconstruct the surface points during solver substeps.
 """
 
+from collections.abc import Sequence
+
 from typing import Any
 
 import newton
@@ -70,7 +72,7 @@ class _Manifold:
 
 
 @wp.func
-def _retain(contact: ContactData, manifold: _Manifold, output_index: int):
+def _retain(contact: ContactData, manifold: _Manifold, output_index: int) -> None:
     if not contact_passes_gap_check(contact):
         return
     # Deepest contact, plus extrema along four tetrahedral directions. Keeping
@@ -99,7 +101,7 @@ _convex_contacts = create_compute_gjk_mpr_contacts(
 
 
 @wp.func
-def _extent(kind: int, scale: wp.vec3, axis: wp.vec3):
+def _extent(kind: int, scale: wp.vec3, axis: wp.vec3) -> float:
     """Upper bound on support distance along a primitive-local unit axis."""
     if kind == int(GeoType.BOX):
         return wp.dot(scale, wp.abs(axis))
@@ -126,7 +128,7 @@ def _test_triangle(
     margin0: float,
     margin1: float,
     manifold: _Manifold,
-):
+) -> None:
     a = wp.mesh_eval_position(mesh, face, 1.0, 0.0)
     b = wp.mesh_eval_position(mesh, face, 0.0, 1.0)
     c = wp.mesh_eval_position(mesh, face, 0.0, 0.0)
@@ -235,7 +237,7 @@ def _prepare(
     cached_hi: wp.array[wp.vec3],
     counts: wp.array[int],
     faces: wp.array2d[Any],
-):
+) -> None:
     row = wp.tid()
     shape = queries[row]
     pose = local[shape]
@@ -290,7 +292,7 @@ def _detect(
     faces: wp.array2d[Any],
     scores: wp.array2d[float],
     candidates: wp.array2d[ContactData],
-):
+) -> None:
     row = wp.tid()
     shape = queries[row]
     pose = poses[row]
@@ -360,7 +362,7 @@ def _flag_contacts(
     scores: wp.array2d[float],
     candidates: wp.array2d[ContactData],
     flags: wp.array[int],
-):
+) -> None:
     row, i = wp.tid()
     index = row * MANIFOLD_SIZE + i
     if scores[row, i] == -1.0e30:
@@ -374,7 +376,7 @@ def _flag_contacts(
 
 
 @wp.kernel(enable_backward=False)
-def _advance_contact_count(offsets: wp.array[int], count: wp.array[int], capacity: int):
+def _advance_contact_count(offsets: wp.array[int], count: wp.array[int], capacity: int) -> None:
     count[0] = wp.min(count[0] + offsets[offsets.shape[0] - 1], capacity)
 
 
@@ -397,7 +399,7 @@ def _emit(
     offsets: wp.array[int],
     flags: wp.array[int],
     tids: wp.array[int],
-):
+) -> None:
     row, i = wp.tid()
     index = row * MANIFOLD_SIZE + i
     if scores[row, i] == -1.0e30:
@@ -437,13 +439,13 @@ class TerrainCollision:
 
     def __init__(
         self,
-        model,
+        model: newton.Model,
         *,
         ground_label: str = "ground_mesh",
         ground_shape: int | None = None,
         queries: np.ndarray | None = None,
         deterministic: bool = False,
-    ):
+    ) -> None:
         self.model = model
         self.device = model.device
         if ground_shape is None:
@@ -510,10 +512,10 @@ class TerrainCollision:
                 else None
             )
 
-    def invalidate(self):
+    def invalidate(self) -> None:
         self.counts.fill_(INVALID_CACHE)
 
-    def collide(self, state, contacts=None):
+    def collide(self, state: newton.State, contacts: newton.Contacts | None  =  None) -> None:
         m = self.model
         c = contacts
         if c is None:
@@ -605,7 +607,13 @@ class TerrainCollision:
 class HybridTerrainCollision:
     """Route supported primitive–mesh pairs to the terrain kernel and the rest to Newton."""
 
-    def __init__(self, model, terrain_shapes, *, deterministic: bool = False):
+    def __init__(
+        self,
+        model: newton.Model,
+        terrain_shapes: Sequence[int],
+        *,
+        deterministic: bool  =  False,
+    ) -> None:
         self.model = model
         self.mesh_colliders = []
         kinds = model.shape_type.numpy()
@@ -662,12 +670,12 @@ class HybridTerrainCollision:
                 deterministic=deterministic,
             )
 
-    def contacts(self):
+    def contacts(self) -> newton.Contacts:
         if self.newton is not None:
             return self.newton.contacts()
         return newton.Contacts(self.custom_capacity, 0, device=self.model.device)
 
-    def collide(self, state, contacts):
+    def collide(self, state: newton.State, contacts: newton.Contacts) -> None:
         if self.newton is not None:
             self.newton.collide(state, contacts)
         else:

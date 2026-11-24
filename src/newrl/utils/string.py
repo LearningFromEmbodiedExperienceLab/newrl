@@ -5,7 +5,14 @@ from collections.abc import Sequence
 from typing import Any
 
 
-def _resolve_names(keys, names, preserve_order, *, strict=True, scene_labels=False):
+def _resolve_names(
+    keys: str | Sequence[str],
+    names: Sequence[str],
+    preserve_order: bool,
+    *,
+    strict: bool = True,
+    scene_labels: bool = False,
+) -> tuple[list[int], list[int]]:
     queries = (keys,) if isinstance(keys, str) else tuple(keys)
     patterns = []
     for query in queries:

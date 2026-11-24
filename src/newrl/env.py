@@ -1,6 +1,6 @@
 """Batched Newton environment with explicit reset and true successor states."""
 
-from contextlib import nullcontext
+from contextlib import nullcontext, AbstractContextManager
 
 import newton
 import torch
@@ -20,7 +20,7 @@ from .utils.symmetry import SymmetryTransform
 class _EnvironmentCore:
     """Shared physics and task transition implementation."""
 
-    def __init__(self, config: EnvironmentConfig, mdp: MDP | None = None):
+    def __init__(self, config: EnvironmentConfig, mdp: MDP | None  =  None) -> None:
         if config.num_envs < 1 or config.substeps < 1 or config.sim_dt <= 0:
             raise ValueError("num_envs, substeps, and sim_dt must be positive")
         if not config.robots:
@@ -121,15 +121,20 @@ class _EnvironmentCore:
             transforms.append(transform)
         return SymmetryTransform.cat(transforms)
 
-    def _stream(self):
+    def _stream(self) -> wp.ScopedStream:
         return wp.ScopedStream(
             wp.stream_from_torch(torch.cuda.current_stream(self.device))
         )
 
-    def _profile_stage(self, name):
+    def _profile_stage(self, name: str) -> AbstractContextManager[None]:
         return nullcontext() if self.profiler is None else self.profiler.stage(name)
 
-    def _sample_cameras(self, *, reset=False, reset_mask=None):
+    def _sample_cameras(
+        self,
+        *,
+        reset: bool = False,
+        reset_mask: torch.Tensor | None = None,
+    ) -> None:
         if self._camera_bvh_refit:
             self.model.bvh_refit_shapes(self.state)
             self.model.bvh_refit_particles(self.state)
@@ -137,7 +142,13 @@ class _EnvironmentCore:
             with self._profile_stage(f"camera/{name}"):
                 camera.sample(self.state, reset=reset, reset_mask=reset_mask)
 
-    def _simulate(self, state, state_next, *, profile=False):
+    def _simulate(
+        self,
+        state: newton.State,
+        state_next: newton.State,
+        *,
+        profile: bool = False,
+    ) -> tuple[newton.State, newton.State]:
         for sensor in self._contact_sensors.values():
             sensor.begin_step()
         for substep in range(self.config.substeps):
@@ -174,7 +185,7 @@ class _EnvironmentCore:
             state, state_next = state_next, state
         return state, state_next
 
-    def _advance(self):
+    def _advance(self) -> None:
         if not self.config.graph_capture or not self._physics_warmed_up:
             self.state, self.state_next = self._simulate(
                 self.state, self.state_next, profile=self.profiler is not None
@@ -195,7 +206,12 @@ class _EnvironmentCore:
         if self.config.substeps % 2:
             self.state, self.state_next = self.state_next, self.state
 
-    def _transition(self, physical_state, mdp_state, result):
+    def _transition(
+        self,
+        physical_state: TensorDict,
+        mdp_state: TensorDict,
+        result: TensorDict,
+    ) -> TensorDict:
         """Expose independent successor snapshots for the configured output fields."""
         missing = [name for name in self.output_mdp_fields if name not in mdp_state]
         if missing:
@@ -211,7 +227,11 @@ class _EnvironmentCore:
             ).clone()
         return result
 
-    def _reset(self, env_ids, mdp_state):
+    def _reset(
+        self,
+        env_ids: torch.Tensor | None,
+        mdp_state: TensorDict | None,
+    ) -> tuple[TensorDict, TensorDict]:
         if env_ids is not None and mdp_state is None:
             raise ValueError("A selective reset requires the previous MDP state")
         ids = (
@@ -227,42 +247,25 @@ class _EnvironmentCore:
         mask = torch.zeros(self.num_envs + 1, dtype=torch.bool, device=self.device)
         mask[:-1][ids] = True
         self._solver.reset(self.state, ids, mask)
+        joint_world = wp.to_torch(self.model.joint_world).long()
+        dof_starts = wp.to_torch(self.model.joint_qd_start).long()
+        dof_world = torch.repeat_interleave(joint_world, dof_starts[1:] - dof_starts[:-1])
+        reset_dofs = mask[dof_world]
         if self.observables is not None:
-            joint_world = wp.to_torch(self.model.joint_world).long()
-            dof_starts = wp.to_torch(self.model.joint_qd_start).long()
-            dof_counts = dof_starts[1:] - dof_starts[:-1]
-            dof_world = torch.repeat_interleave(joint_world, dof_counts)
-            wp.to_torch(self.observables.qfrc_actuator)[mask[dof_world]] = 0
+            wp.to_torch(self.observables.qfrc_actuator)[reset_dofs] = 0
         for sensor in self._contact_sensors.values():
             sensor.reset(ids)
-        joint_q = wp.to_torch(self.state.joint_q)
-        joint_qd = wp.to_torch(self.state.joint_qd)
         # Reset velocities default to zero, independently of model defaults.
-        dof_starts = wp.to_torch(self.model.joint_qd_start).long()
-        dof_world = torch.repeat_interleave(
-            wp.to_torch(self.model.joint_world).long(), dof_starts[1:] - dof_starts[:-1]
-        )
-        joint_qd[mask[dof_world]] = 0
+        wp.to_torch(self.state.joint_qd)[reset_dofs] = 0
         for name, pose in poses.items():
             entity = self.scene.entities[name]
-            if "joint_pos" in pose:
-                joint_q[entity.q[ids]] = pose["joint_pos"]
-            if "root_pose" in pose:
-                if entity.root_q is None:
-                    raise ValueError(
-                        f"Entity {name!r} requires one free root for root pose resets"
-                    )
-                joint_q[entity.root_q[ids]] = pose["root_pose"]
-            if "joint_vel" in pose:
-                joint_qd[entity.qd[ids]] = pose["joint_vel"]
-            if "root_twist" in pose:
-                if entity.root_qd is None:
-                    raise ValueError(
-                        f"Entity {name!r} requires one free root for root velocity resets"
-                    )
-                # Newton free-root DOFs: world COM linear velocity, then angular velocity.
-                joint_qd[entity.root_qd[ids]] = pose["root_twist"]
-        joint_mask = mask[wp.to_torch(self.model.joint_world).long()]
+            entity.write_joint_state(
+                self.state, ids, joint_pos=pose.get("joint_pos"), joint_vel=pose.get("joint_vel")
+            )
+            entity.write_root_state(
+                self.state, ids, root_pose=pose.get("root_pose"), root_twist=pose.get("root_twist")
+            )
+        joint_mask = mask[joint_world]
         newton.eval_fk(
             self.model,
             self.state.joint_q,
@@ -286,7 +289,7 @@ class _EnvironmentCore:
         )
         return next_mdp_state, self._transition(physical_state, next_mdp_state, result)
 
-    def _step(self, action, mdp_state):
+    def _step(self, action: torch.Tensor, mdp_state: TensorDict) -> tuple[TensorDict, TensorDict]:
         if action.shape != (self.num_envs, self.action_dim):
             raise ValueError(
                 f"Expected action shape {(self.num_envs, self.action_dim)}, got {tuple(action.shape)}"
@@ -316,7 +319,7 @@ class StatefulEnvironment(_EnvironmentCore):
     for the returned observation; other MDP and physical fields are opt-in.
     """
 
-    def __init__(self, config: EnvironmentConfig, mdp: MDP | None = None):
+    def __init__(self, config: EnvironmentConfig, mdp: MDP | None  =  None) -> None:
         super().__init__(config, mdp)
         self.mdp_state: TensorDict | None = None
 
@@ -345,12 +348,12 @@ class StatelessEnvironment(_EnvironmentCore):
     terms must derive their results from the supplied physical snapshot and MDP state.
     """
 
-    def __init__(self, config: EnvironmentConfig, mdp: MDP | None = None):
+    def __init__(self, config: EnvironmentConfig, mdp: MDP | None  =  None) -> None:
         super().__init__(config, mdp)
         if self.model.particle_count:
             raise ValueError("Simulator checkpoints currently support rigid scenes")
 
-    def _checkpoint_views(self):
+    def _checkpoint_views(self) -> dict[str, torch.Tensor]:
         arrays = {
             name: getattr(self.state, name)
             for name in ("joint_q", "joint_qd", "body_q", "body_qd")
@@ -378,14 +381,14 @@ class StatelessEnvironment(_EnvironmentCore):
         )
         return views
 
-    def _snapshot(self):
+    def _snapshot(self) -> TensorDict:
         return TensorDict(
             {name: view.clone() for name, view in self._checkpoint_views().items()},
             batch_size=[self.num_envs],
             device=self.device,
         )
 
-    def _restore(self, sim_state):
+    def _restore(self, sim_state: TensorDict) -> None:
         views = self._checkpoint_views()
         if sim_state.batch_size != torch.Size([self.num_envs]) or set(
             sim_state.keys()

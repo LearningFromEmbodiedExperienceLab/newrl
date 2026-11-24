@@ -37,7 +37,7 @@ class ActuatorGroup:
     ``damping`` above is the active PD derivative gain.
     """
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.viscous_damping is not None and (
             not math.isfinite(self.viscous_damping) or self.viscous_damping < 0
         ):
@@ -65,7 +65,7 @@ class RobotConfig:
     body_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
     velocity_joints: tuple[str, ...] = ()
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.actuators and any(
             value is not None for value in (self.stiffness, self.damping, self.armature)
         ):
@@ -133,7 +133,7 @@ class RobotConfig:
     def action_scales(self, labels: Sequence[str]) -> tuple[float, ...]:
         return tuple(_resolve_values(self.action_scale, labels, "action_scale"))
 
-    def _gains(self, labels: Sequence[str]):
+    def _gains(self, labels: Sequence[str]) -> tuple[list[float | None], ...]:
         if not self.actuators:
             return (
                 _resolve_values(self.stiffness, labels, "stiffness"),
@@ -195,7 +195,7 @@ def _resolve_values(spec: ValueSpec, labels: Sequence[str], name: str) -> list[f
     return assigned
 
 
-def scalar_joints(builder):
+def scalar_joints(builder: newton.ModelBuilder) -> list[int]:
     return [
         j
         for j, kind in enumerate(builder.joint_type)

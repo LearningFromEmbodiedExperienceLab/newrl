@@ -1,5 +1,9 @@
 """Optimizers with an optional Muon update for hidden weight matrices."""
 
+from torch.optim import Optimizer
+
+from typing import Any
+
 import torch
 from torch import nn
 
@@ -7,20 +11,20 @@ from torch import nn
 class MuonAdamW:
     """Step the two disjoint parameter sets together."""
 
-    def __init__(self, adamw: torch.optim.Optimizer, muon: torch.optim.Muon):
+    def __init__(self, adamw: torch.optim.Optimizer, muon: torch.optim.Muon) -> None:
         self.adamw = adamw
         self.muon = muon
 
     @property
-    def optimizers(self):
+    def optimizers(self) -> tuple[torch.optim.Optimizer, torch.optim.Muon]:
         return (self.adamw, self.muon)
 
     @property
-    def state(self):
+    def state(self) -> dict[torch.Tensor, dict[str, Any]]:
         return {**self.adamw.state, **self.muon.state}
 
     @property
-    def param_groups(self):
+    def param_groups(self) -> list[dict[str, Any]]:
         return [*self.adamw.param_groups, *self.muon.param_groups]
 
     def zero_grad(self, set_to_none: bool = True) -> None:
@@ -31,10 +35,10 @@ class MuonAdamW:
         self.adamw.step()
         self.muon.step()
 
-    def state_dict(self):
+    def state_dict(self) -> dict[str, Any]:
         return {"adamw": self.adamw.state_dict(), "muon": self.muon.state_dict()}
 
-    def load_state_dict(self, state_dict) -> None:
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         adamw_state, muon_state = state_dict["adamw"], state_dict["muon"]
         self.adamw.load_state_dict(adamw_state)
         self.muon.load_state_dict(muon_state)
@@ -80,7 +84,14 @@ def make_optimizer(
     )
 
 
-def build_optimizer(module, *, lr, kind, adam_betas=(0.9, 0.999), capturable=False):
+def build_optimizer(
+    module: nn.Module,
+    *,
+    lr: float,
+    kind: str,
+    adam_betas: tuple[float, float]=(0.9, 0.999),
+    capturable: bool = False,
+) -> torch.optim.Optimizer | MuonAdamW:
     """Reference SuperMimic split: hidden matrices use Muon at weight decay 0.1.
 
     Boundary matrices marked ``_non_muon``, biases and normalization parameters

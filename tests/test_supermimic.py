@@ -12,6 +12,7 @@ import torch
 from tensordict import TensorDict
 import warp as wp
 
+from newrl.scene import RobotEntity
 from newrl.algos.supermimic import GeneralizedCoordinatesConfig, SuperMimicConfig
 from newrl.configs import G1MotionTracking
 from newrl.mdp.base import MDP
@@ -35,7 +36,8 @@ class RepresentationTests(unittest.TestCase):
         builder.add_articulation(list(range(builder.joint_count)))
         model = builder.finalize(device='cpu')
         q_indices = torch.tensor([builder.joint_q_start[j] for j in (hinge, slide)])
-        robot = SimpleNamespace(
+        robot = RobotEntity(
+            targets=None, default_position=None, action=None,
             root_q=torch.arange(7).unsqueeze(0), bodies=torch.arange(4).unsqueeze(0),
             q=q_indices.unsqueeze(0), qd=q_indices.unsqueeze(0), joint_names=('hinge', 'slide'),
             body_names=('pelvis', 'arm', 'fixed', 'slider'),
@@ -117,7 +119,7 @@ class RepresentationTests(unittest.TestCase):
         learner = cfg.build(env)
         self.assertIsNot(learner.mdp, env.mdp)
         self.assertEqual(learner.mdp.observations.keys(), env.mdp.observations.keys())
-        env.mdp = MDP(observations={'state':SimpleNamespace(terms={'bad':SimpleNamespace(physical_fields={('robot', 'joint_torque')})})})
+        env.mdp = MDP(observations={'state':SimpleNamespace(terms=(('bad', SimpleNamespace(physical_fields={('robot', 'joint_torque')})),))})
         with self.assertRaisesRegex(ValueError, 'joint_torque'):
             cfg.build(env)
 

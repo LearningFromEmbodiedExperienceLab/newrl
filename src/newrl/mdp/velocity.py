@@ -1,5 +1,7 @@
 """Velocity tracking with task-owned command and physical reset sampling."""
 
+from typing import Self, TYPE_CHECKING
+
 from dataclasses import dataclass, field
 
 import torch
@@ -9,6 +11,9 @@ from tensordict import TensorDict
 from newrl.utils.math import quat_from_yaw, quat_mul
 
 from .base import MDP
+
+if TYPE_CHECKING:
+    from newrl.scene import Scene
 
 
 @dataclass
@@ -28,7 +33,7 @@ class VelocityMDP(MDP):
         default=None, init=False, repr=False
     )
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.hold_steps < 1:
             raise ValueError("hold_steps must be positive")
         if any(lo > hi for lo, hi in (self.vx, self.vy, self.yaw_rate)):
@@ -36,7 +41,7 @@ class VelocityMDP(MDP):
         if min(self.joint_position_noise, self.root_xy_noise, self.root_yaw_noise) < 0:
             raise ValueError("Reset noise amplitudes must be nonnegative")
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         bound = super()._initialize(scene)
         robot = scene.entities[self.entity]
         if robot.root_q is None:
@@ -56,7 +61,7 @@ class VelocityMDP(MDP):
         )
         return bound
 
-    def initial_state(self, num_envs, action_dim, device):
+    def initial_state(self, num_envs: int, action_dim: int, device: torch.device) -> TensorDict:
         mdp_state = super().initial_state(num_envs, action_dim, device)
         worlds = torch.arange(num_envs, device=device, dtype=torch.long).unsqueeze(-1)
         mdp_state["command_rng"] = (
@@ -77,13 +82,17 @@ class VelocityMDP(MDP):
         return mdp_state
 
     @property
-    def replay_fields(self):
+    def replay_fields(self) -> tuple[str, ...]:
         return (
             *super().replay_fields, "command_rng", "reset_rng",
             "command_steps_left", "velocity_command", "spawn_height",
         )
 
-    def reset(self, mdp_state, ids):
+    def reset(
+        self,
+        mdp_state: TensorDict,
+        ids: torch.Tensor | slice,
+    ) -> tuple[TensorDict, dict[str, TensorDict]]:
         next_mdp_state, poses = super().reset(mdp_state, ids)
         if self._nominal_pose is None or self._joint_limits is None:
             raise RuntimeError(
@@ -117,14 +126,18 @@ class VelocityMDP(MDP):
         poses[self.entity] = pose
         return next_mdp_state, poses
 
-    def _advance_task_state(self, physical_state, state):
+    def _advance_task_state(
+        self,
+        physical_state: TensorDict,
+        state: TensorDict,
+    ) -> dict[str, torch.Tensor]:
         command = state["velocity_command"]
         steps_left = (state["command_steps_left"] - 1).clamp_min(0)
         state["command_steps_left"] = steps_left
         self._sample_command(state, steps_left == 0)
         return {"velocity_command": command}
 
-    def _sample_command(self, mdp_state, selected):
+    def _sample_command(self, mdp_state: TensorDict, selected: torch.Tensor) -> None:
         previous = mdp_state["velocity_command"]
         samples, rng = self._uniform(mdp_state["command_rng"], 3, previous.dtype)
         lo = previous.new_tensor((self.vx[0], self.vy[0], self.yaw_rate[0]))
@@ -138,7 +151,11 @@ class VelocityMDP(MDP):
         )
 
     @staticmethod
-    def _uniform(rng, count, dtype):
+    def _uniform(
+        rng: torch.Tensor,
+        count: int,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Park–Miller with one explicit RNG state per world.
         # TODO: is there a more efficient way to do this?
         samples = []

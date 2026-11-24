@@ -1,5 +1,7 @@
 """Scene, simulation, and task configuration for the batched environment."""
 
+from typing import Any
+
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -77,7 +79,7 @@ class EnvironmentConfig:
     collision: str = "newton"
     sensors: dict[str, SensorConfig] = field(default_factory=dict)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.collision not in ("newton", "mujoco", "newrl"):
             raise ValueError("collision must be newton, mujoco, or newrl")
 
@@ -108,12 +110,18 @@ def locomotion_mdp(mdp_type: type[MDP] = MDP, base: str = "base") -> MDP:
     )
 
 
-def G1MotionTracking(**overrides) -> EnvironmentConfig:
+def G1MotionTracking(**overrides: Any) -> EnvironmentConfig:
     """50 Hz G1 tracking of the official retargeted LAFAN1 library."""
     bodies = (
         "pelvis", "torso_link",
-        "(left|right)_(hip_roll|knee|ankle_roll|shoulder_roll|elbow|wrist_yaw)_link",
+        "(left|right)_hip_roll_link",
+        "(left|right)_knee_link",
+        "(left|right)_ankle_roll_link",
+        "(left|right)_shoulder_roll_link",
+        "(left|right)_elbow_link",
+        "(left|right)_wrist_yaw_link",
     )
+    # TODO: du not reuse locomotion_mdp 
     mdp = locomotion_mdp(MotionTrackingMDP, base="pelvis")
     mdp.observations["command"] = ObservationGroup({"reference": ReferenceMotion()})
     mdp.rewards["tracking"] = RewardGroup({
@@ -141,7 +149,7 @@ def AnymalLocomotion(
     *,
     contact_observation: bool = False,
     foot_slip_weight: float = 0.1,
-    **overrides,
+    **overrides: Any,
 ) -> EnvironmentConfig:
     return _quadruped_locomotion(
         newton_anymal_c,
@@ -157,7 +165,7 @@ def SpotLocomotion(
     *,
     contact_observation: bool = False,
     foot_slip_weight: float = 0.1,
-    **overrides,
+    **overrides: Any,
 ) -> EnvironmentConfig:
     return _quadruped_locomotion(
         assetx_spot,
@@ -173,7 +181,7 @@ def AS2Locomotion(
     *,
     contact_observation: bool = False,
     foot_slip_weight: float = 0.1,
-    **overrides,
+    **overrides: Any,
 ) -> EnvironmentConfig:
     return _quadruped_locomotion(
         assetx_as2,
@@ -186,26 +194,20 @@ def AS2Locomotion(
 
 
 def AS2WLocomotion(
-    *, contact_observation: bool = False, sphere_wheels: bool = False, **overrides
+    *, contact_observation: bool = False, sphere_wheels: bool = False, **overrides: Any
 ) -> EnvironmentConfig:
-    config = _quadruped_locomotion(
+    return _quadruped_locomotion(
         assetx_as2w_sphere if sphere_wheels else assetx_as2w,
         base="base_link", feet=r"(FL|FR|RL|RR)_foot",
-        contact_observation=contact_observation, foot_slip_weight=0.0, **overrides,
+        contact_observation=contact_observation, foot_slip_weight=None, **overrides,
     )
-    del config.mdp.rewards["regularization"].terms["foot_slip"]
-    del config.mdp.rewards["regularization"].terms["feet_air_time"]
-    return config
 
 
-def M20SLocomotion(*, contact_observation: bool = False, **overrides) -> EnvironmentConfig:
-    config = _quadruped_locomotion(
+def M20SLocomotion(*, contact_observation: bool  =  False, **overrides: Any) -> EnvironmentConfig:
+    return _quadruped_locomotion(
         assetx_m20s, base="base_link", feet=r"(fl|fr|hl|hr)_wheel",
-        contact_observation=contact_observation, foot_slip_weight=0.0, **overrides,
+        contact_observation=contact_observation, foot_slip_weight=None, **overrides,
     )
-    del config.mdp.rewards["regularization"].terms["foot_slip"]
-    del config.mdp.rewards["regularization"].terms["feet_air_time"]
-    return config
 
 
 def _quadruped_locomotion(
@@ -214,8 +216,8 @@ def _quadruped_locomotion(
     base: str,
     feet: str,
     contact_observation: bool,
-    foot_slip_weight: float,
-    **overrides,
+    foot_slip_weight: float | None,
+    **overrides: Any,
 ) -> EnvironmentConfig:
     mdp = locomotion_mdp(VelocityMDP, base)
     mdp.observations["command"] = ObservationGroup(
@@ -223,7 +225,7 @@ def _quadruped_locomotion(
     )
     mdp.observations["privileged"] = ObservationGroup(
         {
-            **mdp.observations["privileged"].terms,
+            **dict(mdp.observations["privileged"].terms),
             "feet_lin_vel_w": BodyLinearVelocity("robot", feet),
             **(
                 {"feet_loaded": ContactObservation("feet_ground")}
@@ -270,8 +272,14 @@ def _quadruped_locomotion(
                 "joint_energy1": JointEnergy1(weight=0.0002),
                 # "joint_acc2": JointAcc2(weight=0.00001),
                 "joint_vel2": JointVel2(weight=0.002),
-                "feet_air_time": FeetAirTime(sensor="feet_ground", weight=0.2),
-                "foot_slip": FootSlip(sensor="feet_ground", weight=foot_slip_weight),
+                **(
+                    {
+                        "feet_air_time": FeetAirTime(sensor="feet_ground", weight=0.2),
+                        "foot_slip": FootSlip(sensor="feet_ground", weight=foot_slip_weight),
+                    }
+                    if foot_slip_weight is not None
+                    else {}
+                ),
             }
         ),
     }

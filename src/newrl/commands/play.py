@@ -12,14 +12,14 @@ from newrl.configs import EnvironmentConfig
 from newrl.env import StatefulEnvironment
 from newrl.mdp.episode_ends import Timeout
 from newrl.projects import load_projects
-from newrl.terrain import PlaneTerrainConfig
+from newrl.terrain import PlaneTerrainConfig, Terrain
 from newrl.utils.config import load, main as config_main
 from newrl.utils.wandb import resolve_checkpoint
 
 CHECKPOINT_CACHE_DIR = Path(".cache/wandb-checkpoints")
 
 
-def viewer_world_offsets(terrain, num_envs: int) -> tuple[float, float, float]:
+def viewer_world_offsets(terrain: Terrain | None, num_envs: int) -> tuple[float, float, float]:
     """Viewing offset applied on top of each world's simulated pose.
 
     Every world shares one static terrain in world coordinates. ``set_model``
@@ -47,7 +47,7 @@ class PlayConfig:
     viser_port: int = 8080
     discard_unused_obs: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.episode_steps < 1 or (self.steps is not None and self.steps < 1):
             raise ValueError("episode_steps and steps must be positive")
         if self.num_envs is not None and self.num_envs < 1:

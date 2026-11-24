@@ -1,15 +1,28 @@
 """Explicit physical dynamics with independently selected privileged inputs."""
 
+from typing import TYPE_CHECKING
+
 import torch
 from torch import nn
 from tensordict import TensorDict
 
 from newrl.algos.common.modules import MLP
 from newrl.algos.common.normalization import EmpiricalNormalization
+from newrl.mdp.base import MDP, ObservationGroup
+
+if TYPE_CHECKING:
+    from newrl.algos.supermimic.representations import GeneralizedCoordinates
 
 
 class ExplicitWorldModel(nn.Module):
-    def __init__(self, representation, action_dim, hidden, observations, amp='none'):
+    def __init__(
+        self,
+        representation: "GeneralizedCoordinates",
+        action_dim: int,
+        hidden: tuple[int, ...],
+        observations: ObservationGroup | None,
+        amp: str = 'none',
+    ) -> None:
         super().__init__()
         self.representation, self.observations, self.amp = representation, observations, amp
         self.state_norm = EmpiricalNormalization(representation.feature_dim, decay=1.0, eps=1e-4)
@@ -26,7 +39,13 @@ class ExplicitWorldModel(nn.Module):
         nn.init.zeros_(self.network[-1].bias)
 
     @torch.no_grad()
-    def update_normalization(self, state, action, physical=None, memory=None):
+    def update_normalization(
+        self,
+        state: TensorDict,
+        action: torch.Tensor,
+        physical: TensorDict | None = None,
+        memory: TensorDict | None = None,
+    ) -> None:
         self.state_norm.update(self.representation.features(state))
         self.action_norm.update(action)
         if self.observation_norm is not None:
@@ -34,7 +53,13 @@ class ExplicitWorldModel(nn.Module):
             memory = TensorDict({}, state.batch_size) if memory is None else memory
             self.observation_norm.update(self.observations(physical, memory))
 
-    def predict(self, state, action, physical, memory):
+    def predict(
+        self,
+        state: TensorDict,
+        action: torch.Tensor,
+        physical: TensorDict,
+        memory: TensorDict | None,
+    ) -> tuple[TensorDict, TensorDict]:
         """Compile dynamics, FP32 integration and successor FK as one boundary."""
         inputs = [self.state_norm.normalize(self.representation.features(state)),
                   self.action_norm.normalize(action)]
@@ -50,11 +75,22 @@ class ExplicitWorldModel(nn.Module):
             physical = self.representation.decode(state)
         return state, physical
 
-    def step(self, state, action, memory=None):
+    def step(
+        self,
+        state: TensorDict,
+        action: torch.Tensor,
+        memory: TensorDict | None = None,
+    ) -> TensorDict:
         physical = self.representation.decode(state)
         return self.predict(state, action, physical, memory)[0]
 
-    def rollout(self, mdp, initial_state, memory, actions):
+    def rollout(
+        self,
+        mdp: MDP,
+        initial_state: TensorDict,
+        memory: TensorDict,
+        actions: torch.Tensor,
+    ) -> TensorDict:
         """Open-loop predictions, scoring true successors against decision goals."""
         state = initial_state
         memory = mdp.restore_replay_state(memory)

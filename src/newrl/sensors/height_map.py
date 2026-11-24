@@ -1,5 +1,7 @@
 """Batched downward raycasts against the shared terrain."""
 
+from typing import TYPE_CHECKING
+
 from dataclasses import dataclass
 from math import isfinite
 
@@ -8,7 +10,10 @@ import torch
 import warp as wp
 from tensordict import TensorDict
 
-from ..utils.string import resolve_scene_names
+if TYPE_CHECKING:
+    from newrl.scene import Scene
+    from newrl.scene import RobotEntity
+
 
 
 @dataclass(frozen=True)
@@ -28,7 +33,7 @@ class HeightMapConfig:
     ray_start_height: float = 0.5
     ray_length: float = 3.0
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if min(self.rows, self.cols) < 1:
             raise ValueError("Height map dimensions must be positive")
         distances = (self.spacing, self.forward_offset, self.ray_start_height, self.ray_length)
@@ -37,7 +42,7 @@ class HeightMapConfig:
         if self.spacing <= 0 or self.ray_start_height < 0 or self.ray_length <= 0:
             raise ValueError("Height map spacing and ray length must be positive and ray start nonnegative")
 
-    def build(self, scene):
+    def build(self, scene: "Scene") -> "HeightMap":
         return HeightMap(self, scene.entities[self.entity], scene.model)
 
 
@@ -51,7 +56,7 @@ def _height_ray_origins(
     forward_offset: float,
     ray_start_height: float,
     origins: wp.array[wp.vec3],
-):
+) -> None:
     world, row, col = wp.tid()
     pose = body_q[bodies[world]]
     q = wp.transform_get_rotation(pose)
@@ -70,14 +75,14 @@ def _height_ray_origins(
 class HeightMap:
     fields = ("height", "valid")
 
-    def __init__(self, config, entity, model):
+    def __init__(self, config: HeightMapConfig, entity: "RobotEntity", model: newton.Model) -> None:
         self.config = config
         self.model = model
-        (body,) = resolve_scene_names(config.body, entity.body_names)
+        (body,), _ = entity.find_bodies(config.body)
         self._bodies = wp.from_torch(entity.bodies[:, body].to(torch.int32), dtype=wp.int32)
         self.shape = torch.Size((config.rows, config.cols))
 
-    def initialize(self, scene):
+    def initialize(self, scene: "Scene") -> None:
         device = self.model.device
         count = self.model.world_count * self.shape.numel()
         self._origins = wp.empty(count, dtype=wp.vec3, device=device)
@@ -86,7 +91,7 @@ class HeightMap:
         self._worlds = wp.full(count, -1, dtype=wp.int32, device=device)
         self._distances = wp.empty(count, dtype=wp.float32, device=device)
 
-    def read(self, state, fields):
+    def read(self, state: newton.State, fields: tuple[str, ...]) -> TensorDict:
         config = self.config
         worlds = self.model.world_count
         device = self.model.device

@@ -24,7 +24,7 @@ class MLP(nn.Module):
         layer_norm: str | None = "pre",
         *,
         first_non_muon: bool = False,
-    ):
+    ) -> None:
         super().__init__()
         if len(num_units) < 2:
             raise ValueError("num_units must contain an input size and one layer")
@@ -74,7 +74,7 @@ class NormalActor(nn.Module):
         *,
         min_std: float = 1e-2,
         max_std: float = 1.0,
-    ):
+    ) -> None:
         super().__init__()
         if action_dim < 1:
             raise ValueError("action_dim must be positive")
@@ -121,7 +121,7 @@ class Value(nn.Module):
         input_dim: int,
         hidden: tuple[int, ...] = (512, 256, 256),
         activation: type[nn.Module] = nn.Mish,
-    ):
+    ) -> None:
         super().__init__()
         self.backbone = MLP(
             (input_dim, *hidden),

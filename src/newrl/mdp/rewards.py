@@ -1,13 +1,18 @@
+from tensordict import TensorDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from math import inf, isfinite
-from typing import ClassVar
+from typing import ClassVar, Self, TYPE_CHECKING
 
 import torch
 
-from newrl.utils.string import resolve_scene_names
+from newrl.utils.config import runtime_field
 
 from .observations import BodyAngularVelocity, BodyLinearVelocity, EntityField
+
+if TYPE_CHECKING:
+    from newrl.scene import Scene
+    from newrl.scene import RobotEntity
 
 
 def _weighted_range(weight: float, maximum: float = inf) -> tuple[float, float]:
@@ -29,7 +34,7 @@ class Survival:
     def range(self) -> tuple[float, float]:
         return self.weight, self.weight
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         return torch.full_like(mdp_state["episode_step"], self.weight, dtype=torch.float32)
 
 
@@ -44,15 +49,19 @@ class ActionRate:
     def range(self) -> tuple[float, float]:
         return _weighted_range(-self.weight)
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         delta = mdp_state["action"] - mdp_state["previous_action"]
         return -self.weight * delta.square().sum(dim=-1, keepdim=True)
 
 
-def _resolve_joint_indices(entity, joint_names: str | Sequence[str], preserve_order=False) -> torch.Tensor:
+def _resolve_joint_indices(
+    entity: "RobotEntity",
+    joint_names: str | Sequence[str],
+    preserve_order: str | Sequence[str] = False,
+) -> torch.Tensor:
     """Full-match joint labels, or their final path component, in scene order."""
     try:
-        selected = resolve_scene_names(joint_names, entity.joint_names, preserve_order)
+        selected, _ = entity.find_joints(joint_names, preserve_order)
     except ValueError as exc:
         raise ValueError(f"Invalid joint selection {joint_names!r}: {exc}") from exc
     return torch.tensor(selected, device=entity.qd.device, dtype=torch.long)
@@ -64,32 +73,27 @@ class _JointTerm:
     entity: str = "robot"
     joint_names: str | Sequence[str] = ".*"
     preserve_order: bool = field(default=False, kw_only=True)
-    _indices: torch.Tensor | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
+    _indices: torch.Tensor | None = runtime_field()
 
     @property
     def range(self) -> tuple[float, float]:
         return _weighted_range(-self.weight)
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return frozenset({(self.entity, "joint_vel")})
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         entity = scene.entities[self.entity]
-        bound = replace(self)
-        object.__setattr__(
-            bound, "_indices", _resolve_joint_indices(entity, self.joint_names, self.preserve_order)
-        )
-        return bound
+        indices = _resolve_joint_indices(entity, self.joint_names, self.preserve_order)
+        return replace(self, _indices=indices)
 
     def _select(self, values: torch.Tensor) -> torch.Tensor:
         if self._indices is None:
             raise RuntimeError("Bind the joint term to a scene before evaluating it")
         return values.index_select(-1, self._indices)
 
-    def _velocity(self, physical_state) -> torch.Tensor:
+    def _velocity(self, physical_state: TensorDict) -> torch.Tensor:
         return self._select(physical_state[self.entity, "joint_vel"])
 
 
@@ -102,10 +106,10 @@ class JointEnergy1(_JointTerm):
     """
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return super().physical_fields | {(self.entity, "joint_torque")}
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         torque = self._select(physical_state[self.entity, "joint_torque"])
         velocity = self._velocity(physical_state)
         return -self.weight * (torque * velocity).abs().sum(dim=-1, keepdim=True)
@@ -119,22 +123,19 @@ class JointAcc2(_JointTerm):
     carried in ``mdp_state`` so a replayed checkpoint reproduces the same penalty.
     """
 
-    _control_dt: float | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
+    _control_dt: float | None = runtime_field()
 
     @property
-    def state_history(self):
+    def state_history(self) -> dict[str, EntityField]:
         return {"previous_joint_vel": EntityField(self.entity, "joint_vel")}
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         if scene.control_dt <= 0:
             raise ValueError("control_dt must be positive")
         bound = super()._initialize(scene)
-        object.__setattr__(bound, "_control_dt", float(scene.control_dt))
-        return bound
+        return replace(bound, _control_dt=float(scene.control_dt))
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         if self._control_dt is None:
             raise RuntimeError("Bind JointAcc2 to a scene before evaluating it")
         velocity = physical_state[self.entity, "joint_vel"]
@@ -152,7 +153,7 @@ class JointAcc2(_JointTerm):
 class JointVel2(_JointTerm):
     """Penalize the squared joint velocity."""
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         velocity = self._velocity(physical_state)
         return -self.weight * velocity.square().sum(dim=-1, keepdim=True)
 
@@ -171,13 +172,13 @@ class TrackVelocity:
         return _weighted_range(self.weight, 1.0)
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return self.velocity.physical_fields
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         return replace(self, velocity=self.velocity._initialize(scene))
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         measured = self.velocity(physical_state, mdp_state)[:, 0, self.components]
         target = mdp_state["velocity_command"][:, self.components]
         squared_error = (measured - target).square().sum(dim=-1, keepdim=True)
@@ -190,16 +191,14 @@ class FootSlip:
 
     sensor: str
     weight: float
-    _velocity: BodyLinearVelocity | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
+    _velocity: BodyLinearVelocity | None = runtime_field()
 
     @property
     def range(self) -> tuple[float, float]:
         return _weighted_range(-self.weight)
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         fields = frozenset({(self.sensor, "loaded")})
         return (
             fields
@@ -207,16 +206,14 @@ class FootSlip:
             else fields | self._velocity.physical_fields
         )
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         config = scene.sensors[self.sensor].config
         velocity = BodyLinearVelocity(config.entity, config.body_names)._initialize(
             scene
         )
-        bound = replace(self)
-        object.__setattr__(bound, "_velocity", velocity)
-        return bound
+        return replace(self, _velocity=velocity)
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         velocity = self._velocity(physical_state, mdp_state)
         loaded = physical_state[self.sensor, "loaded"]
         speed_sq = velocity[..., :2].square().sum(-1)
@@ -234,9 +231,9 @@ class FeetAirTime:
     weight: float
     threshold_min: float = 0.05
     threshold_max: float = 0.5
-    _num_feet: int | None = field(default=None, init=False, repr=False, compare=False)
+    _num_feet: int | None = runtime_field()
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not 0.0 <= self.threshold_min < self.threshold_max:
             raise ValueError("Air-time thresholds must satisfy 0 <= min < max")
 
@@ -247,17 +244,15 @@ class FeetAirTime:
         return _weighted_range(self.weight, maximum)
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return frozenset({(self.sensor, "current_air_time")})
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         scene.resolve_physical_fields(self.physical_fields)
         sensor = scene.sensors[self.sensor]
-        bound = replace(self)
-        object.__setattr__(bound, "_num_feet", sensor.body_ids.shape[-1])
-        return bound
+        return replace(self, _num_feet=sensor.body_ids.shape[-1])
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         air = physical_state[self.sensor, "current_air_time"]
         in_range = (air > self.threshold_min) & (air < self.threshold_max)
         return self.weight * in_range.sum(dim=-1, keepdim=True).float()
@@ -273,36 +268,33 @@ class BodyAngularVelocity2:
     axis: tuple[float, float, float] = (1.0, 1.0, 1.0)
     frame: str = "world"
     preserve_order: bool = field(default=False, kw_only=True)
-    _velocity: BodyAngularVelocity = field(
-        init=False, repr=False, compare=False
-    )
-    _axis: torch.Tensor | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
+    _velocity: BodyAngularVelocity | None = runtime_field()
+    _axis: torch.Tensor | None = runtime_field()
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if len(self.axis) != 3 or not all(isfinite(scale) for scale in self.axis):
             raise ValueError("axis must contain three finite component scales")
-        velocity = BodyAngularVelocity(self.entity, self.body_names, frame=self.frame, preserve_order=self.preserve_order)
-        object.__setattr__(self, "_velocity", velocity)
+        self._velocity_term()
+
+    def _velocity_term(self) -> BodyAngularVelocity:
+        return BodyAngularVelocity(
+            self.entity, self.body_names, frame=self.frame, preserve_order=self.preserve_order
+        )
 
     @property
     def range(self) -> tuple[float, float]:
         return _weighted_range(-self.weight if any(self.axis) else 0.0)
 
     @property
-    def physical_fields(self):
-        return self._velocity.physical_fields
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
+        return self._velocity_term().physical_fields
 
-    def _initialize(self, scene):
-        bound = replace(self)
-        velocity = self._velocity._initialize(scene)
+    def _initialize(self, scene: "Scene") -> Self:
+        velocity = self._velocity_term()._initialize(scene)
         device = scene.entities[self.entity].bodies.device
-        object.__setattr__(bound, "_velocity", velocity)
-        object.__setattr__(bound, "_axis", torch.tensor(self.axis, device=device))
-        return bound
+        return replace(self, _velocity=velocity, _axis=torch.tensor(self.axis, device=device))
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         velocity = self._velocity(physical_state, mdp_state)
         squared_speed = (velocity * self._axis).square().sum(dim=(-2, -1))
         return -self.weight * squared_speed.unsqueeze(-1)
@@ -318,34 +310,33 @@ class BodyLinearVelocity2:
     axis: tuple[float, float, float] = (1.0, 1.0, 1.0)
     frame: str = "world"
     preserve_order: bool = field(default=False, kw_only=True)
-    _velocity: BodyLinearVelocity = field(init=False, repr=False, compare=False)
-    _axis: torch.Tensor | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
+    _velocity: BodyLinearVelocity | None = runtime_field()
+    _axis: torch.Tensor | None = runtime_field()
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if len(self.axis) != 3 or not all(isfinite(scale) for scale in self.axis):
             raise ValueError("axis must contain three finite component scales")
-        velocity = BodyLinearVelocity(self.entity, self.body_names, frame=self.frame, preserve_order=self.preserve_order)
-        object.__setattr__(self, "_velocity", velocity)
+        self._velocity_term()
+
+    def _velocity_term(self) -> BodyLinearVelocity:
+        return BodyLinearVelocity(
+            self.entity, self.body_names, frame=self.frame, preserve_order=self.preserve_order
+        )
 
     @property
     def range(self) -> tuple[float, float]:
         return _weighted_range(-self.weight if any(self.axis) else 0.0)
 
     @property
-    def physical_fields(self):
-        return self._velocity.physical_fields
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
+        return self._velocity_term().physical_fields
 
-    def _initialize(self, scene):
-        bound = replace(self)
-        velocity = self._velocity._initialize(scene)
+    def _initialize(self, scene: "Scene") -> Self:
+        velocity = self._velocity_term()._initialize(scene)
         device = scene.entities[self.entity].bodies.device
-        object.__setattr__(bound, "_velocity", velocity)
-        object.__setattr__(bound, "_axis", torch.tensor(self.axis, device=device))
-        return bound
+        return replace(self, _velocity=velocity, _axis=torch.tensor(self.axis, device=device))
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         velocity = self._velocity(physical_state, mdp_state)
         squared_speed = (velocity * self._axis).square().sum(dim=(-2, -1))
         return -self.weight * squared_speed.unsqueeze(-1)
@@ -367,11 +358,11 @@ class TrackBodyMotion:
     body_names: str | Sequence[str] = ".*"
     anchor_body: str | None = None
     preserve_order: bool = field(default=False, kw_only=True)
-    _indices: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
-    _anchor: int | None = field(default=None, init=False, repr=False, compare=False)
-    _com: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
+    _indices: torch.Tensor | None = runtime_field()
+    _anchor: int | None = runtime_field()
+    _com: torch.Tensor | None = runtime_field()
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not isfinite(self.sigma) or self.sigma <= 0:
             raise ValueError("Tracking sigma must be finite and positive")
         if self.quantity not in ("position", "orientation", "linear_velocity", "angular_velocity"):
@@ -380,30 +371,32 @@ class TrackBodyMotion:
             raise ValueError("Velocity tracking uses unanchored world targets")
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         fields = {(self.entity, "body_pose_w")}
         if "velocity" in self.quantity:
             fields.add((self.entity, "body_twist_w"))
         return frozenset(fields)
 
     @property
-    def range(self):
+    def range(self) -> tuple[float, float]:
         return _weighted_range(self.weight, 1.0)
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         import warp as wp
 
         robot = scene.entities[self.entity]
-        bound = replace(self)
-        indices = resolve_scene_names(self.body_names, robot.body_names, self.preserve_order)
-        object.__setattr__(bound, "_indices", torch.tensor(indices, device=robot.q.device))
+        indices, _ = robot.find_bodies(self.body_names, self.preserve_order)
+        anchor = None
         if self.anchor_body is not None:
-            anchor, = resolve_scene_names(self.anchor_body, robot.body_names)
-            object.__setattr__(bound, "_anchor", anchor)
-        object.__setattr__(bound, "_com", wp.to_torch(scene.model.body_com)[robot.bodies[0]].clone())
-        return bound
+            (anchor,), _ = robot.find_bodies(self.anchor_body)
+        return replace(
+            self,
+            _indices=torch.tensor(indices, device=robot.q.device),
+            _anchor=anchor,
+            _com=wp.to_torch(scene.model.body_com)[robot.bodies[0]].clone(),
+        )
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         from newrl.utils.math import quat_conjugate, quat_mul, quat_rotate, yaw_quat
 
         if self._indices is None:
@@ -448,23 +441,23 @@ class JointLimit:
     soft_limit_factor: float = 0.9
     joint_names: str | Sequence[str] = field(default='.*', kw_only=True)
     preserve_order: bool = field(default=False, kw_only=True)
-    _indices: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
-    _lower: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
-    _upper: torch.Tensor | None = field(default=None, init=False, repr=False, compare=False)
+    _indices: torch.Tensor | None = runtime_field()
+    _lower: torch.Tensor | None = runtime_field()
+    _upper: torch.Tensor | None = runtime_field()
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not 0 < self.soft_limit_factor <= 1:
             raise ValueError("soft_limit_factor must lie in (0, 1]")
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return frozenset({(self.entity, "joint_pos")})
 
     @property
-    def range(self):
+    def range(self) -> tuple[float, float]:
         return _weighted_range(-self.weight)
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         import warp as wp
 
         robot = scene.entities[self.entity]
@@ -472,13 +465,9 @@ class JointLimit:
         lo = wp.to_torch(scene.model.joint_limit_lower)[robot.qd[0]].index_select(-1, indices).clone()
         hi = wp.to_torch(scene.model.joint_limit_upper)[robot.qd[0]].index_select(-1, indices).clone()
         center, half = (lo + hi) / 2, (hi - lo) * self.soft_limit_factor / 2
-        bound = replace(self)
-        object.__setattr__(bound, '_indices', indices)
-        object.__setattr__(bound, "_lower", center - half)
-        object.__setattr__(bound, "_upper", center + half)
-        return bound
+        return replace(self, _indices=indices, _lower=center - half, _upper=center + half)
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         if self._lower is None:
             raise RuntimeError("Bind JointLimit before evaluating it")
         q = physical_state[self.entity, "joint_pos"].index_select(-1, self._indices)

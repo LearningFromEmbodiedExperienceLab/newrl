@@ -12,6 +12,10 @@ import warp as wp
 from .sensors import DepthCamera, GaussianCamera
 
 if TYPE_CHECKING:
+    import newton
+    from newton.viewer import ViewerViser
+    from newrl.scene import Scene
+    from viser import ClientHandle
     import viser
 
 _FOLLOW_INTERVAL = 0.06
@@ -58,7 +62,7 @@ class _ClientView:
 class ViserPlayback:
     """Follow robots and draw sensor frustums and Gaussian clouds per client."""
 
-    def __init__(self, viewer, scene):
+    def __init__(self, viewer: "ViewerViser", scene: "Scene") -> None:
         self._server = viewer.server
         self._offsets = viewer.world_offsets.numpy()
         self._worlds = tuple(str(world) for world in range(scene.model.world_count))
@@ -75,7 +79,7 @@ class ViserPlayback:
         self._select_camera = any(len(cameras) > 1 for cameras in self._cameras.values())
         self._clients: dict[int, _ClientView] = {}
 
-    def update(self, state):
+    def update(self, state: "newton.State") -> None:
         clients = self._server.get_clients()
         for client_id in self._clients.keys() - clients.keys():
             del self._clients[client_id]
@@ -180,7 +184,13 @@ class ViserPlayback:
                         if not np.array_equal(frustum.image, image):
                             frustum.image = image
 
-    def _update_gaussians(self, client, view, cameras, world):
+    def _update_gaussians(
+        self,
+        client: "ClientHandle",
+        view: _ClientView,
+        cameras: dict[str, DepthCamera | GaussianCamera],
+        world: int,
+    ) -> None:
         """Upload a cloud on demand and place it in the selected display world."""
         sensor = next(
             (sensor for sensor in cameras.values() if isinstance(sensor, GaussianCamera)),

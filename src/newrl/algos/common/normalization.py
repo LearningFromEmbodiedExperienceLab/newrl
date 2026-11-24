@@ -1,5 +1,9 @@
 """Running normalization for observations and rewards."""
 
+from collections.abc import Iterator
+
+from typing import Any
+
 from contextlib import contextmanager
 
 import torch
@@ -14,7 +18,7 @@ class EmpiricalNormalization(nn.Module):
     training mode unless frozen. Explicit ``update`` calls always record them.
     """
 
-    def __init__(self, size: int, *, decay: float = 0.999, eps: float = 1e-5):
+    def __init__(self, size: int, *, decay: float  =  0.999, eps: float  =  1e-5) -> None:
         super().__init__()
         if size < 1:
             raise ValueError("size must be positive")
@@ -59,7 +63,7 @@ class EmpiricalNormalization(nn.Module):
         return torch.where(self.count == 0, values, (values - mean) / std)
 
     @contextmanager
-    def freeze(self):
+    def freeze(self) -> Iterator[None]:
         previous = self.frozen
         self.frozen = True
         try:
@@ -76,7 +80,7 @@ class ReturnNormalization(nn.Module):
     is true, after that step's reward has been included.
     """
 
-    def __init__(self, gamma: float, *, eps: float = 1e-8):
+    def __init__(self, gamma: float, *, eps: float  =  1e-8) -> None:
         super().__init__()
         if not 0.0 <= gamma <= 1.0:
             raise ValueError("gamma must be in [0, 1]")
@@ -86,7 +90,13 @@ class ReturnNormalization(nn.Module):
         self.register_buffer("count", torch.zeros(()))
         self.register_buffer("returns", torch.zeros(0, 1))
 
-    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+    def _load_from_state_dict(
+        self,
+        state_dict: dict[str, Any],
+        prefix: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         # The number of worlds is learned from the first rollout.
         saved = state_dict.get(prefix + "returns")
         if (

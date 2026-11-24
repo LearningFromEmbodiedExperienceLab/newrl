@@ -1,7 +1,9 @@
 """Composable batched task terms evaluated on the simulator successor."""
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import cached_property
+from typing import TYPE_CHECKING, Self, TypeVar
 
 import torch
 from tensordict import TensorDict
@@ -10,10 +12,29 @@ from newrl.utils.symmetry import SymmetryTransform
 
 from .terms import EpisodeEndTerm, ObservationTerm, RewardTerm
 
+if TYPE_CHECKING:
+    from newrl.scene import Scene
 
-def _bind(term, scene):
+
+TermT = TypeVar("TermT")
+
+
+def _bind(term: TermT, scene: "Scene") -> TermT:
     initialize = getattr(term, "_initialize", None)
     return term if initialize is None else initialize(scene)
+
+
+def _term_pairs(
+    terms: Mapping[str, TermT] | Iterable[tuple[str, TermT]],
+    kind: str,
+) -> tuple[tuple[str, TermT], ...]:
+    pairs = terms.items() if isinstance(terms, Mapping) else terms
+    pairs = tuple((name, term) for name, term in pairs)
+    if not pairs:
+        raise ValueError(f"Each {kind} group must contain at least one term")
+    if len({name for name, _ in pairs}) != len(pairs):
+        raise ValueError(f"Duplicate {kind} term names")
+    return pairs
 
 
 def _require_groups(groups: dict, kind: str, group_type: type) -> None:
@@ -24,7 +45,10 @@ def _require_groups(groups: dict, kind: str, group_type: type) -> None:
             )
 
 
-def _check_column_shape(terms, shape):
+def _check_column_shape(
+    terms: Mapping[str, torch.Tensor] | TensorDict,
+    shape: tuple[int, ...],
+) -> None:
     for name, value in terms.items():
         if value.shape != shape:
             raise ValueError(
@@ -36,33 +60,34 @@ def _check_column_shape(terms, shape):
 class ObservationGroup:
     """Concatenate named observation terms in definition order.
 
+    Accepts a dict or name-term pairs and stores a tuple of pairs.
     ``shape`` is the flattened per-world width. ``__call__`` returns
     ``[num_envs, *shape]``.
     """
 
-    terms: dict[str, ObservationTerm]
+    terms: tuple[tuple[str, ObservationTerm], ...] | dict[str, ObservationTerm] = field(
+        metadata={"named_pairs": True}
+    )
 
-    def __post_init__(self):
-        if not self.terms:
-            raise ValueError("An observation group must contain at least one term")
-        object.__setattr__(self, "terms", dict(self.terms))
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "terms", _term_pairs(self.terms, "observation"))
 
-    def _initialize(self, scene) -> "ObservationGroup":
+    def _initialize(self, scene: "Scene") -> "ObservationGroup":
         return replace(
-            self, terms={name: _bind(term, scene) for name, term in self.terms.items()}
+            self, terms=tuple((name, _bind(term, scene)) for name, term in self.terms)
         )
 
     @cached_property
     def shape(self) -> torch.Size:
-        return torch.Size((sum(term.shape.numel() for term in self.terms.values()),))
+        return torch.Size((sum(term.shape.numel() for _, term in self.terms),))
 
     @cached_property
     def keys(self) -> tuple[str, ...]:
-        return tuple(self.terms.keys())
+        return tuple(name for name, _ in self.terms)
 
-    def symmetry_transform(self, scene) -> SymmetryTransform:
+    def symmetry_transform(self, scene: "Scene") -> SymmetryTransform:
         transforms = []
-        for name, term in self.terms.items():
+        for name, term in self.terms:
             mirror = getattr(term, "symmetry_transform", None)
             if mirror is None:
                 raise ValueError(f"Observation term {name!r} does not declare a mirror")
@@ -86,7 +111,7 @@ class ObservationGroup:
         /,
     ) -> torch.Tensor:
         parts = []
-        for name, term in self.terms.items():
+        for name, term in self.terms:
             value = term(physical_state, mdp_state)
             flat = value.reshape(*mdp_state.batch_size, -1)
             if flat.shape[-1] != term.shape.numel():
@@ -100,23 +125,23 @@ class ObservationGroup:
 
 @dataclass(frozen=True)
 class RewardGroup:
-    """Concatenate named scalar reward terms in definition order."""
+    """Concatenate scalar reward terms stored as an ordered tuple of pairs."""
 
-    terms: dict[str, RewardTerm]
+    terms: tuple[tuple[str, RewardTerm], ...] | dict[str, RewardTerm] = field(
+        metadata={"named_pairs": True}
+    )
 
-    def __post_init__(self):
-        if not self.terms:
-            raise ValueError("A reward group must contain at least one term")
-        object.__setattr__(self, "terms", dict(self.terms))
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "terms", _term_pairs(self.terms, "reward"))
 
-    def _initialize(self, scene) -> "RewardGroup":
+    def _initialize(self, scene: "Scene") -> "RewardGroup":
         return replace(
-            self, terms={name: _bind(term, scene) for name, term in self.terms.items()}
+            self, terms=tuple((name, _bind(term, scene)) for name, term in self.terms)
         )
 
     @cached_property
     def keys(self) -> tuple[str, ...]:
-        return tuple(self.terms.keys())
+        return tuple(name for name, _ in self.terms)
 
     def contributions(
         self,
@@ -125,7 +150,7 @@ class RewardGroup:
         /,
     ) -> dict[str, torch.Tensor]:
         return {
-            name: term(physical_state, mdp_state) for name, term in self.terms.items()
+            name: term(physical_state, mdp_state) for name, term in self.terms
         }
 
     def __call__(
@@ -156,7 +181,7 @@ class MDP:
     truncations: dict[str, EpisodeEndTerm] = field(default_factory=dict)
     _history: dict[str, ObservationTerm] = field(default_factory=dict, init=False, repr=False)
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         """Bind terms that supply a scene initialization hook."""
         _require_groups(self.observations, "observation", ObservationGroup)
         _require_groups(self.rewards, "reward", RewardGroup)
@@ -173,7 +198,7 @@ class MDP:
                 name: _bind(term, scene) for name, term in self.truncations.items()
             },
         )
-        terms = [term for group in (*bound.observations.values(), *bound.rewards.values()) for term in group.terms.values()]
+        terms = [term for group in (*bound.observations.values(), *bound.rewards.values()) for _, term in group.terms]
         terms.extend((*bound.terminations.values(), *bound.truncations.values()))
         for term in terms:
             for name, reader in getattr(term, "state_history", {}).items():
@@ -191,7 +216,7 @@ class MDP:
         terms = [
             term
             for group in (*self.observations.values(), *self.rewards.values())
-            for term in group.terms.values()
+            for _, term in group.terms
         ]
         terms.extend(self.terminations.values())
         terms.extend(self.truncations.values())
@@ -225,7 +250,7 @@ class MDP:
         # Task preparation runs before scene binding, when reader shapes are
         # unavailable but every history key must already be discoverable.
         history = dict.fromkeys(self._history)
-        terms = [term for group in (*self.observations.values(), *self.rewards.values()) for term in group.terms.values()]
+        terms = [term for group in (*self.observations.values(), *self.rewards.values()) for _, term in group.terms]
         terms.extend((*self.terminations.values(), *self.truncations.values()))
         for term in terms:
             history.update(dict.fromkeys(getattr(term, "state_history", {})))
@@ -282,7 +307,7 @@ class MDP:
             batch_size=state.batch_size, device=state.device,
         )
 
-    def _advance_task_state(self, physical_state: TensorDict, state: TensorDict) -> dict:
+    def _advance_task_state(self, physical_state: TensorDict, state: TensorDict) -> dict[str, torch.Tensor]:
         """Update owned successor memory after scoring; return extra transition fields."""
         return {}
 
@@ -319,7 +344,11 @@ class MDP:
         return survival
 
     @staticmethod
-    def _evaluate(terms, physical_state, mdp_state):
+    def _evaluate(
+        terms: Mapping[str, EpisodeEndTerm],
+        physical_state: TensorDict,
+        mdp_state: TensorDict,
+    ) -> TensorDict:
         values = TensorDict(
             {name: term(physical_state, mdp_state) for name, term in terms.items()},
             batch_size=mdp_state.batch_size,
@@ -331,7 +360,7 @@ class MDP:
         return values
 
     @staticmethod
-    def _any(terms, mdp_state):
+    def _any(terms: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         column_shape = (*mdp_state.batch_size, 1)
         _check_column_shape(terms, column_shape)
         flags = torch.zeros(column_shape, device=mdp_state.device, dtype=torch.bool)

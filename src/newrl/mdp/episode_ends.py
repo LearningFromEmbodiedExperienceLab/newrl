@@ -1,7 +1,13 @@
+from tensordict import TensorDict
+
+import torch
 from dataclasses import dataclass, replace
-from typing import ClassVar
+from typing import ClassVar, Self, TYPE_CHECKING
 
 from .observations import BodyHeight, ProjectedGravity
+
+if TYPE_CHECKING:
+    from newrl.scene import Scene
 
 
 @dataclass(frozen=True)
@@ -9,7 +15,7 @@ class Timeout:
     steps: int
     physical_fields: ClassVar[frozenset] = frozenset()
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         return mdp_state["episode_step"] >= self.steps
 
 
@@ -19,13 +25,13 @@ class HeightTermination:
     min_height: float = 0.35
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return self.height.physical_fields
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         return replace(self, height=self.height._initialize(scene))
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         height = physical_state[self.height.entity, "body_pose_w"].index_select(
             1, self.height._indices
         )[..., 2]
@@ -38,13 +44,13 @@ class TiltTermination:
     min_upright_cosine: float = 0.5
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return self.gravity.physical_fields
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         return replace(self, gravity=self.gravity._initialize(scene))
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         gravity = self.gravity(physical_state, mdp_state)
         return -gravity[:, :1, 2] < self.min_upright_cosine
 
@@ -55,7 +61,7 @@ class ClipEnd:
 
     physical_fields: ClassVar[frozenset] = frozenset()
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         return mdp_state["clip_end"]
 
 
@@ -68,18 +74,18 @@ class TrackingDeviation:
     threshold: float = 0.25
     softness: float = 0.02
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.quantity not in ("height", "tilt") or self.threshold <= 0 or self.softness <= 0:
             raise ValueError("Tracking deviation requires height/tilt and a positive threshold")
 
     @property
-    def physical_fields(self):
+    def physical_fields(self) -> frozenset[tuple[str, str]]:
         return self.body.physical_fields
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         return replace(self, body=self.body._initialize(scene))
 
-    def error(self, physical_state, mdp_state):
+    def error(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         pose = physical_state[self.body.entity, "body_pose_w"].index_select(-2, self.body._indices)[..., 0, :]
         target = mdp_state["reference", "root_pose"]
         if self.quantity == "height":
@@ -90,8 +96,8 @@ class TrackingDeviation:
             error = (actual_z - target_z).abs()
         return error
 
-    def __call__(self, physical_state, mdp_state):
+    def __call__(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         return self.error(physical_state, mdp_state) > self.threshold
 
-    def survival(self, physical_state, mdp_state):
+    def survival(self, physical_state: TensorDict, mdp_state: TensorDict) -> torch.Tensor:
         return ((self.threshold - self.error(physical_state, mdp_state)) / self.softness).sigmoid()

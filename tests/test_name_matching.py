@@ -7,6 +7,7 @@ import torch
 import warp as wp
 from tensordict import TensorDict
 
+from newrl.scene import RobotEntity
 from newrl.mdp.observations import BodyHeight, BodyLinearVelocity, EntityField
 from newrl.mdp.rewards import JointLimit, JointVel2, TrackBodyMotion
 from newrl.utils.string import resolve_matching_names, resolve_matching_names_values, resolve_scene_names
@@ -27,7 +28,7 @@ class NameMatchingTests(unittest.TestCase):
         self.assertEqual(len(expected),14)
         task = G1MotionTracking()
         for name in ('body_pos','body_ori','body_lin_vel','body_ang_vel'):
-            self.assertEqual(resolve_scene_names(task.mdp.rewards['tracking'].terms[name].body_names,names),expected)
+            self.assertEqual(resolve_scene_names(dict(task.mdp.rewards['tracking'].terms)[name].body_names,names),expected)
         self.assertEqual(resolve_scene_names(SuperMimicConfig().wm_observations['body_pos_b'].body_names,names),expected)
 
     def test_scene_names_mix_leaf_and_full_names_in_either_order(self):
@@ -55,8 +56,22 @@ class NameMatchingTests(unittest.TestCase):
 
 
 class TermSelectionTests(unittest.TestCase):
+    def test_bound_term_serializes_as_unbound_config(self):
+        from newrl.utils.config import dump, load
+
+        term = EntityField("robot", "joint_vel", joint_names=".*_knee")
+        bound = term._initialize(self.scene)
+        self.assertEqual(dump(bound), dump(term))
+        with self.assertRaises(RuntimeError):
+            _ = term.shape
+        rebound = load(dump(bound))._initialize(self.scene)
+        torch.testing.assert_close(
+            rebound(self.physical, self.memory), bound(self.physical, self.memory)
+        )
+
     def setUp(self):
-        robot = SimpleNamespace(
+        robot = RobotEntity(
+            targets=None, root_q=None, default_position=None, action=None,
             joint_names=('robot/right_knee','robot/left_knee','robot/waist'),
             body_names=('robot/right_foot','robot/base','robot/left_foot'),
             q=torch.arange(3).unsqueeze(0),qd=torch.arange(3).unsqueeze(0),bodies=torch.arange(3).unsqueeze(0),

@@ -145,7 +145,7 @@ class EnvironmentTests(unittest.TestCase):
                 self.assertTrue(sensor["last_contact_pos_valid"].any(dim=-1).all())
                 self.assertTrue(torch.isfinite(sensor["last_contact_pos_w"]).all())
                 air = sensor["current_air_time"]
-                weight = env.mdp.rewards["regularization"].terms["feet_air_time"].weight
+                weight = dict(env.mdp.rewards["regularization"].terms)["feet_air_time"].weight
                 expected_reward = weight * ((air > 0.05) & (air < 0.5)).sum(
                     -1, keepdim=True
                 )

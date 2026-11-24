@@ -6,6 +6,8 @@ All processed quaternions are xyzw; twists are world-frame, link-origin
 linear velocity followed by angular velocity. Source CSVs are 30 Hz.
 """
 
+from collections.abc import Sequence
+
 import fcntl
 import hashlib
 import json
@@ -34,7 +36,7 @@ JOINT_NAMES = tuple(
 FIELDS = ("root_pose", "root_twist", "joint_pos", "joint_vel", "body_pose_w", "body_twist_w")
 
 
-def _download(url: str, destination: Path):
+def _download(url: str, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     # Publish only complete files; a failed download never becomes a cache hit.
     with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as output:
@@ -65,7 +67,15 @@ def _angular_velocity(quat: np.ndarray, fps: float) -> np.ndarray:
 
 
 class LAFAN1Dataset:
-    def __init__(self, path=None, *, model_path=None, fps=50.0, device="cpu", cache_dir=None):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        model_path: str | Path | None = None,
+        fps: float = 50.0,
+        device: torch.device | str = "cpu",
+        cache_dir: str | Path | None = None,
+    ) -> None:
         if not np.isfinite(fps) or fps <= 0:
             raise ValueError("Motion fps must be finite and positive")
         cache = Path(cache_dir) if cache_dir is not None else Path(__file__).resolve().parents[3] / ".cache" / "lafan1"
@@ -145,7 +155,7 @@ class LAFAN1Dataset:
         self.path = processed
 
     @staticmethod
-    def _process(files, model_path, fps, destination):
+    def _process(files: Sequence[Path], model_path: Path, fps: float, destination: Path) -> None:
         model = mujoco.MjModel.from_xml_path(str(model_path))
         joints = [model.joint(name) for name in JOINT_NAMES]
         if model.nq != 36 or model.nv != 35:
@@ -204,7 +214,13 @@ class LAFAN1Dataset:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def get_slice(self, motion_id, motion_t, offsets, fields=FIELDS):
+    def get_slice(
+        self,
+        motion_id: torch.Tensor,
+        motion_t: torch.Tensor,
+        offsets: torch.Tensor,
+        fields: Sequence[str] = FIELDS,
+    ) -> TensorDict:
         """Return TD[*batch,T], clamped independently inside each selected clip.
 
         motion_id and motion_t are integer [*batch] indices (strip scalar

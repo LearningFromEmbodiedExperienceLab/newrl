@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import torch
 from tensordict import TensorDict
 
+from newrl.scene import RobotEntity
 from newrl.mdp.base import MDP, ObservationGroup, RewardGroup
 from newrl.mdp.episode_ends import HeightTermination, TiltTermination, Timeout
 from newrl.mdp.observations import BodyHeight, BodyLinearVelocity, ProjectedGravity
@@ -25,7 +26,8 @@ from newrl.mdp.rewards import (
 
 class MDPTests(unittest.TestCase):
     def test_history_updates_only_on_step_and_retains_imagination_gradients(self):
-        robot = SimpleNamespace(
+        robot = RobotEntity(
+            targets=None, bodies=None, root_q=None, default_position=None, action=None,
             q=torch.zeros(1, 2, dtype=torch.long), qd=torch.zeros(1, 2, dtype=torch.long),
             joint_names=('robot/a', 'robot/b'), body_names=(),
         )
@@ -108,7 +110,9 @@ class MDPTests(unittest.TestCase):
     def test_fall_and_observations_share_only_current_physical_features(self):
         scene = SimpleNamespace(
             entities={
-                "robot": SimpleNamespace(
+                "robot": RobotEntity(
+                    joint_names=(), q=None, qd=None, targets=None, root_q=None,
+                    default_position=None, action=None,
                     body_names=("robot/base",),
                     bodies=torch.zeros(1, 1, dtype=torch.long),
                 )
@@ -183,7 +187,9 @@ class RewardRangeTests(unittest.TestCase):
         batch_size = (2, 3)
         scene = SimpleNamespace(
             entities={
-                "robot": SimpleNamespace(
+                "robot": RobotEntity(
+                    joint_names=(), q=None, qd=None, targets=None, root_q=None,
+                    default_position=None, action=None,
                     body_names=("robot/base", "robot/ignored", "robot/foot"),
                     bodies=torch.zeros(2, 3, dtype=torch.long),
                 )
@@ -253,7 +259,9 @@ class RewardRangeTests(unittest.TestCase):
 
 
 def _bind_joints(term, names=("LF_HAA", "LF_KFE")):
-    entity = SimpleNamespace(
+    entity = RobotEntity(
+        q=None, targets=None, bodies=None, root_q=None, default_position=None,
+        action=None, body_names=(),
         joint_names=tuple(f"robot/{name}" for name in names),
         qd=torch.zeros(1, len(names), dtype=torch.long),
     )

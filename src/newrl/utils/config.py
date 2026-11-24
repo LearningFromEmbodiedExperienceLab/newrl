@@ -30,8 +30,9 @@ defaults. These apply after preset selection and before explicit field overrides
 paths through absent optional configs are skipped.
 Use ``save_config`` and ``load_config`` for files, and ``dump`` and ``load``
 for in-memory JSON-compatible data. Type tags preserve dataclasses, tuples,
-and slices across a round trip. Dataclass fields with ``init=False`` are
-omitted, and callable references are restored by import path. Load trusted
+and slices across a round trip. Dataclass fields with ``init=False`` and
+fields declared with ``runtime_field()`` are omitted. Callable references are
+restored by import path. Load trusted
 config data because loading imports objects and invokes constructors.
 """
 
@@ -52,7 +53,7 @@ _MISSING = dataclasses.MISSING
 class ConfigStore:
     """Store named presets by group and construct independent values on lookup."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._nodes: dict[tuple[str, str], Any] = {}
 
     def store(self, name: str, node: Any, *, group: str) -> None:
@@ -107,6 +108,17 @@ def load_config(path: str | Path) -> Any:
     return load(json.loads(Path(path).read_text()))
 
 
+def runtime_field(default: Any = None) -> Any:
+    """Declare a keyword-only field for runtime data supplied via replace()."""
+    return dataclasses.field(
+        default=default,
+        kw_only=True,
+        repr=False,
+        compare=False,
+        metadata={"runtime": True},
+    )
+
+
 def dump(value: Any) -> Any:
     """Encode a config tree. ``init=False`` fields are omitted."""
     if value is None or isinstance(value, (bool, int, str)):
@@ -130,7 +142,7 @@ def dump(value: Any) -> Any:
         fields = {
             field.name: dump(getattr(value, field.name))
             for field in dataclasses.fields(value)
-            if field.init
+            if field.init and not field.metadata.get("runtime")
         }
         return {
             "__type__": _qualname(type(value)),
@@ -257,7 +269,7 @@ def main(config_cls: type, *, defaults: Mapping[str, Any] | None = None) -> Call
 
     def decorate(fn: Callable) -> Callable:
         @wraps(fn)
-        def wrapper(argv: Sequence[str] | None = None):
+        def wrapper(argv: Sequence[str] | None  =  None) -> Any:
             tokens = list(sys.argv[1:] if argv is None else argv)
             config_out = None
             overrides = []
@@ -302,12 +314,16 @@ def _assign(
     if not dataclasses.is_dataclass(obj):
         raise KeyError(f"Cannot override {head!r} on {type(obj).__name__}")
     hints = get_type_hints(type(obj))
-    if head not in hints:
+    field = next((field for field in dataclasses.fields(obj) if field.name == head), None)
+    if head not in hints or field is None or not field.init or field.metadata.get("runtime"):
         raise KeyError(f"{type(obj).__name__} has no field {head!r}")
     if rest:
+        current = getattr(obj, head)
+        if field.metadata.get("named_pairs"):
+            current = dict(current)
         return dataclasses.replace(
             obj, **{head: _assign(
-                getattr(obj, head), rest, raw, selection=selection, skip_none=skip_none
+                current, rest, raw, selection=selection, skip_none=skip_none
             )}
         )
     value = selection if selection is not _MISSING else parse_literal(raw)

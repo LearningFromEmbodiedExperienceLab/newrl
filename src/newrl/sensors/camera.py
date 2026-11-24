@@ -1,5 +1,7 @@
 """Shared lifecycle for cameras sampled after the control step."""
 
+import newton
+
 from typing import Protocol, runtime_checkable
 
 import torch
@@ -9,11 +11,24 @@ import torch
 class FrameCamera(Protocol):
     requires_bvh_refit: bool
 
-    def sample(self, state, *, reset=False, reset_mask=None) -> None: ...
+    def sample(
+        self,
+        state: newton.State,
+        *,
+        reset: bool = False,
+        reset_mask: torch.Tensor | None = None,
+    ) -> None: ...
     def checkpoint_views(self) -> dict[str, torch.Tensor]: ...
 
 
-def camera_refresh_mask(remaining, interval, *, reset, reset_mask, tick=1):
+def camera_refresh_mask(
+    remaining: torch.Tensor | None,
+    interval: int,
+    *,
+    reset: bool,
+    reset_mask: torch.Tensor | None,
+    tick: int = 1,
+) -> torch.Tensor | None:
     """Advance per-world capture clocks, or restart clocks selected for reset."""
     if remaining is None:
         return reset_mask

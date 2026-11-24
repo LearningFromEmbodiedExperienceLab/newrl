@@ -1,17 +1,24 @@
 """Sample CUDA memory at training phase boundaries."""
 
+from typing import TYPE_CHECKING
+
+from newrl.algos.interfaces import Learner
+
 from collections.abc import Mapping
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 
 import torch
 import warp as wp
-from tensordict import TensorDictBase
+from tensordict import TensorDictBase, TensorDict
+
+if TYPE_CHECKING:
+    from newrl.env import _EnvironmentCore
 
 _MIB = 1024**2
 
 
-def storage_bytes(*values, seen: set[int] | None = None) -> int:
+def storage_bytes(*values: object, seen: set[int] | None  =  None) -> int:
     """Count identifiable CUDA allocations, including Warp-owned arrays."""
     if seen is None:
         seen = set()
@@ -43,7 +50,7 @@ def storage_bytes(*values, seen: set[int] | None = None) -> int:
 
 
 class CudaMemoryProfiler:
-    def __init__(self, device: torch.device):
+    def __init__(self, device: torch.device) -> None:
         torch.cuda.init()
         self.device = device
 
@@ -74,7 +81,7 @@ class CudaMemoryProfiler:
             f"{prefix}/torch_cache_mib": (reserved - allocated) / _MIB,
         }
 
-    def environment(self, env) -> dict[str, float]:
+    def environment(self, env: "_EnvironmentCore") -> dict[str, float]:
         """Inventory exposed buffers. Native workspaces can live outside this inventory."""
         seen: set[int] = set()
         model = storage_bytes(vars(env.model), seen=seen)
@@ -101,7 +108,7 @@ class CudaMemoryProfiler:
             "memory/buffers/solver_collision_arrays_mib": solver / _MIB,
         }
 
-    def learner(self, policy) -> dict[str, float]:
+    def learner(self, policy: Learner) -> dict[str, float]:
         seen: set[int] = set()
         metrics = {}
         if isinstance(policy, torch.nn.Module):
@@ -120,7 +127,7 @@ class CudaMemoryProfiler:
             )
         return metrics
 
-    def rollout(self, batch, carry) -> dict[str, float]:
+    def rollout(self, batch: TensorDict, carry: TensorDict) -> dict[str, float]:
         seen: set[int] = set()
         return {
             "memory/buffers/rollout_mib": storage_bytes(batch, seen=seen) / _MIB,

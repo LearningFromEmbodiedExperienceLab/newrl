@@ -3,7 +3,7 @@
 from contextlib import nullcontext
 from dataclasses import dataclass
 from math import isfinite, log, pi
-from typing import ClassVar
+from typing import ClassVar, TYPE_CHECKING
 
 import torch
 from tensordict import TensorDict
@@ -33,6 +33,9 @@ from newrl.utils.config import cs
 from newrl.utils.profiling import StageProfiler
 from newrl.utils.symmetry import SymmetryTransform
 
+if TYPE_CHECKING:
+    from newrl.env import StatefulEnvironment
+
 _ACTIVATIONS = {
     "mish": nn.Mish,
     "relu": nn.ReLU,
@@ -46,39 +49,68 @@ FLOW_HIST = "flow_hist"
 
 @dataclass
 class GenPOConfig:
+    # Registry identifier used to select the algorithm.
     algo_id: ClassVar[str] = "genpo"
+    # Display name for runs and logs.
     name: str = "genpo"
+    # Environment steps per world collected before each update.
     update_every: int = 32
+    # Passes over the rollout per update.
     num_epochs: int = 4
+    # Minibatches per epoch.
     num_minibatches: int = 4
+    # Learning rate for the actor and critic optimizer.
     lr: float = 5e-4
+    # Optimizer weight decay.
     weight_decay: float = 0.01
+    # Use Muon for eligible matrices and AdamW for the remaining parameters.
     muon: bool = False
+    # Per-step reward discount.
     gamma: float = 0.99
+    # Generalized advantage estimation trace decay.
     lam: float = 0.95
+    # Ratio clip around one, as a symmetric width or (lower, upper) widths.
     clip_eps: float | tuple[float, float] = 0.2
+    # Coefficient of the augmented-flow entropy bonus in the actor loss.
     entropy_coef: float = 0.0
+    # Weight of the critic regression loss.
     value_coef: float = 1.0
+    # Maximum gradient norm, applied separately to actor and critic.
     max_grad_norm: float = 1.0
+    # Floor the summed per-step reward at zero before computing returns.
     clamp_reward: bool = False
+    # Scale rewards by the RMS of real discounted returns.
     normalize_reward: bool = False
+    # Hidden layer widths of the actor.
     actor_hidden: tuple[int, ...] = (256, 256, 256)
+    # Hidden layer widths of the critic.
     critic_hidden: tuple[int, ...] = (512, 256, 256)
+    # Hidden layer activation name.
     activation: str = "mish"
     # Retained for config round trips with the earlier GenPO preset.
+    # Legacy lower standard-deviation bound retained for config compatibility.
     min_std: float = 1e-2
+    # Legacy upper standard-deviation bound retained for config compatibility.
     max_std: float = 1.0
 
+    # Observation groups concatenated in order for the actor.
     policy_obs_keys: tuple[str, ...] = ("proprio", "privileged", "command")
+    # Observation groups concatenated in order for the critic.
     critic_obs_keys: tuple[str, ...] = ("proprio", "privileged", "command")
+    # Collect timing metrics for the learner update.
     profile: bool = False
+    # Width of the flow timestep embedding.
     timestep_embed_dim: int = 8
+    # Number of reversible flow steps used to generate each action.
     flow_steps: int = 5
+    # History mixing coefficient in the reversible flow. Must be nonzero.
     sigma: float = 0.75
+    # Target augmented KL for adapting the actor learning rate. None disables adaptation.
     desired_kl: float | None = 0.04
+    # Weight of the mirror-equivariance loss. Zero disables it.
     symmetry_coef: float = 0.0
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.update_every < 1 or self.num_epochs < 1 or self.num_minibatches < 1:
             raise ValueError(
                 "update_every, num_epochs, and num_minibatches must be positive"
@@ -105,7 +137,7 @@ class GenPOConfig:
         if not isfinite(self.symmetry_coef) or self.symmetry_coef < 0.0:
             raise ValueError("symmetry_coef must be finite and nonnegative")
 
-    def build(self, env) -> "GenPO":
+    def build(self, env: "StatefulEnvironment") -> "GenPO":
         mirrors = None
         if self.symmetry_coef > 0.0:
             mirrors = (
@@ -136,7 +168,7 @@ class ReversibleFlowActor(nn.Module):
         action_dim: int,
         activation: type[nn.Module],
         cfg: GenPOConfig,
-    ):
+    ) -> None:
         super().__init__()
         if action_dim < 1:
             raise ValueError("action_dim must be positive")
@@ -226,7 +258,7 @@ class GenPO(nn.Module):
         critic_dim: int,
         action_dim: int,
         mirrors: tuple[SymmetryTransform, SymmetryTransform] | None = None,
-    ):
+    ) -> None:
         super().__init__()
         self.cfg = cfg
         if cfg.symmetry_coef > 0.0 and mirrors is None:

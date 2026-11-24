@@ -1,5 +1,7 @@
 """Opt-in CPU wall time and CUDA stream timing."""
 
+from collections.abc import Iterator
+
 from collections import defaultdict
 from contextlib import contextmanager
 from time import perf_counter
@@ -10,12 +12,12 @@ import torch
 class StageProfiler:
     """Collect event pairs without synchronizing on each stage."""
 
-    def __init__(self, device: torch.device):
+    def __init__(self, device: torch.device) -> None:
         self.device = device
         self._samples = defaultdict(list)
 
     @contextmanager
-    def stage(self, name: str):
+    def stage(self, name: str) -> Iterator[None]:
         start = end = None
         if self.device.type == "cuda":
             start = torch.cuda.Event(enable_timing=True)

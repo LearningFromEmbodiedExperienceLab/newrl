@@ -6,8 +6,15 @@ successor observation is kept for that step, and finished worlds are replaced
 with their reset observation before the next action.
 """
 
+from typing import TYPE_CHECKING
+
+from newrl.algos.interfaces import OnPolicyLearner
+
 import torch
 from tensordict import TensorDict
+
+if TYPE_CHECKING:
+    from newrl.env import StatefulEnvironment
 
 _ENV_OBSERVATION = "observation"
 _ENV_REWARD = "reward"
@@ -15,7 +22,12 @@ _ENV_TERMINATED = "terminated"
 _ENV_DONE = "done"
 
 
-def collect_rollout(env, policy, steps: int, carry: TensorDict):
+def collect_rollout(
+    env: "StatefulEnvironment",
+    policy: OnPolicyLearner,
+    steps: int,
+    carry: TensorDict,
+) -> tuple[TensorDict, TensorDict]:
     """Collect ``steps`` transitions for every world.
 
     ``carry`` is the TensorDict the policy reads for the next action. The
@@ -56,7 +68,7 @@ def _output_carry(transition: TensorDict) -> TensorDict:
     return transition.select(*fields).detach().clone()
 
 
-def _require(transition, key):
+def _require(transition: TensorDict, key: str) -> torch.Tensor | TensorDict:
     if key not in transition:
         raise KeyError(
             f"Transition is missing {key!r}. The collector reads "

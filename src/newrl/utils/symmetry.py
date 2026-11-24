@@ -7,7 +7,7 @@ from torch import nn
 
 
 class SymmetryTransform(nn.Module):
-    def __init__(self, permutation: Sequence[int], signs: Sequence[int]):
+    def __init__(self, permutation: Sequence[int], signs: Sequence[int]) -> None:
         super().__init__()
         width = len(permutation)
         if sorted(permutation) != list(range(width)):

@@ -13,8 +13,15 @@ including on termination or truncation, and it is recorded before any reset.
 and stops the advantage trace at the episode boundary.
 """
 
+from typing import TYPE_CHECKING
+
+from collections.abc import Iterator
+
 import torch
 from tensordict import TensorDict
+
+if TYPE_CHECKING:
+    from newrl.mdp.base import MDP
 
 POLICY_OBSERVATION = "policy_observation"
 CRITIC_OBSERVATION = "critic_observation"
@@ -37,7 +44,7 @@ BATCH_KEYS = (
 )
 
 
-def group_width(mdp, groups: tuple[str, ...]) -> int:
+def group_width(mdp: "MDP", groups: tuple[str, ...]) -> int:
     return sum(mdp.observations[name].shape.numel() for name in groups)
 
 
@@ -68,7 +75,7 @@ def aggregate_reward(batch: TensorDict) -> torch.Tensor:
     return torch.cat(parts, dim=-1).sum(dim=-1, keepdim=True)
 
 
-def minibatches(batch: TensorDict, num_minibatches: int):
+def minibatches(batch: TensorDict, num_minibatches: int) -> Iterator[TensorDict]:
     flat = batch.reshape(-1)
     usable = (flat.shape[0] // num_minibatches) * num_minibatches
     if usable == 0:

@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
 
 import newton
 import torch
@@ -10,18 +10,21 @@ import warp as wp
 
 from .steel import reconstruct_augmented_drive_torque
 
+if TYPE_CHECKING:
+    from newrl.scene import Scene
+
 
 class SolverAdapter(Protocol):
     solver: object
     contacts: newton.Contacts | None
-    observables: object
-    contact_observables: object
+    observables: newton.solvers.SolverMuJoCo.Observables | SimpleNamespace | None
+    contact_observables: newton.solvers.SolverMuJoCo.Observables | newton.solvers.SolverSteel.Observables | None
 
     def step(
-        self, state, state_next, control, contacts, dt, *, sample_contacts: bool
+        self, state: newton.State, state_next: newton.State, control: newton.Control, contacts: newton.Contacts | None, dt: float, *, sample_contacts: bool
     ) -> None: ...
 
-    def reset(self, state, ids, mask) -> None: ...
+    def reset(self, state: newton.State, ids: torch.Tensor | slice, mask: torch.Tensor) -> None: ...
 
     def checkpoint_views(self) -> dict[str, torch.Tensor]: ...
 
@@ -29,15 +32,15 @@ class SolverAdapter(Protocol):
 class MujocoSim:
     def __init__(
         self,
-        config,
-        scene,
-        contacts,
-        needs_torque,
-        needs_contacts,
+        config: "MujocoSimConfig",
+        scene: "Scene",
+        contacts: newton.Contacts | None,
+        needs_torque: bool,
+        needs_contacts: bool,
         *,
-        deterministic,
-        use_mujoco_contacts=False,
-    ):
+        deterministic: bool,
+        use_mujoco_contacts: bool=False,
+    ) -> None:
         self.model = scene.model
         self.num_envs = scene.model.world_count
         self.solver = newton.solvers.SolverMuJoCo(
@@ -81,19 +84,28 @@ class MujocoSim:
             if (array := getattr(self.solver.mjw_data, name)).size
         }
 
-    def step(self, state, state_next, control, contacts, dt, *, sample_contacts):
+    def step(
+        self,
+        state: newton.State,
+        state_next: newton.State,
+        control: newton.Control,
+        contacts: newton.Contacts | None,
+        dt: float,
+        *,
+        sample_contacts: bool,
+    ) -> None:
         observables = self.contact_observables if sample_contacts else self.observables
         self.solver.step(
             state, state_next, control, contacts, dt, observables=observables
         )
 
-    def reset(self, state, ids, mask):
+    def reset(self, state: newton.State, ids: torch.Tensor | slice, mask: torch.Tensor) -> None:
         self.solver.reset(state, world_mask=wp.from_torch(mask, dtype=wp.bool))
         wp.to_torch(self.solver.mjw_data.time)[ids] = 0
         for name, defaults in self._reset_defaults.items():
             wp.to_torch(getattr(self.solver.mjw_data, name))[ids] = defaults[ids]
 
-    def checkpoint_views(self):
+    def checkpoint_views(self) -> dict[str, torch.Tensor]:
         return {
             name: wp.to_torch(array).reshape(self.num_envs, -1)
             for name in (
@@ -110,8 +122,8 @@ class MujocoSim:
 
 class SteelSim:
     def __init__(
-        self, config, scene, contacts, needs_torque, needs_contacts, *, deterministic
-    ):
+        self, config: "SteelSimConfig", scene: "Scene", contacts: newton.Contacts | None, needs_torque: bool, needs_contacts: bool, *, deterministic: bool
+    ) -> None:
         self.model = scene.model
         self.contacts = contacts
         self.num_envs = scene.model.world_count
@@ -160,7 +172,16 @@ class SteelSim:
             for name in ("q", "qd", "targets")
         )
 
-    def step(self, state, state_next, control, contacts, dt, *, sample_contacts):
+    def step(
+        self,
+        state: newton.State,
+        state_next: newton.State,
+        control: newton.Control,
+        contacts: newton.Contacts | None,
+        dt: float,
+        *,
+        sample_contacts: bool,
+    ) -> None:
         self.solver.step(
             state,
             state_next,
@@ -189,7 +210,7 @@ class SteelSim:
                 device=self.model.device,
             )
 
-    def reset(self, state, ids, mask):
+    def reset(self, state: newton.State, ids: torch.Tensor | slice, mask: torch.Tensor) -> None:
         self.solver.reset(state, world_mask=wp.from_torch(mask, dtype=wp.bool))
         joint_world = wp.to_torch(self.model.joint_world).long()
         for name, starts in (
@@ -201,7 +222,7 @@ class SteelSim:
             target = wp.to_torch(getattr(state, name))
             target[mask[worlds]] = wp.to_torch(getattr(self.model, name))[mask[worlds]]
 
-    def checkpoint_views(self):
+    def checkpoint_views(self) -> dict[str, torch.Tensor]:
         return {
             "constraint_overflow": wp.to_torch(self.solver.constraint_overflow)[
                 : self.num_envs
@@ -223,13 +244,13 @@ class MujocoSimConfig:
 
     def build(
         self,
-        scene,
-        contacts,
-        needs_torque,
-        needs_contacts,
+        scene: "Scene",
+        contacts: newton.Contacts | None,
+        needs_torque: bool,
+        needs_contacts: bool,
         *,
-        deterministic,
-        use_mujoco_contacts=False,
+        deterministic: bool,
+        use_mujoco_contacts: bool=False,
     ) -> SolverAdapter:
         return MujocoSim(
             self,
@@ -249,13 +270,13 @@ class SteelSimConfig:
 
     def build(
         self,
-        scene,
-        contacts,
-        needs_torque,
-        needs_contacts,
+        scene: "Scene",
+        contacts: newton.Contacts | None,
+        needs_torque: bool,
+        needs_contacts: bool,
         *,
-        deterministic,
-        use_mujoco_contacts=False,
+        deterministic: bool,
+        use_mujoco_contacts: bool=False,
     ) -> SolverAdapter:
         if use_mujoco_contacts:
             raise ValueError("collision=mujoco requires the MuJoCo solver")

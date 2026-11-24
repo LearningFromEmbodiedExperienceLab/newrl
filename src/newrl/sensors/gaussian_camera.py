@@ -1,16 +1,21 @@
 """Body-mounted RGB and depth camera for a shared static Gaussian splat scene."""
 
+import newton
+
 from dataclasses import dataclass
 from fractions import Fraction
 from math import isfinite, pi, tan
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 import torch
 import warp as wp
 from tensordict import TensorDict
 
-from ..utils.string import resolve_scene_names
 from .camera import camera_refresh_mask
+
+if TYPE_CHECKING:
+    from newrl.scene import Scene
+    from newrl.scene import RobotEntity
 
 
 @dataclass(frozen=True)
@@ -48,7 +53,7 @@ class GaussianCameraConfig:
     tile_size: int = 16
     temporal_culling: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if min(self.width, self.height) < 1 or not 0 < self.fov_y < pi:
             raise ValueError("Camera dimensions and vertical field of view must be positive")
         if not 0 < self.near < self.far < float("inf"):
@@ -67,7 +72,7 @@ class GaussianCameraConfig:
         if abs(sum(x*x for x in self.world_from_cloud[3:]) - 1.0) > 1e-5:
             raise ValueError("Cloud transform must use a unit quaternion")
 
-    def build(self, scene):
+    def build(self, scene: "Scene") -> "GaussianCamera":
         return GaussianCamera(self, scene.entities[self.entity], scene.model)
 
 
@@ -78,7 +83,7 @@ def _view_matrices(
     mount: wp.transform,
     cloud_from_world: wp.transform,
     views: wp.array[wp.mat44],
-):
+) -> None:
     world = wp.tid()
     view = wp.transform_inverse(cloud_from_world * poses[bodies[world]] * mount)
     rot = wp.quat_to_matrix(wp.transform_get_rotation(view))
@@ -94,13 +99,18 @@ def _view_matrices(
 class GaussianCamera:
     requires_bvh_refit = False
 
-    def __init__(self, config, entity, model):
+    def __init__(
+        self,
+        config: GaussianCameraConfig,
+        entity: "RobotEntity",
+        model: newton.Model,
+    ) -> None:
         self.config = config
         self.fields = {
             "rgb": ("rgb",), "depth": ("depth", "valid"), "rgbd": ("rgb", "depth", "valid")
         }[config.mode]
         self.model = model
-        (body,) = resolve_scene_names(config.body, entity.body_names)
+        (body,), _ = entity.find_bodies(config.body)
         self.body_ids = entity.bodies[:, body]
         self._bodies = wp.from_torch(self.body_ids.to(torch.int32))
         self.shape = torch.Size((config.height, config.width))
@@ -115,7 +125,7 @@ class GaussianCamera:
             wp.transform(wp.vec3(*transform[:3]), wp.quat(*transform[3:]))
         )
 
-    def initialize(self, scene):
+    def initialize(self, scene: "Scene") -> None:
         try:
             from gsrender.live import LiveGaussianRenderer
         except ImportError as error:
@@ -157,7 +167,13 @@ class GaussianCamera:
             if self._period > 1 else None
         )
 
-    def sample(self, state, *, reset=False, reset_mask=None):
+    def sample(
+        self,
+        state: newton.State,
+        *,
+        reset: bool = False,
+        reset_mask: torch.Tensor | None = None,
+    ) -> None:
         config = self.config
         due = camera_refresh_mask(
             self._steps_until_refresh, self._period, tick=self._tick, reset=reset, reset_mask=reset_mask,
@@ -171,7 +187,7 @@ class GaussianCamera:
             rgb_out=self._rgb, depth_out=self._depth, min_alpha=config.min_alpha, active=due,
         )
 
-    def checkpoint_views(self):
+    def checkpoint_views(self) -> dict[str, torch.Tensor]:
         views = {}
         if self._rgb is not None:
             views["rgb"] = self._rgb
@@ -189,7 +205,7 @@ class GaussianCamera:
         """Return one world's cached camera-axis depth in meters."""
         return self._depth[world]
 
-    def read(self, state, fields):
+    def read(self, state: newton.State, fields: tuple[str, ...]) -> TensorDict:
         values = {}
         if "rgb" in fields:
             values["rgb"] = self._rgb.clone()

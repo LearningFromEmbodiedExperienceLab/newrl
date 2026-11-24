@@ -1,9 +1,13 @@
 """CUDA learner capture, adapted from revisiting-supermimic's CapturedUpdate."""
 
+from collections.abc import Callable, Sequence
 from time import perf_counter
 
 import torch
 from tensordict import TensorDict
+from torch.optim import Optimizer
+
+from .optimizer import MuonAdamW
 
 
 class CapturedUpdate:
@@ -14,7 +18,15 @@ class CapturedUpdate:
     Returned diagnostics are copied out because replay overwrites graph outputs.
     """
 
-    def __init__(self, fn, module, optimizer, enabled: bool, warmup: int = 3, label: str = "WM minibatch"):
+    def __init__(
+        self,
+        fn: Callable[..., TensorDict],
+        module: torch.nn.Module,
+        optimizer: Optimizer | MuonAdamW | Sequence[Optimizer | MuonAdamW],
+        enabled: bool,
+        warmup: int  =  3,
+        label: str  =  "WM minibatch",
+    ) -> None:
         self.fn, self.module, self.optimizer = fn, module, optimizer
         self.enabled, self.warmup = enabled, warmup
         self.initial_warmup = warmup
@@ -22,7 +34,7 @@ class CapturedUpdate:
         self.inputs = self.graph = self.outputs = self.identity = self.grads = None
         self.stream = torch.cuda.Stream(device=next(module.parameters()).device) if enabled else None
 
-    def reset(self):
+    def reset(self) -> None:
         """Rewarm after loading optimizer state, whose storage may have changed."""
         self.inputs = self.graph = self.outputs = self.identity = self.grads = None
         self.warmup = self.initial_warmup

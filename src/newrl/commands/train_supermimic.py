@@ -8,12 +8,12 @@ import torch
 from setproctitle import setproctitle
 
 from newrl.commands import with_used_observations
-from newrl.commands.train import EpisodeStats, _make_logger, _save_checkpoint, _task_output_dir
+from newrl.commands.train import EpisodeStats, TrainConfig, _make_logger, _save_checkpoint, _task_output_dir
 from newrl.env import StatefulEnvironment
 from newrl.utils.memory import CudaMemoryProfiler, storage_bytes, write_memory_chart
 
 
-def train_supermimic(cfg):
+def train_supermimic(cfg: TrainConfig) -> None:
     cfg = replace(cfg, task=cfg.algo.prepare_task(cfg.task))
     torch.manual_seed(cfg.seed)
     cfg.task.mdp.seed = cfg.seed

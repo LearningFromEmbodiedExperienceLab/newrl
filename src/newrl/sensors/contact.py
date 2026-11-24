@@ -1,5 +1,7 @@
 """Reduce solved terrain contacts to per-body sensor readings."""
 
+from typing import TYPE_CHECKING
+
 from dataclasses import dataclass
 
 import newton
@@ -7,7 +9,10 @@ import torch
 import warp as wp
 from tensordict import TensorDict
 
-from ..utils.string import resolve_scene_names
+if TYPE_CHECKING:
+    from newrl.scene import Scene
+    from newrl.scene import RobotEntity
+
 
 
 @dataclass(frozen=True)
@@ -19,16 +24,16 @@ class TerrainContactConfig:
     track_air_time: bool = False
     track_contact_position: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not 0.0 < self.load_threshold < float("inf"):
             raise ValueError("load_threshold must be positive and finite")
 
-    def build(self, scene):
+    def build(self, scene: "Scene") -> "TerrainContact":
         return TerrainContact(self, scene.entities[self.entity])
 
 
 @wp.kernel
-def _sum_terrain_forces(matrix: wp.array2d[wp.vec3], force: wp.array[wp.vec3]):
+def _sum_terrain_forces(matrix: wp.array2d[wp.vec3], force: wp.array[wp.vec3]) -> None:
     row = wp.tid()
     total = wp.vec3(0.0)
     for column in range(matrix.shape[1]):
@@ -51,7 +56,7 @@ def _update_contact_history(
     last_air: wp.array[wp.float32],
     last_position: wp.array[wp.vec3],
     valid: wp.array[wp.bool],
-):
+) -> None:
     i = wp.tid()
     loaded = wp.length(force[i]) > threshold
     touchdown = loaded and not previous[i]
@@ -79,7 +84,7 @@ def _update_contact_history(
 
 class TerrainContact:
     @property
-    def fields(self):
+    def fields(self) -> tuple[str, ...]:
         result = ["force_w", "loaded"]
         if self.track_history:
             result.append("first_contact")
@@ -90,19 +95,19 @@ class TerrainContact:
         return tuple(result)
 
     @property
-    def track_history(self):
+    def track_history(self) -> bool:
         return (
             self.config.track_first_contact
             or self.config.track_air_time
             or self.config.track_contact_position
         )
 
-    def __init__(self, config, entity):
+    def __init__(self, config: TerrainContactConfig, entity: "RobotEntity") -> None:
         self.config = config
-        indices = resolve_scene_names(config.body_names, entity.body_names)
+        indices, _ = entity.find_bodies(config.body_names)
         self.body_ids = entity.bodies[:, indices]
 
-    def initialize(self, scene):
+    def initialize(self, scene: "Scene") -> None:
         model = scene.model
         self.sensor = newton.sensors.SensorContact(
             model,
@@ -125,10 +130,10 @@ class TerrainContact:
                     self.body_ids.numel(), dtype=dtype, device=model.device
                 )
 
-    def force_view(self):
+    def force_view(self) -> torch.Tensor:
         return wp.to_torch(self.force).reshape(*self.body_ids.shape, 3)
 
-    def checkpoint_views(self):
+    def checkpoint_views(self) -> dict[str, torch.Tensor]:
         views = {"force": self.force_view()}
         views.update(
             {
@@ -138,15 +143,21 @@ class TerrainContact:
         )
         return views
 
-    def reset(self, ids):
+    def reset(self, ids: torch.Tensor | slice) -> None:
         for view in self.checkpoint_views().values():
             view[ids] = 0
 
-    def begin_step(self):
+    def begin_step(self) -> None:
         if self.track_history:
             self.history["first_contact"].zero_()
 
-    def update(self, contacts, observables, state, dt):
+    def update(
+        self,
+        contacts: newton.Contacts | None,
+        observables: newton.solvers.SolverMuJoCo.Observables | newton.solvers.SolverSteel.Observables | None,
+        state: newton.State,
+        dt: float,
+    ) -> None:
         self.sensor.update(
             state if self.config.track_contact_position else None,
             contacts,
@@ -176,7 +187,7 @@ class TerrainContact:
                 device=self.force.device,
             )
 
-    def read(self, state, fields):
+    def read(self, state: newton.State, fields: tuple[str, ...]) -> TensorDict:
         force = self.force_view()
         values = {}
         if "force_w" in fields:

@@ -18,7 +18,7 @@ def reconstruct_augmented_drive_torque(
     effort_limit: wp.array[wp.float32],
     dt: float,
     torque: wp.array[wp.float32],
-):
+) -> None:
     row = wp.tid()
     dof = dof_index[row]
     ke = stiffness[dof]

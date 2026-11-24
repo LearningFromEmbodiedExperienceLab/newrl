@@ -1,5 +1,7 @@
 """Reference tracking with explicit clip progress and per-world reset RNG."""
 
+from typing import Self, TYPE_CHECKING
+
 from dataclasses import dataclass, field
 
 import torch
@@ -9,6 +11,9 @@ from tensordict import TensorDict
 from newrl.datasets import LAFAN1Dataset
 from newrl.utils.math import quat_rotate
 from .base import MDP
+
+if TYPE_CHECKING:
+    from newrl.scene import Scene
 
 
 @dataclass
@@ -21,11 +26,11 @@ class MotionTrackingMDP(MDP):
     _motion: LAFAN1Dataset | None = field(default=None, init=False, repr=False)
     _root_com: torch.Tensor | None = field(default=None, init=False, repr=False)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.goal_frames < 1:
             raise ValueError("goal_frames must be positive")
 
-    def _initialize(self, scene):
+    def _initialize(self, scene: "Scene") -> Self:
         bound = super()._initialize(scene)
         robot = scene.entities[self.entity]
         if robot.root_q is None or robot.root_qd is None:
@@ -48,7 +53,7 @@ class MotionTrackingMDP(MDP):
         bound._root_com = wp.to_torch(scene.model.body_com)[robot.bodies[0, bodies.index(self.root_body)]].clone()
         return bound
 
-    def initial_state(self, num_envs, action_dim, device):
+    def initial_state(self, num_envs: int, action_dim: int, device: torch.device) -> TensorDict:
         state = super().initial_state(num_envs, action_dim, device)
         worlds = torch.arange(num_envs, device=device, dtype=torch.long).unsqueeze(-1)
         state["reset_rng"] = ((self.seed % 2147483646) + worlds * 104729) % 2147483646 + 1
@@ -58,17 +63,21 @@ class MotionTrackingMDP(MDP):
         return state
 
     @property
-    def replay_fields(self):
+    def replay_fields(self) -> tuple[str, ...]:
         return (*super().replay_fields, "motion_id", "motion_t", "reset_rng")
 
-    def restore_replay_state(self, state):
+    def restore_replay_state(self, state: TensorDict) -> TensorDict:
         restored = super().restore_replay_state(state)
         if self._motion is None:
             raise RuntimeError("Bind MotionTrackingMDP before restoring replay state")
         self._refresh_reference(restored)
         return restored
 
-    def reset(self, mdp_state, ids):
+    def reset(
+        self,
+        mdp_state: TensorDict,
+        ids: torch.Tensor | slice,
+    ) -> tuple[TensorDict, dict[str, TensorDict]]:
         state, poses = super().reset(mdp_state, ids)
         if self._motion is None:
             raise RuntimeError("Bind MotionTrackingMDP before resetting")
@@ -94,7 +103,7 @@ class MotionTrackingMDP(MDP):
         }, batch_size=reference.batch_size)
         return state, poses
 
-    def _refresh_reference(self, state):
+    def _refresh_reference(self, state: TensorDict) -> None:
         motion = self._motion
         ids, frame = state["motion_id"].squeeze(-1), state["motion_t"].squeeze(-1)
         state["reference"] = motion.get_slice(ids, frame, torch.zeros(1, device=ids.device, dtype=torch.long))[..., 0]
@@ -102,7 +111,11 @@ class MotionTrackingMDP(MDP):
         state["future_reference"] = future.select("root_pose", "joint_pos")
         state["clip_end"] = state["motion_t"] >= (motion.clip_end[ids] - motion.clip_start[ids] - 1).unsqueeze(-1)
 
-    def _advance_task_state(self, physical_state, state):
+    def _advance_task_state(
+        self,
+        physical_state: TensorDict,
+        state: TensorDict,
+    ) -> dict[str, torch.Tensor]:
         ids = state["motion_id"].squeeze(-1)
         last = (self._motion.clip_end[ids] - self._motion.clip_start[ids] - 1).unsqueeze(-1)
         state["motion_t"] = torch.minimum(state["motion_t"] + 1, last)

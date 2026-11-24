@@ -35,7 +35,7 @@ class TerrainConfig:
 
     spawn_locations: SpawnLocations = ()
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         for location in self.spawn_locations:
             if len(location) != 3 or not all(isfinite(value) for value in location):
                 raise ValueError("Spawn locations must contain finite XYZ coordinates")
@@ -85,7 +85,7 @@ def _project_spawn_support(
     min_normal_z: float,
     max_drop: float,
     heights: wp.array2d[float],
-):
+) -> None:
     index, sample = wp.tid()
     origin = origins[index] + wp.vec3(offsets[sample][0], offsets[sample][1], 0.0)
     hit = wp.mesh_query_ray(mesh, origin, wp.vec3(0.0, 0.0, -1.0), max_drop)
@@ -107,7 +107,7 @@ class ReconstructedTerrainConfig(TerrainConfig):
     max_height_span: float = 0.22
     max_drop: float = 2.0
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         super().__post_init__()
         if not all(
             isfinite(value) and value > 0
@@ -205,7 +205,7 @@ class BorderConfig:
     thickness: float = 0.25
     kind: str = "wall"
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.kind not in ("wall", "apron"):
             raise ValueError("Border kind must be wall or apron")
         if not isfinite(self.width) or self.width < 0:
@@ -245,7 +245,7 @@ class GeneratedTerrainConfig(TerrainConfig):
     border_width: float | None = None
     border_height: float | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         super().__post_init__()
         if self.rows < 1 or not self.tiles:
             raise ValueError("Generated terrain needs at least one row and tile family")
@@ -304,7 +304,15 @@ class GeneratedTerrainConfig(TerrainConfig):
         return self.spawn_locations or tuple(anchors)
 
 
-def _add_ground_box(builder, x, y, hx, hy, top, label):
+def _add_ground_box(
+    builder: newton.ModelBuilder,
+    x: float,
+    y: float,
+    hx: float,
+    hy: float,
+    top: float,
+    label: str,
+) -> None:
     bottom = -0.25
     builder.add_shape_box(
         body=-1,
@@ -320,7 +328,16 @@ def _add_ground_box(builder, x, y, hx, hy, top, label):
 class FlatTileConfig:
     """Finite box slab with its upper surface at ground level."""
 
-    def build(self, builder, *, center, size, spawn_pad_width, rng, label) -> float:
+    def build(
+        self,
+        builder: newton.ModelBuilder,
+        *,
+        center: tuple[float, float],
+        size: float,
+        spawn_pad_width: float,
+        rng: np.random.Generator,
+        label: str,
+    ) -> float:
         _add_ground_box(builder, *center, size / 2, size / 2, 0.0, label)
         return 0.0
 
@@ -334,7 +351,7 @@ class RoughHeightfieldTileConfig:
     noise_spacing: float = 0.45
     gap: float = 0.01
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not isfinite(self.gap) or self.gap < 0:
             raise ValueError("Heightfield gap must be finite and non-negative")
         if not 0.0 <= self.amplitude < float("inf"):
@@ -342,7 +359,16 @@ class RoughHeightfieldTileConfig:
         if not 0.0 < self.sample_spacing <= self.noise_spacing < float("inf"):
             raise ValueError("Spacings must satisfy 0 < sample_spacing <= noise_spacing")
 
-    def build(self, builder, *, center, size, spawn_pad_width, rng, label) -> float:
+    def build(
+        self,
+        builder: newton.ModelBuilder,
+        *,
+        center: tuple[float, float],
+        size: float,
+        spawn_pad_width: float,
+        rng: np.random.Generator,
+        label: str,
+    ) -> float:
         half = size / 2
         count = ceil(size / self.sample_spacing) + 1
         axis = np.linspace(-half, half, count)
@@ -379,7 +405,7 @@ class PyramidSlopeTileConfig:
     inverted: bool = False
     gap: float = 0.01
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not isfinite(self.gap) or self.gap < 0:
             raise ValueError("Heightfield gap must be finite and non-negative")
         if not isfinite(self.slope) or self.slope <= 0:
@@ -387,7 +413,16 @@ class PyramidSlopeTileConfig:
         if not isfinite(self.sample_spacing) or self.sample_spacing <= 0:
             raise ValueError("Sample spacing must be finite and positive")
 
-    def build(self, builder, *, center, size, spawn_pad_width, rng, label) -> float:
+    def build(
+        self,
+        builder: newton.ModelBuilder,
+        *,
+        center: tuple[float, float],
+        size: float,
+        spawn_pad_width: float,
+        rng: np.random.Generator,
+        label: str,
+    ) -> float:
         half = size / 2
         count = ceil(size / self.sample_spacing) + 1
         axis = np.linspace(-half, half, count)
@@ -417,13 +452,22 @@ class StairsTileConfig:
     step_height: float = 0.10
     step_width: float = 0.40
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not 0.0 < self.step_height < float("inf"):
             raise ValueError("step_height must be positive and finite")
         if not 0.0 < self.step_width < float("inf"):
             raise ValueError("step_width must be positive and finite")
 
-    def build(self, builder, *, center, size, spawn_pad_width, rng, label) -> float:
+    def build(
+        self,
+        builder: newton.ModelBuilder,
+        *,
+        center: tuple[float, float],
+        size: float,
+        spawn_pad_width: float,
+        rng: np.random.Generator,
+        label: str,
+    ) -> float:
         x, y = center
         half = size / 2
         levels = int((size - spawn_pad_width) / (2 * self.step_width))

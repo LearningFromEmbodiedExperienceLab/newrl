@@ -1,11 +1,16 @@
 """Compact real transitions in a time/world ring; ending successors stay valid."""
 
+from typing import TYPE_CHECKING
+
 import torch
 from tensordict import TensorDict
 
+if TYPE_CHECKING:
+    from newrl.datasets import LAFAN1Dataset
+
 
 class ReplayBuffer:
-    def __init__(self, capacity, num_envs, device):
+    def __init__(self, capacity: int, num_envs: int, device: torch.device | str) -> None:
         if min(capacity, num_envs) < 1:
             raise ValueError('Replay capacity and world count must be positive')
         self.capacity, self.num_envs, self.device = capacity, num_envs, device
@@ -13,7 +18,7 @@ class ReplayBuffer:
         self.ptr = self.filled = 0
 
     @torch.no_grad()
-    def add(self, transition):
+    def add(self, transition: TensorDict) -> None:
         if transition.batch_size != torch.Size([self.num_envs]):
             raise ValueError('Replay expects one real transition per world')
         if self.storage is None:
@@ -22,7 +27,7 @@ class ReplayBuffer:
         self.ptr = (self.ptr + 1) % self.capacity
         self.filled = min(self.capacity, self.filled + 1)
 
-    def sample_windows(self, batch_size, window):
+    def sample_windows(self, batch_size: int, window: int) -> TensorDict:
         if batch_size < 1 or not 1 <= window <= self.filled:
             raise ValueError('Need positive batch/window sizes and enough replay rows')
         start = torch.randint(self.filled - window + 1, (batch_size,), device=self.device)
@@ -37,7 +42,13 @@ class ReplayBuffer:
         batch['valid'] = prefix & contiguous.int().cumprod(1).bool()
         return batch
 
-    def sample_starts(self, batch_size, *, horizon=0, motion=None):
+    def sample_starts(
+        self,
+        batch_size: int,
+        *,
+        horizon: int = 0,
+        motion: "LAFAN1Dataset | None"=None,
+    ) -> TensorDict:
         if batch_size < 1 or not self.filled:
             raise ValueError('Need a positive batch size and nonempty replay')
         rows = (torch.arange(self.filled, device=self.device) + self.ptr - self.filled) % self.capacity

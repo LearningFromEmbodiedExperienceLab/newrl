@@ -14,7 +14,7 @@ class WandbConfig:
     group: str | None = None
     mode: str = "online"
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.mode not in ("online", "offline", "disabled"):
             raise ValueError("logger.mode must be online, offline, or disabled")
 
@@ -29,7 +29,7 @@ class RunLogger:
         *,
         run_id: str | None = None,
         directory: Path | None = None,
-    ):
+    ) -> None:
         self._run = None
         if not cfg.enabled or cfg.mode == "disabled":
             return
