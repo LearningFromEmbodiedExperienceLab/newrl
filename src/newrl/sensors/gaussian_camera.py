@@ -1,6 +1,7 @@
 """Body-mounted RGB and depth camera for a shared static Gaussian splat scene."""
 
 from dataclasses import dataclass
+from fractions import Fraction
 from math import isfinite, pi, tan
 from typing import Literal
 
@@ -19,6 +20,8 @@ class GaussianCameraConfig:
     ``world_from_cloud`` is the cloud-to-simulation rigid transform as XYZ
     translation in meters followed by an XYZW quaternion. Cloud units are meters.
     Camera mount position and roll, pitch, yaw use meters and radians.
+    Capture at ``frequency_hz`` on control ticks, carrying fractional periods
+    across frames. An explicit ``update_every`` selects a fixed step interval.
     """
 
     source: str
@@ -34,13 +37,16 @@ class GaussianCameraConfig:
     fov_y: float = pi / 3
     near: float = 0.05
     far: float = 8.0
-    update_every: int = 5
+    update_every: int | None = None
     cell_size: float = 12.0
     cache_cells: int = 12
     batch_size: int = 32
     radius_clip: float = 0.0
     mode: Literal["rgb", "depth", "rgbd"] = "rgb"
     min_alpha: float = 0.1
+    frequency_hz: float = 20.0
+    tile_size: int = 16
+    temporal_culling: bool = False
 
     def __post_init__(self):
         if min(self.width, self.height) < 1 or not 0 < self.fov_y < pi:
@@ -51,8 +57,10 @@ class GaussianCameraConfig:
             raise ValueError("Gaussian camera mode must be rgb, depth, or rgbd")
         if self.mode != "rgb" and (self.far > 65504.0 or not 0 < self.min_alpha <= 1):
             raise ValueError("Gaussian depth needs an FP16 far plane and min_alpha in (0, 1]")
-        if type(self.update_every) is not int or self.update_every < 1:
+        if self.update_every is not None and (type(self.update_every) is not int or self.update_every < 1):
             raise ValueError("Camera update_every must be a positive integer")
+        if not isfinite(self.frequency_hz) or self.frequency_hz <= 0:
+            raise ValueError("Camera frequency_hz must be finite and positive")
         for values, size in ((self.pos, 3), (self.rpy, 3), (self.world_from_cloud, 7)):
             if len(values) != size or not all(map(isfinite, values)):
                 raise ValueError("Camera mount and cloud transform must be finite")
@@ -119,6 +127,7 @@ class GaussianCamera:
         self._renderer = LiveGaussianRenderer(
             config.source, device, cell_size=config.cell_size, cache_cells=config.cache_cells,
             batch_size=config.batch_size, radius_clip=config.radius_clip,
+            tile_size=config.tile_size, temporal_culling=config.temporal_culling,
         )
         self._views = wp.empty(worlds, dtype=wp.mat44, device=self.model.device)
         self._view_tensor = wp.to_torch(self._views)
@@ -135,15 +144,23 @@ class GaussianCamera:
             ((focal, 0, config.width / 2), (0, focal, config.height / 2), (0, 0, 1)),
             dtype=torch.float32, device=device,
         )
+        # 20 Hz at 50 control steps/s alternates three and two steps.
+        rate = (
+            Fraction(1, config.update_every) if config.update_every is not None
+            else Fraction(min(1.0, config.frequency_hz * scene.control_dt)).limit_denominator(10**9)
+        )
+        if rate == 0:
+            raise ValueError("Camera period exceeds one billion control steps")
+        self._tick, self._period = rate.numerator, rate.denominator
         self._steps_until_refresh = (
-            torch.full((worlds,), config.update_every, dtype=torch.int64, device=device)
-            if config.update_every > 1 else None
+            torch.full((worlds,), self._period, dtype=torch.int64, device=device)
+            if self._period > 1 else None
         )
 
     def sample(self, state, *, reset=False, reset_mask=None):
         config = self.config
         due = camera_refresh_mask(
-            self._steps_until_refresh, config.update_every, reset=reset, reset_mask=reset_mask,
+            self._steps_until_refresh, self._period, tick=self._tick, reset=reset, reset_mask=reset_mask,
         )
         wp.launch(
             _view_matrices, dim=self.model.world_count, device=self.model.device,

@@ -108,6 +108,8 @@ Projects with a static Gaussian splat PLY can use `GaussianCameraConfig`
 from `newrl.sensors` with `RGBCameraObservation` or `DepthCameraObservation`.
 Set `mode` to `rgb`, `depth`, or `rgbd`. Configure `world_from_cloud` to
 align the cloud and install `gsrender[gsplat]` in the project environment.
+Gaussian cameras default to 20 Hz. Set `frequency_hz` to change the rate or
+`update_every` to specify a fixed number of control steps between frames.
 Gaussian depth measures expected forward-axis depth and reports pixels below
 `min_alpha` as invalid.
 

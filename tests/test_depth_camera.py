@@ -12,6 +12,22 @@ from newrl.env import StatelessEnvironment
 from newrl.mdp.base import ObservationGroup
 from newrl.mdp.observations import DepthCameraObservation
 from newrl.sensors import DepthCameraConfig
+from newrl.sensors.camera import camera_refresh_mask
+
+
+class CameraClockTests(unittest.TestCase):
+    def test_twenty_hz_at_fifty_control_steps_per_second(self):
+        phase = torch.full((2,), 5)
+        captures = [[], []]
+        for step in range(1, 51):
+            due = camera_refresh_mask(phase, 5, tick=2, reset=False, reset_mask=None)
+            for world in range(2):
+                if due[world]:
+                    captures[world].append(step)
+            if step == 2:
+                camera_refresh_mask(phase, 5, tick=2, reset=True, reset_mask=torch.tensor([False, True]))
+        self.assertEqual(captures[0], [v for k in range(0, 50, 5) for v in (k + 3, k + 5)])
+        self.assertEqual(captures[1], [v + 2 for v in captures[0] if v + 2 <= 50])
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")

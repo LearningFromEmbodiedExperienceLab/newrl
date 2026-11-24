@@ -13,7 +13,7 @@ class FrameCamera(Protocol):
     def checkpoint_views(self) -> dict[str, torch.Tensor]: ...
 
 
-def camera_refresh_mask(remaining, interval, *, reset, reset_mask):
+def camera_refresh_mask(remaining, interval, *, reset, reset_mask, tick=1):
     """Advance per-world capture clocks, or restart clocks selected for reset."""
     if remaining is None:
         return reset_mask
@@ -23,7 +23,7 @@ def camera_refresh_mask(remaining, interval, *, reset, reset_mask):
         else:
             remaining.masked_fill_(reset_mask, interval)
         return reset_mask
-    remaining.sub_(1)
-    due = remaining == 0
-    remaining.masked_fill_(due, interval)
+    remaining.sub_(tick)
+    due = remaining <= 0
+    remaining.add_(due, alpha=interval)
     return due
