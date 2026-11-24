@@ -5,6 +5,12 @@ and PyTorch. Newton builds and replicates the scene and provides entity I/O.
 The locomotion tasks use velocity tracking. The on-policy learners are Gaussian
 PPO and GenPO++.
 
+## Compatibility
+
+- Do not keep compatibility or legacy code. Update callers and stored formats
+  to the current API instead of adding aliases, wrappers, deprecated paths, or
+  fallback behavior for old interfaces.
+
 ## Algorithm implementation
 
 - Prefer simple, self-contained implementations. Keep each algorithm, its
@@ -60,7 +66,7 @@ a partial reset.
   responsibility, for example scaling by the effective horizon.
 - Define environment presets in [configs.py](src/newrl/configs.py), robot
   asset and actuator settings in [robots.py](src/newrl/robots.py), and
-  terrain geometry in [terrain.py](src/newrl/terrain.py). The scene builds
+  terrain geometry in [terrains](src/newrl/terrains). The scene builds
   a template world and replicates it with Newton.
 - Plane terrain is the default. Mesh terrain accepts a Newton mesh, a mesh
   file, or a mesh factory. The flat slab shares its geometry generator
@@ -129,7 +135,7 @@ stateless parity, checkpoint replay, selective resets, and mesh spawn replay.
 ```sh
 uv run python -m unittest discover -s tests -v
 uv run python -m unittest -v test_terrain_collision
-uv run python scripts/play.py task=anymal_loco_flat viewer=false steps=5 episode_steps=2 task.num_envs=4
+newrl play task=AnymalLocoFlat viewer=false steps=5 episode_steps=2 task.num_envs=4
 ```
 
 See the [benchmark guide](benchmarks/README.md) for throughput and stage

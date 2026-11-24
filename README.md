@@ -1,6 +1,6 @@
 The environment defaults to Newton's MuJoCo Warp solver. Set
 `AnymalLocomotion(solver=SteelSimConfig())` to use Newton's Steel solver, or
-run `uv run python scripts/play.py task=anymal_loco_flat task.solver=steel`. Steel uses augmented
+run `newrl play task=anymal_loco_flat task.solver=steel`. Steel uses augmented
 position drives, point friction and an updated mass matrix each physics step.
 Its iteration count and per-articulation constraint capacity are configurable
 with `iterations` and `articulation_constraint_max` in `SteelSimConfig`. Newton warns
@@ -86,13 +86,13 @@ Both log the active penalty as
 Play a trained on-policy learner with the task saved in its checkpoint.
 
 ```sh
-uv run python scripts/play.py checkpoint=path/to/checkpoint.pt
+newrl play checkpoint=path/to/checkpoint.pt
 ```
 
 Playback defaults to four worlds and deterministic actions. Use `num_envs=1`
 for a single world, `deterministic=false` to sample actions, or
 `viewer=false steps=100` for a headless run.
-Use `uv run --extra viser python scripts/play.py task=AnymalLocoFlat viewer=viser`
+Use `uv run --extra viser newrl play task=AnymalLocoFlat viewer=viser`
 to open playback in a browser. Viser listens on `127.0.0.1:8080` by default.
 Set `viser_host` and `viser_port` to change the listen address.
 In the browser's **Robot view** panel, choose a world and robot, then enable
@@ -121,7 +121,7 @@ each checkpoint for upload as soon as it is saved. On another machine with
 access to the run, pull the latest uploaded checkpoint at playback startup.
 
 ```sh
-uv run python scripts/play.py algo=ppo "checkpoint=run:$wandb_run_path"
+newrl play algo=ppo "checkpoint=run:$wandb_run_path"
 ```
 
 Set `wandb_run_path` to `entity/project/run_id`. Append `:250` to pin

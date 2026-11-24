@@ -13,7 +13,7 @@ from tensordict import TensorDict
 from .mdp.actions import JointPositionAction
 from .robots import scalar_joints
 from .sensors import Sensor
-from .terrain import Terrain, TerrainConfig
+from .terrains import Terrain, TerrainConfig
 from .utils.symmetry import SymmetryTransform
 from .utils.string import resolve_scene_names
 

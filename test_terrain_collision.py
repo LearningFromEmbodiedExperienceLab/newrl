@@ -4,7 +4,7 @@ import newton
 import numpy as np
 import warp as wp
 
-from newrl.terrain import flat_ground_mesh
+from newrl.terrains import flat_ground_mesh
 from newrl.terrain_collision import HybridTerrainCollision
 from terrain_collision import TerrainCollision
 

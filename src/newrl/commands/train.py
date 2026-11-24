@@ -64,12 +64,24 @@ def _make_logger(cfg: TrainConfig, *, run_id: str | None = None) -> RunLogger:
         name=cfg.logger.name if cfg.logger.name is not None else default_name,
         group=cfg.logger.group if cfg.logger.group is not None else task,
     )
-    return RunLogger(
-        logger_cfg,
-        replace(cfg, logger=logger_cfg),
-        run_id=run_id,
-        directory=_task_output_dir(task),
+    run_config = {
+        item.name: getattr(cfg, item.name)
+        for item in fields(cfg)
+        if item.name not in ("task", "algo")
+    }
+    robots = sorted({
+        factory.__name__.removeprefix("assetx_").removeprefix("newton_")
+        for factory in cfg.task.robots.values()
+    })
+    run_config.update(
+        task=task,
+        robot=robots[0] if len(robots) == 1 else robots,
+        algo=cfg.algo.algo_id,
+        task_config=cfg.task,
+        algo_config=cfg.algo,
+        logger=logger_cfg,
     )
+    return RunLogger(logger_cfg, run_config, run_id=run_id, directory=_task_output_dir(task))
 
 
 def _save_checkpoint(

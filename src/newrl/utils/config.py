@@ -119,6 +119,31 @@ def runtime_field(default: Any = None) -> Any:
     )
 
 
+def config_for_logging(value: Any) -> Any:
+    """Convert a config to plain values for inspection and filtering."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: config_for_logging(
+                dict(getattr(value, field.name))
+                if field.metadata.get("named_pairs")
+                else getattr(value, field.name)
+            )
+            for field in dataclasses.fields(value)
+            if field.init and not field.metadata.get("runtime")
+        }
+    if isinstance(value, Mapping):
+        return {key: config_for_logging(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [config_for_logging(item) for item in value]
+    if isinstance(value, slice):
+        return {"start": value.start, "stop": value.stop, "step": value.step}
+    if isinstance(value, Path):
+        return str(value)
+    if callable(value):
+        return _qualname(value)
+    return value
+
+
 def dump(value: Any) -> Any:
     """Encode a config tree. ``init=False`` fields are omitted."""
     if value is None or isinstance(value, (bool, int, str)):

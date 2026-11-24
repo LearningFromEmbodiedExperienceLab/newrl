@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from newrl.utils.config import dump
+from newrl.utils.config import config_for_logging
 
 
 @dataclass
@@ -43,7 +43,7 @@ class RunLogger:
             dir=directory,
             name=cfg.name,
             group=cfg.group,
-            config=dump(config),
+            config=config_for_logging(config),
             mode=cfg.mode,
         )
 

@@ -12,7 +12,7 @@ from newrl.configs import EnvironmentConfig
 from newrl.env import StatefulEnvironment
 from newrl.mdp.episode_ends import Timeout
 from newrl.projects import load_projects
-from newrl.terrain import PlaneTerrainConfig, Terrain
+from newrl.terrains import PlaneTerrainConfig, Terrain
 from newrl.utils.config import load, main as config_main
 from newrl.utils.wandb import resolve_checkpoint
 

@@ -179,7 +179,7 @@ class SuperMimicConfig:
             raise ValueError('Call prepare_task() before building the SuperMimic environment')
         if not set(env.mdp.replay_fields) <= set(env.output_mdp_fields):
             raise ValueError('SuperMimic environment is missing replay MDP outputs')
-        from newrl.terrain import PlaneTerrainConfig
+        from newrl.terrains import PlaneTerrainConfig
         if not isinstance(env.config.terrain, PlaneTerrainConfig) and env.config.terrain != 'plane':
             raise ValueError('SuperMimic currently requires plane terrain; nonuniform terrain needs dynamics context')
         return SuperMimic(self, mdp, representation, env.device, env.action_dim, dynamics)

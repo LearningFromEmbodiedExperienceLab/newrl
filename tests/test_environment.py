@@ -16,7 +16,7 @@ from newrl.env import StatefulEnvironment, StatelessEnvironment
 from newrl.mdp.episode_ends import Timeout
 from newrl.solver_adapters import MujocoSimConfig, SteelSimConfig
 from newrl.steel import reconstruct_augmented_drive_torque
-from newrl.terrain import FlatMeshTerrainConfig, PlaneTerrainConfig
+from newrl.terrains import FlatMeshTerrainConfig, PlaneTerrainConfig
 
 
 def _reward_term(env, transition, group, term):

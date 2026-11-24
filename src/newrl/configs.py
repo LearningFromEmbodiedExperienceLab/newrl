@@ -3,7 +3,7 @@
 from typing import Any
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import newton
 
@@ -43,14 +43,16 @@ from .robots import (
 )
 from .sensors import SensorConfig, TerrainContactConfig
 from .solver_adapters import MujocoSimConfig, SteelSimConfig
-from .terrain import (
+from .terrains import (
     BorderConfig,
     FlatTileConfig,
     GeneratedTerrainConfig,
     PlaneTerrainConfig,
     PyramidSlopeTileConfig,
+    RandomGridTileConfig,
     ReconstructedTerrainConfig,
     RoughHeightfieldTileConfig,
+    SteppingStonesTileConfig,
     StairsTileConfig,
     TerrainConfig,
 )
@@ -145,13 +147,41 @@ def G1MotionTracking(**overrides: Any) -> EnvironmentConfig:
     return EnvironmentConfig(**options)
 
 
+def G1Locomotion(
+    *,
+    contact_observation: bool = False,
+    foot_slip_weight: float = 0.1,
+    **overrides: Any,
+) -> EnvironmentConfig:
+    """Track planar velocity and yaw rate with the 29-DoF Unitree G1."""
+    config = _velocity_locomotion(
+        assetx_g1,
+        base="pelvis",
+        feet=r"(left|right)_ankle_roll_link",
+        contact_observation=contact_observation,
+        foot_slip_weight=foot_slip_weight,
+        name="G1LocoFlat",
+    )
+    config.mdp.terminations["height"] = HeightTermination(
+        BodyHeight("robot", "pelvis"), min_height=0.45
+    )
+    config.mdp.rewards["survival"] = RewardGroup({"survival": Survival(weight=1.0)})
+    regularization = config.mdp.rewards["regularization"].terms
+    config.mdp.rewards["regularization"] = RewardGroup(
+        (*regularization, ("joint_limit", JointLimit(weight=2.0)))
+    )
+    if sensors := overrides.pop("sensors", None):
+        config.sensors.update(sensors)
+    return replace(config, **overrides)
+
+
 def AnymalLocomotion(
     *,
     contact_observation: bool = False,
     foot_slip_weight: float = 0.1,
     **overrides: Any,
 ) -> EnvironmentConfig:
-    return _quadruped_locomotion(
+    return _velocity_locomotion(
         newton_anymal_c,
         base="base",
         feet=r"(LF|LH|RF|RH)_FOOT",
@@ -167,7 +197,7 @@ def SpotLocomotion(
     foot_slip_weight: float = 0.1,
     **overrides: Any,
 ) -> EnvironmentConfig:
-    return _quadruped_locomotion(
+    return _velocity_locomotion(
         assetx_spot,
         base="base_link",
         feet=".*_foot",
@@ -183,7 +213,7 @@ def AS2Locomotion(
     foot_slip_weight: float = 0.1,
     **overrides: Any,
 ) -> EnvironmentConfig:
-    return _quadruped_locomotion(
+    return _velocity_locomotion(
         assetx_as2,
         base="base_link",
         feet=".*_foot",
@@ -196,7 +226,7 @@ def AS2Locomotion(
 def AS2WLocomotion(
     *, contact_observation: bool = False, sphere_wheels: bool = False, **overrides: Any
 ) -> EnvironmentConfig:
-    return _quadruped_locomotion(
+    return _velocity_locomotion(
         assetx_as2w_sphere if sphere_wheels else assetx_as2w,
         base="base_link", feet=r"(FL|FR|RL|RR)_foot",
         contact_observation=contact_observation, foot_slip_weight=None, **overrides,
@@ -204,13 +234,13 @@ def AS2WLocomotion(
 
 
 def M20SLocomotion(*, contact_observation: bool  =  False, **overrides: Any) -> EnvironmentConfig:
-    return _quadruped_locomotion(
+    return _velocity_locomotion(
         assetx_m20s, base="base_link", feet=r"(fl|fr|hl|hr)_wheel",
         contact_observation=contact_observation, foot_slip_weight=None, **overrides,
     )
 
 
-def _quadruped_locomotion(
+def _velocity_locomotion(
     robot: Callable[[], RobotConfig],
     *,
     base: str,
@@ -332,6 +362,28 @@ cs.store(
     ),
     group="terrain",
 )
+cs.store(
+    "stepping_stones",
+    GeneratedTerrainConfig(
+        tiles={
+            "stones": SteppingStonesTileConfig(),
+            "stones_tall": SteppingStonesTileConfig(
+                stone_size=0.45, gap=0.28, height_range=(0.05, 0.20)
+            ),
+        }
+    ),
+    group="terrain",
+)
+cs.store(
+    "random_grid",
+    GeneratedTerrainConfig(
+        tiles={
+            "grid_easy": RandomGridTileConfig(height_range=(0.0, 0.10)),
+            "grid_hard": RandomGridTileConfig(cell_width=0.65, height_range=(0.0, 0.20)),
+        }
+    ),
+    group="terrain",
+)
 
 for name, factory in (
     ("AnymalLocoFlat", AnymalLocomotion),
@@ -339,6 +391,7 @@ for name, factory in (
     ("AS2LocoFlat", AS2Locomotion),
     ("AS2WLocoFlat", AS2WLocomotion),
     ("M20SLocoFlat", M20SLocomotion),
+    ("G1LocoFlat", G1Locomotion),
     ("G1LAFAN1Tracking", G1MotionTracking),
 ):
     cs.store(name, factory(name=name, num_envs=4096), group="task")

@@ -59,5 +59,5 @@ class WandbCheckpointTests(unittest.TestCase):
                 path, base_path=path.parent, policy="now", glob=False
             )
             init.reset_mock()
-            RunLogger(WandbConfig(), {}).save_checkpoint(path)
+            RunLogger(WandbConfig(enabled=False), {}).save_checkpoint(path)
             init.assert_not_called()

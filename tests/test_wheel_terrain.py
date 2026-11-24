@@ -10,7 +10,7 @@ import warp as wp
 
 from newrl.configs import AS2WLocomotion, M20SLocomotion
 from newrl.env import StatefulEnvironment
-from newrl.terrain import GeneratedTerrainConfig, PyramidSlopeTileConfig
+from newrl.terrains import GeneratedTerrainConfig, PyramidSlopeTileConfig
 from newrl.utils.math import quat_mul, quat_rotate, quat_rotate_inverse
 
 

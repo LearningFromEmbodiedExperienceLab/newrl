@@ -497,6 +497,118 @@ class StairsTileConfig:
         return top
 
 
+@dataclass(frozen=True)
+class SteppingStonesTileConfig:
+    """Separated box platforms with a level center pad and seeded heights."""
+
+    stone_size: float = 0.55
+    gap: float = 0.20
+    height_range: tuple[float, float] = (0.0, 0.15)
+
+    def __post_init__(self) -> None:
+        if (
+            not 0 < self.stone_size < float("inf")
+            or not 0 <= self.gap < float("inf")
+        ):
+            raise ValueError("Stone size must be positive and gap non-negative")
+        if not 0 <= self.height_range[0] <= self.height_range[1] < float("inf"):
+            raise ValueError("Stone heights must be finite, non-negative, and ordered")
+
+    def build(
+        self,
+        builder: newton.ModelBuilder,
+        *,
+        center: tuple[float, float],
+        size: float,
+        spawn_pad_width: float,
+        rng: np.random.Generator,
+        label: str,
+    ) -> float:
+        pitch = self.stone_size + self.gap
+        count = int(size // pitch)
+        if count < 2:
+            raise ValueError("Tile must fit at least two stepping stones per axis")
+        xs = (np.arange(count) - (count - 1) / 2) * pitch
+        half = self.stone_size / 2
+        for ix, dx in enumerate(xs):
+            for iy, dy in enumerate(xs):
+                if max(abs(dx), abs(dy)) < spawn_pad_width / 2 + half:
+                    continue
+                top = float(rng.uniform(*self.height_range))
+                _add_ground_box(
+                    builder,
+                    center[0] + float(dx),
+                    center[1] + float(dy),
+                    half,
+                    half,
+                    top,
+                    f"{label}_{ix}_{iy}",
+                )
+        _add_ground_box(
+            builder,
+            *center,
+            spawn_pad_width / 2,
+            spawn_pad_width / 2,
+            0.0,
+            f"{label}_pad",
+        )
+        return 0.0
+
+
+@dataclass(frozen=True)
+class RandomGridTileConfig:
+    """Random-height square cells around a fixed level spawn platform."""
+
+    cell_width: float = 0.8
+    height_range: tuple[float, float] = (0.0, 0.20)
+
+    def __post_init__(self) -> None:
+        if not 0 < self.cell_width < float("inf"):
+            raise ValueError("Cell width must be finite and positive")
+        if not 0 <= self.height_range[0] <= self.height_range[1] < float("inf"):
+            raise ValueError("Grid heights must be finite, non-negative, and ordered")
+
+    def build(
+        self,
+        builder: newton.ModelBuilder,
+        *,
+        center: tuple[float, float],
+        size: float,
+        spawn_pad_width: float,
+        rng: np.random.Generator,
+        label: str,
+    ) -> float:
+        count = int(size // self.cell_width)
+        if count < 2:
+            raise ValueError("Tile must fit at least two grid cells per axis")
+        pitch = size / count
+        half = pitch / 2
+        coords = (np.arange(count) - (count - 1) / 2) * pitch
+        for ix, dx in enumerate(coords):
+            for iy, dy in enumerate(coords):
+                if max(abs(dx), abs(dy)) < spawn_pad_width / 2 + half:
+                    continue
+                top = float(rng.uniform(*self.height_range))
+                _add_ground_box(
+                    builder,
+                    center[0] + float(dx),
+                    center[1] + float(dy),
+                    half,
+                    half,
+                    top,
+                    f"{label}_{ix}_{iy}",
+                )
+        _add_ground_box(
+            builder,
+            *center,
+            spawn_pad_width / 2,
+            spawn_pad_width / 2,
+            0.0,
+            f"{label}_pad",
+        )
+        return 0.0
+
+
 def flat_ground_mesh(resolution: int, size: float, thickness: float) -> newton.Mesh:
     """A flat slab whose top is z=0 and whose bottom is ``thickness`` below.
 

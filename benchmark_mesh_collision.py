@@ -24,7 +24,7 @@ from newton import JointTargetMode
 from tqdm import tqdm
 
 from newrl.configs import cs
-from newrl.terrain import flat_ground_mesh
+from newrl.terrains import flat_ground_mesh
 from newrl.terrain_collision import HybridTerrainCollision
 from newrl.utils.profiling import StageProfiler
 from walk_policy import AnymalWalkPolicy

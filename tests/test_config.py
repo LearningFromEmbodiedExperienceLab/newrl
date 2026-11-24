@@ -1,5 +1,6 @@
 """CLI resolution and tagged JSON round trips for dataclass configs."""
 
+import json
 import tempfile
 import unittest
 import io
@@ -307,7 +308,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_disabled_logger_does_not_open_a_run(self):
         with patch("wandb.init") as init:
-            logger = RunLogger(WandbConfig(), object())
+            logger = RunLogger(WandbConfig(enabled=False), object())
             logger.log({"actor/policy_loss": 1.0}, step=0)
             logger.finish()
         init.assert_not_called()
@@ -326,6 +327,15 @@ class ConfigTests(unittest.TestCase):
                 logger.finish()
                 kwargs = init.call_args.kwargs
                 self.assertEqual(kwargs["group"], "SpotLocoFlat")
+                logged = kwargs["config"]
+                self.assertEqual(logged["task"], "SpotLocoFlat")
+                self.assertEqual(logged["robot"], "spot")
+                self.assertEqual(logged["algo"], "ppo")
+                self.assertEqual(logged["algo_config"]["name"], "ppo-muon")
+                self.assertEqual(logged["algo_config"]["lr"], cfg.algo.lr)
+                tracking = logged["task_config"]["mdp"]["rewards"]["tracking"]["terms"]
+                self.assertEqual(tracking["track_xy_velocity"]["weight"], 1.5)
+                self.assertNotIn('"__type__"', json.dumps(logged))
                 self.assertEqual(kwargs["dir"], output / "SpotLocoFlat")
                 self.assertTrue(kwargs["dir"].is_dir())
                 self.assertRegex(

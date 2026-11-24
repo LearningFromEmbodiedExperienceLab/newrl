@@ -8,7 +8,7 @@ import numpy as np
 
 from newrl.commands.play import viewer_world_offsets
 from newrl.commands.train import TrainConfig
-from newrl.terrain import GeneratedTerrainConfig, PlaneTerrainConfig, PyramidSlopeTileConfig
+from newrl.terrains import GeneratedTerrainConfig, PlaneTerrainConfig, PyramidSlopeTileConfig
 from newrl.utils.config import cs, dump, load, resolve
 
 
@@ -129,3 +129,16 @@ class GeneratedTerrainTests(unittest.TestCase):
                     self.assertAlmostEqual(
                         transform.p[2] - scale[2], -terrain.border.thickness
                     )
+
+    def test_mjlab_style_primitive_terrain_presets(self):
+        for name in ("stepping_stones", "random_grid"):
+            with self.subTest(name=name):
+                terrain = cs.get("terrain", name)
+                builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+                anchors = terrain.build(builder)
+                self.assertEqual(len(anchors), terrain.rows * len(terrain.tiles))
+                self.assertTrue(all(anchor[2] == 0 for anchor in anchors))
+                self.assertTrue(all(kind == newton.GeoType.BOX for kind in builder.shape_type))
+                second = newton.ModelBuilder(up_axis=newton.Axis.Z)
+                terrain.build(second)
+                np.testing.assert_array_equal(builder.shape_scale, second.shape_scale)
