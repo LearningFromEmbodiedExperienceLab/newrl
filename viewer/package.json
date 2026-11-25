@@ -1,0 +1,15 @@
+{
+  "name": "newrl-browser-viewer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build --base ./ --outDir ../src/newrl/browser_assets --emptyOutDir"
+  },
+  "dependencies": {
+    "gaussian-splat-lite": "1.10.2",
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "vite": "7.3.1"
+  }
+}

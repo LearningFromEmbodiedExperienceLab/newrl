@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NewRL Viewer</title>
+<style>
+body { margin: 0; background: #1c2127; color: #e8edf3; font: 14px system-ui; }
+canvas { display: block; }
+#controls { position: absolute; top: 16px; left: 16px; background: #14191fee; padding: 12px; border-radius: 6px; max-width: calc(100vw - 56px); max-height: calc(100dvh - 56px); overflow: auto; }
+select { background: #303841; color: inherit; }
+#controls > label { margin-right: 12px; }
+details, #status, #recording { margin-top: 10px; }
+#record-status { overflow-wrap: anywhere; }
+summary { cursor: pointer; }
+#entities label { display: block; margin-top: 4px; }
+.asset-status { color: #b7c4d2; overflow-wrap: anywhere; }
+dl { display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; margin: 6px 0 0; }
+dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div id="controls">
+<label>Follow target <select id="target" aria-label="Follow target"></select></label>
+<label><input id="follow" type="checkbox" checked> Follow</label>
+<button id="pause" type="button" disabled aria-keyshortcuts="Space" title="Space">Pause simulation</button>
+<div id="free-camera-keys" hidden>WASD move · Q / E down / up · Shift fast · Ctrl / X slow</div>
+<details open><summary>Entities</summary><div id="entities"></div></details>
+<details open>
+<summary>Performance</summary>
+<dl>
+<dt>Renderer</dt><dd id="backend">—</dd>
+<dt>Browser FPS</dt><dd id="fps">—</dd>
+<dt>Browser CPU / frame</dt><dd id="cpu">—</dd>
+<dt>Draw calls / frame</dt><dd id="draws">—</dd>
+<dt>Simulation speed</dt><dd id="sim-speed">—</dd>
+<dt>Host GPU utilization</dt><dd id="gpu-util">—</dd>
+<dt>Host GPU memory</dt><dd id="gpu-memory">—</dd>
+</dl>
+</details>
+<div id="recording">
+<button id="record" type="button" disabled>Record</button>
+<span id="record-status" role="status"></span>
+</div>
+<div id="status" role="status">Connecting…</div>
+</div>
+<script type="module" src="/main.js"></script>
+</body>
+</html>

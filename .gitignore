@@ -14,6 +14,7 @@ wheels/
 
 # Local training runs
 /outputs_train/
+/recordings/
 
 # Cooked robot bundles and other local caches
 /.cache/
@@ -24,3 +25,5 @@ wheels/
 
 # Codex
 .codex/
+/viewer/node_modules/
+/src/newrl/browser_assets/

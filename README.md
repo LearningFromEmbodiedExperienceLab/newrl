@@ -108,8 +108,11 @@ Playback defaults to four worlds and deterministic actions. Use `num_envs=1`
 for a single world, `deterministic=false` to sample actions, or
 `viewer=false steps=100` for a headless run.
 Use `uv run --extra viser newrl play task=AnymalLocoFlat viewer=viser`
-to open playback in a browser. Viser listens on `127.0.0.1:8080` by default.
-Set `viser_host` and `viser_port` to change the listen address.
+to open playback in a browser. Both web viewers use port `8080` by default.
+If it is unavailable, they request a free port from the operating system and
+print the resulting URL. Set `viewer_port` to choose a different preferred
+port. A value of `0` always requests an OS-assigned port. `viser_host` changes
+Viser's listen address.
 In the browser's **Robot view** panel, choose a world and robot, then enable
 **Follow robot**. Enable **Camera frustums** to see the selected robot's
 camera mount and field of view. Use **Camera** if the robot has several
@@ -118,9 +121,75 @@ For a Gaussian camera, enable **Gaussian scene** to display its full splat cloud
 in the selected world. The first enable loads and uploads the cloud to that
 browser client, which can take time for large scenes.
 In depth images, near surfaces appear brighter and invalid pixels are black.
-Training defaults to `discard_unused_obs=true` and skips groups outside the
-policy and critic inputs. Playback defaults to `discard_unused_obs=false`,
-which keeps the task's observations available even with a blind checkpoint.
+Training and playback default to `discard_unused_obs=true` and skip observation
+groups outside the learner's inputs. Playback without a checkpoint skips all
+observation groups. Set `discard_unused_obs=false` to show simulator camera
+images in Viser even when the policy does not use them. The first simulator
+Gaussian camera frame can trigger a one-time gsplat CUDA build that takes
+several minutes. Static Gaussian scenes can still be viewed with observation
+pruning enabled.
+
+The experimental browser viewer renders Newton meshes and static Gaussian
+scenes with Three.js and Gaussian Splat Lite. Build it from a source checkout
+with Node.js 22.12 or newer.
+
+```sh
+npm --prefix viewer ci
+npm --prefix viewer run build
+uv run newrl play task=AnymalLocoFlat viewer=browser num_envs=1
+```
+
+Open the loopback URL printed by playback. The browser interpolates poses and
+smooths the selected follow target while preserving manual orbit controls.
+Turn off **Follow** and click the viewport to move with **WASD**. Use **Q**
+to descend and **E** to ascend. Hold **Shift** to move faster or **Ctrl** to
+move more slowly. **X** also slows movement when the viewport has focus,
+including for keys that Chrome reserves as Ctrl shortcuts.
+Press **Space** in the viewport or click **Pause simulation** to stop
+simulation stepping. The camera and recording remain active while paused.
+Use `viewer_port` to select the preferred port. The **Entities** panel toggles
+ground, robot visuals, collision geometry, camera frustums, and individual
+Gaussian clouds. Frustums follow the selected world and remain available
+when playback skips camera observations.
+Gaussian clouds load the first time they are enabled. Pass
+`splat_path=/path/to/scene.ply` (or `.spz`) to add a cloud already aligned to
+simulation coordinates. Use Viser for live camera images on the frustums.
+
+The **Performance** panel shows browser FPS, main thread time per frame, draw
+calls, and simulation speed relative to wall time. When `nvidia-smi` is
+available, it also reports device-wide utilization and memory for the host GPU
+running the simulation. The browser can render on a different GPU.
+
+Use **Record** and **Stop & Save** to capture the live viewport at up to 30 FPS.
+NewRL saves the video in `recordings/` under the directory where you launched
+`newrl play`. Set `recording_dir=/path/to/recordings` to choose a different
+directory. The viewer uses H.264 MP4 when the browser supports it and WebM
+otherwise. The saved path appears in the viewer. Keep the tab and playback
+open until the save completes.
+
+### Chrome WebGPU troubleshooting
+
+On Linux with an NVIDIA hybrid graphics setup, check `chrome://gpu` if Chrome
+reports that WebGPU is unavailable or picks the integrated GPU. If you have
+the `webgpu-chrome` launcher, pass it the URL printed by playback. The
+equivalent command uses a dedicated Chrome profile and forces NVIDIA offload
+with Vulkan on X11. Set `VIEWER_URL` to the printed URL before running it:
+
+```sh
+__NV_PRIME_RENDER_OFFLOAD=1 \
+__GLX_VENDOR_LIBRARY_NAME=nvidia \
+__VK_LAYER_NV_optimus=NVIDIA_only \
+google-chrome-stable \
+  --user-data-dir="${XDG_CONFIG_HOME:-$HOME/.config}/webgpu-chrome" \
+  --ozone-platform=x11 \
+  --enable-unsafe-webgpu \
+  --use-angle=vulkan \
+  --enable-features=Vulkan,VulkanFromANGLE \
+  "$VIEWER_URL"
+```
+
+Use that profile for local viewer sessions. Append `?renderer=webgl` to the
+viewer URL to explicitly select WebGL2 if WebGPU is still unavailable or unstable.
 
 Projects with a static Gaussian splat PLY can use `GaussianCameraConfig`
 from `newrl.sensors` with `RGBCameraObservation` or `DepthCameraObservation`.

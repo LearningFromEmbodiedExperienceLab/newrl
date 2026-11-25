@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from socket import socket
 
 import newton
 import torch
@@ -13,7 +14,8 @@ from newrl.env import StatefulEnvironment
 from newrl.mdp.episode_ends import Timeout
 from newrl.projects import load_projects
 from newrl.terrains import PlaneTerrainConfig, Terrain
-from newrl.utils.config import load, main as config_main
+from newrl.utils.config import load
+from newrl.utils.config import main as config_main
 from newrl.utils.wandb import resolve_checkpoint
 
 CHECKPOINT_CACHE_DIR = Path(".cache/wandb-checkpoints")
@@ -44,7 +46,9 @@ class PlayConfig:
     deterministic: bool = True
     algo: LearnerConfig | None = field(default=None, metadata={"preset_group": "algo"})
     viser_host: str = "127.0.0.1"
-    viser_port: int = 8080
+    viewer_port: int = 8081
+    splat_path: str | None = None
+    recording_dir: str = "recordings"
     discard_unused_obs: bool = False
 
     def __post_init__(self) -> None:
@@ -52,10 +56,30 @@ class PlayConfig:
             raise ValueError("episode_steps and steps must be positive")
         if self.num_envs is not None and self.num_envs < 1:
             raise ValueError("num_envs must be positive")
-        if not isinstance(self.viewer, bool) and self.viewer not in ("gl", "viser"):
-            raise ValueError("viewer must be true, false, gl, or viser")
-        if not 1 <= self.viser_port <= 65535:
-            raise ValueError("viser_port must be between 1 and 65535")
+        if not isinstance(self.viewer, bool) and self.viewer not in (
+            "gl",
+            "viser",
+            "browser",
+        ):
+            raise ValueError("viewer must be true, false, gl, viser, or browser")
+        if not 0 <= self.viewer_port <= 65535:
+            raise ValueError("viewer_port must be between 0 and 65535")
+
+
+def viewer_port_or_ephemeral(host: str, port: int) -> int:
+    """Use the requested port when free, otherwise ask the OS for a free one."""
+    if port == 0:
+        return 0
+    try:
+        with socket() as probe:
+            probe.bind((host, port))
+    except OSError:
+        print(
+            f"Viewer port {port} is unavailable. Requesting an available port.",
+            flush=True,
+        )
+        return 0
+    return port
 
 
 @config_main(PlayConfig, defaults={"task.num_envs": 4})
@@ -100,8 +124,9 @@ def play(cfg: PlayConfig) -> None:
 
     viewer = None
     if cfg.viewer == "viser":
-        viewer = newton.viewer.ViewerViser(host=cfg.viser_host, port=cfg.viser_port)
-    elif cfg.viewer:
+        port = viewer_port_or_ephemeral(cfg.viser_host, cfg.viewer_port)
+        viewer = newton.viewer.ViewerViser(host=cfg.viser_host, port=port)
+    elif cfg.viewer and cfg.viewer != "browser":
         viewer = newton.viewer.ViewerGL()
     try:
         task.mdp.truncations["timeout"] = Timeout(cfg.episode_steps)
@@ -112,6 +137,16 @@ def play(cfg: PlayConfig) -> None:
             policy.load_state_dict(weights)
             policy.eval()
         actions = torch.zeros((env.num_envs, env.action_dim), device=env.device)
+        if cfg.viewer == "browser":
+            from newrl.browser_view import BrowserViewer
+
+            viewer = BrowserViewer(
+                env.scene,
+                cfg.viewer_port,
+                cfg.splat_path,
+                recording_dir=cfg.recording_dir,
+                task_name=task.name,
+            )
         viser_playback = None
         if viewer is not None:
             viewer.set_model(env.model)
