@@ -251,7 +251,8 @@ class _EnvironmentCore:
         )
         return next_mdp_state, self._transition(physical_state, next_mdp_state, result)
 
-    def _step(self, action: torch.Tensor, mdp_state: TensorDict) -> tuple[TensorDict, TensorDict]:
+    def _step(self, sim_inputs: TensorDict, mdp_state: TensorDict) -> tuple[TensorDict, TensorDict]:
+        action = sim_inputs["action"]
         if action.shape != (self.num_envs, self.action_dim):
             raise ValueError(
                 f"Expected action shape {(self.num_envs, self.action_dim)}, got {tuple(action.shape)}"
@@ -292,11 +293,11 @@ class StatefulEnvironment(_EnvironmentCore):
             return transition
 
     @torch.no_grad()
-    def step(self, action: torch.Tensor) -> TensorDict:
+    def step(self, sim_inputs: TensorDict) -> TensorDict:
         if self.mdp_state is None:
             raise RuntimeError("Call reset() before the first step")
         with self._stream():
-            self.mdp_state, transition = self._step(action, self.mdp_state)
+            self.mdp_state, transition = self._step(sim_inputs, self.mdp_state)
             return transition
 
 
@@ -410,7 +411,7 @@ class StatelessEnvironment(_EnvironmentCore):
         with self._stream():
             with self._profile_stage("checkpoint_restore"):
                 self._restore(sim_state)
-            next_mdp_state, transition = self._step(sim_inputs["action"], mdp_state)
+            next_mdp_state, transition = self._step(sim_inputs, mdp_state)
             with self._profile_stage("checkpoint_snapshot"):
                 snapshot = self._snapshot()
             return snapshot, next_mdp_state, transition

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
-from newrl.algos.interfaces import OnPolicyConfig
+from newrl.algos.interfaces import TrainingConfig
 from newrl.commands import train as _module
 from newrl.commands.train import TrainConfig
 from newrl.configs import EnvironmentConfig
@@ -135,7 +135,7 @@ class ConfigTests(unittest.TestCase):
             TrainConfig,
             ["task=AnymalLocoFlat", "algo.flow_steps=3", "algo=genpo", "algo.name=trial"],
         )
-        self.assertIsInstance(config.algo, OnPolicyConfig)
+        self.assertIsInstance(config.algo, TrainingConfig)
         self.assertEqual(config.algo.algo_id, "genpo")
         self.assertEqual(config.algo.flow_steps, 3)
         self.assertEqual(config.algo.name, "trial")

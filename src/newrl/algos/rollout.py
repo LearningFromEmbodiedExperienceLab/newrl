@@ -8,7 +8,7 @@ with their reset observation before the next action.
 
 from typing import TYPE_CHECKING
 
-from newrl.algos.interfaces import OnPolicyLearner
+from newrl.algos.interfaces import TrainingLearner
 
 import torch
 from tensordict import TensorDict
@@ -17,39 +17,31 @@ if TYPE_CHECKING:
     from newrl.env import StatefulEnvironment
 
 _ENV_OBSERVATION = "observation"
-_ENV_REWARD = "reward"
-_ENV_TERMINATED = "terminated"
 _ENV_DONE = "done"
 
 
 def collect_rollout(
     env: "StatefulEnvironment",
-    policy: OnPolicyLearner,
+    policy: TrainingLearner,
     steps: int,
     carry: TensorDict,
 ) -> tuple[TensorDict, TensorDict]:
     """Collect ``steps`` transitions for every world.
 
     ``carry`` is the TensorDict the policy reads for the next action. The
-    policy writes its own buffer fields. The collector adds the reward and
-    episode-end flags from the environment.
+    policy writes its own buffer fields. The collector attaches the true
+    successor under "next" and lets the learner choose the retained row.
     """
     if steps < 1:
         raise ValueError("steps must be positive")
 
+    carry = _output_carry(carry)
     rows = []
     for _ in range(steps):
-        step = carry.clone()
-        policy.act(step)
-        transition = env.step(step["action"])
-        policy.record(step, transition)
-        step[_ENV_REWARD] = _require(transition, _ENV_REWARD).detach().clone()
-        step[_ENV_TERMINATED] = _require(transition, _ENV_TERMINATED).detach().clone()
-        step[_ENV_DONE] = _require(transition, _ENV_DONE).detach().clone()
-        for field in ("termination_terms", "truncation_terms"):
-            if field in transition:
-                step[field] = transition[field].detach().clone()
-        rows.append(step.exclude(_ENV_OBSERVATION))
+        step = policy.act(carry.clone())
+        transition = env.step(step)
+        step["next"] = transition
+        rows.append(policy.record(step))
         carry = _output_carry(transition)
         finished = transition[_ENV_DONE].squeeze(-1).nonzero(as_tuple=True)[0]
         if finished.numel():

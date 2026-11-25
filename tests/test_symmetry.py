@@ -64,14 +64,15 @@ class SymmetryTests(unittest.TestCase):
                 batch = TensorDict(
                     {
                         "observation": {"command": features},
-                        "reward": {"tracking": features[..., :1]},
-                        "done": torch.zeros(*shape, 1, dtype=torch.bool),
-                        "terminated": torch.zeros(*shape, 1, dtype=torch.bool),
+                        ("next", "reward"): {"tracking": features[..., :1]},
+                        ("next", "done"): torch.zeros(*shape, 1, dtype=torch.bool),
+                        ("next", "terminated"): torch.zeros(*shape, 1, dtype=torch.bool),
                     },
                     batch_size=shape,
                 )
                 policy.act(batch)
-                policy.record(batch, batch)
+                batch["next", "observation"] = batch["observation"].clone()
+                batch = policy.record(batch)
                 norm_count = policy.policy_norm.count.clone()
                 metrics = policy.train_op(batch)
                 self.assertGreater(metrics["actor/symmetry_loss"], 0.0)

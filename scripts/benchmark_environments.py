@@ -36,7 +36,7 @@ def measure(
         if stateless:
             sim, mdp, _ = env.step(sim, mdp, inputs[frame])
         else:
-            env.step(actions[frame])
+            env.step(inputs[frame])
         if reset_every and (step + 1) % reset_every == 0:
             ids = reset_ids[(step // reset_every) % len(reset_ids)]
             if stateless:

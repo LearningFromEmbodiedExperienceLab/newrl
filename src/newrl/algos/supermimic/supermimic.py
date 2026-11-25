@@ -2,6 +2,8 @@
 
 import copy
 import math
+from time import perf_counter
+from newrl.algos.rollout import collect_rollout
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -11,7 +13,7 @@ import torch
 from torch import nn
 from tensordict import TensorDict
 
-from newrl.algos.common.batch import group_width, stack_groups
+from newrl.algos.common.batch import aggregate_reward, group_width, stack_groups
 from newrl.algos.common.modules import MLP, Value
 from newrl.algos.common.normalization import EmpiricalNormalization, ReturnNormalization
 from newrl.algos.common.optimizer import build_optimizer
@@ -305,6 +307,10 @@ class SuperMimic(nn.Module):
                                             label='policy/critic')
 
     @property
+    def optimizers(self) -> tuple:
+        return self.opt_wm, self.opt_actor, self.opt_critic
+
+    @property
     def representation(self) -> GeneralizedCoordinates:
         return self.wm.representation
 
@@ -326,6 +332,9 @@ class SuperMimic(nn.Module):
 
     @torch.no_grad()
     def act(self, tensordict: TensorDict, *, deterministic: bool = False) -> TensorDict:
+        if self.training:
+            self.actor_norm.update(stack_groups(tensordict['observation'], self.config.policy_obs_keys))
+            self.critic_norm.update(stack_groups(tensordict['observation'], self.config.critic_obs_keys))
         action = self.actor_action(tensordict['observation'])
         if not deterministic:
             action = action + self.config.action_noise * torch.randn_like(action)
@@ -333,55 +342,50 @@ class SuperMimic(nn.Module):
         return tensordict
 
     @torch.no_grad()
-    def collect(
-        self,
-        env: "StatefulEnvironment",
-        steps: int,
-        carry: TensorDict | None = None,
-    ) -> tuple[TensorDict, TensorDict]:
-        if steps < 1:
-            raise ValueError('Collection steps must be positive')
+    def warmup(self, env: "StatefulEnvironment", carry: TensorDict) -> tuple[TensorDict, TensorDict]:
+        self.return_norm.returns.zero_()
+        return self.collect(env, self.config.warmup_steps, carry)
+
+    @torch.no_grad()
+    def collect(self, env: "StatefulEnvironment", steps: int, carry: TensorDict) -> tuple[TensorDict, TensorDict]:
         if self.replay is None:
             self.replay = ReplayBuffer(self.config.buffer_steps, env.num_envs, self.device)
-        if carry is None:
-            self.return_norm.returns.zero_()
-            carry = env.reset().select('observation', 'physical_state', 'mdp_state')
-        rows = []
-        for _ in range(steps):
-            observation = carry['observation']
-            self.actor_norm.update(stack_groups(observation, self.config.policy_obs_keys))
-            self.critic_norm.update(stack_groups(observation, self.config.critic_obs_keys))
-            state = self.representation.encode(carry['physical_state'])
-            action = self.act(carry.select('observation').clone())['action']
-            self.wm.update_normalization(state, action, carry['physical_state'], carry['mdp_state'])
-            transition = env.step(action)
-            reward = sum((values.sum(-1, keepdim=True) for values in transition['reward'].values()), action.new_zeros(env.num_envs, 1))
-            self.replay.add(TensorDict({
-                'state': state,
-                'mdp_state': carry['mdp_state'].select(*self.mdp.replay_fields),
-                'action': action,
-                'next': TensorDict({
-                    'state':self.representation.encode(transition['physical_state']),
-                    'reward':reward,
-                    'done':transition['done'],
-                    'terminated':transition['terminated'],
-                    'truncated':transition['truncated']
-                }, [env.num_envs]),
-            }, [env.num_envs]))
-            rows.append(TensorDict({
-                'mdp_state':carry['mdp_state'].select('episode_step').clone(),
-                **{key:transition[key].detach().clone() for key in ('reward','terminated','done','termination_terms','truncation_terms')},
-            }, [env.num_envs]))
-            carry = transition.select('observation', 'physical_state', 'mdp_state')
-            ended = transition['done'].squeeze(-1).nonzero(as_tuple=True)[0]
-            if ended.numel():
-                reset = env.reset(ended)
-                carry[ended] = reset.select(*carry.keys())[ended]
-        batch = torch.stack(rows, 1)
+        batch, carry = collect_rollout(env, self, steps, carry)
         if self.config.normalize_reward:
-            raw = sum((values.sum(-1, keepdim=True) for values in batch['reward'].values()), batch['done'].new_zeros((*batch.batch_size,1), dtype=torch.float32))
-            self.return_norm.update(raw, batch['done'])
+            raw = aggregate_reward(batch)
+            self.return_norm.update(raw, batch["next", "done"])
         return batch, carry
+
+    @torch.no_grad()
+    def record(self, transition: TensorDict) -> TensorDict:
+        state = self.representation.encode(transition["physical_state"])
+        action = transition["action"]
+        self.wm.update_normalization(state, action, transition["physical_state"], transition["mdp_state"])
+        successor = transition["next"]
+        reward = aggregate_reward(transition)
+        self.replay.add(TensorDict({
+            "state": state,
+            "mdp_state": transition["mdp_state"].select(*self.mdp.replay_fields),
+            "action": action,
+            "next": TensorDict({
+                "state": self.representation.encode(successor["physical_state"]),
+                "reward": reward,
+                **{key: successor[key] for key in ("done", "terminated", "truncated")},
+            }, transition.batch_size),
+        }, transition.batch_size))
+        return transition.select(("mdp_state", "episode_step"), *(("next", key) for key in ("reward", "terminated", "done", "termination_terms", "truncation_terms")))
+
+    def train_op(self, batch: TensorDict) -> dict[str, float]:
+        start = perf_counter()
+        metrics = self.update_world_model()
+        model_end = perf_counter()
+        metrics.update(self.update_actor_critic())
+        metrics.update({
+            "replay/rows": self.replay.filled,
+            "performance/world_model_time": model_end - start,
+            "performance/policy_critic_time": perf_counter() - model_end,
+        })
+        return metrics
 
     def update_world_model(self) -> dict[str, float]:
         cfg = self.config

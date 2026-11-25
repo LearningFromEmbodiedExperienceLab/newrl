@@ -110,13 +110,13 @@ class RolloutTests(unittest.TestCase):
         env = _ScriptedEnvironment()
         batch, carry = collect_rollout(env, _RecordingPolicy(), 2, env.reset())
         self.assertEqual(tuple(batch.batch_size), (2, 2))
-        torch.testing.assert_close(batch["reward", "tracking"], torch.ones(2, 2, 1))
+        torch.testing.assert_close(batch["next", "reward", "tracking"], torch.ones(2, 2, 1))
         self.assertTrue(
             torch.equal(batch["policy_observation"][:, 0], torch.tensor([[0.0], [0.0]]))
         )
         self.assertTrue(
             torch.equal(
-                batch["next_critic_observation"][:, 0],
+                batch["next", "critic_observation"][:, 0],
                 torch.tensor([[1.0, 10.0], [1.0, 10.0]]),
             )
         )
@@ -251,8 +251,8 @@ class PPOTests(unittest.TestCase):
             action_dim=2,
         )
         batch = _random_batch(num_envs=4, steps=4, policy_dim=3, action_dim=2)
-        expected = batch["reward", "tracking"].sum(-1, keepdim=True)
-        expected = expected + batch["reward", "regularization"]
+        expected = batch["next", "reward", "tracking"].sum(-1, keepdim=True)
+        expected = expected + batch["next", "reward", "regularization"]
         policy.critic.head.weight.data.zero_()
         policy.critic.head.bias.data.zero_()
         with torch.no_grad():
@@ -296,11 +296,13 @@ class _RecordingPolicy:
         tensordict["action_log_prob"] = torch.zeros(tensordict.batch_size[0], 1)
         return tensordict
 
-    def record(self, tensordict, transition):
-        observation = transition["observation"]
-        tensordict["next_critic_observation"] = torch.cat(
+    def record(self, transition):
+        observation = transition["next", "observation"]
+        transition["next", "critic_observation"] = torch.cat(
             [observation["state"], observation["extra"]], dim=-1
         )
+
+        return transition.exclude("observation", ("next", "observation"))
 
 
 class _ScriptedEnvironment:
@@ -322,7 +324,7 @@ class _ScriptedEnvironment:
             torch.zeros(self.num_envs, 1, dtype=torch.bool),
         )
 
-    def step(self, action):
+    def step(self, sim_inputs):
         self._observation = self._observation + 1
         self._episode_step += 1
         done = torch.zeros(self.num_envs, 1, dtype=torch.bool)
@@ -357,15 +359,15 @@ def _random_batch(num_envs, steps, policy_dim, action_dim):
         {
             "policy_observation": observation,
             "critic_observation": observation.clone(),
-            "next_critic_observation": torch.randn(num_envs, steps, policy_dim),
+            ("next", "critic_observation"): torch.randn(num_envs, steps, policy_dim),
             "action": torch.randn(num_envs, steps, action_dim),
             "action_log_prob": torch.zeros(num_envs, steps, 1),
-            "reward": {
+            ("next", "reward"): {
                 "tracking": torch.randn(num_envs, steps, 2),
                 "regularization": -torch.rand(num_envs, steps, 1),
             },
-            "terminated": torch.zeros(num_envs, steps, 1, dtype=torch.bool),
-            "done": torch.zeros(num_envs, steps, 1, dtype=torch.bool),
+            ("next", "terminated"): torch.zeros(num_envs, steps, 1, dtype=torch.bool),
+            ("next", "done"): torch.zeros(num_envs, steps, 1, dtype=torch.bool),
         },
         batch_size=[num_envs, steps],
     )

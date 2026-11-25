@@ -51,13 +51,13 @@ class GenPOTests(unittest.TestCase):
                 {
                     "policy_observation": obs,
                     "critic_observation": obs,
-                    "next_critic_observation": obs,
+                    ("next", "critic_observation"): obs,
                     "action": action,
                     "flow_hist": history,
                     "action_log_prob": log_prob - log_ratio,
-                    "reward": {"tracking": torch.randn(2, 2, 1)},
-                    "done": torch.zeros(2, 2, 1, dtype=torch.bool),
-                    "terminated": torch.zeros(2, 2, 1, dtype=torch.bool),
+                    ("next", "reward"): {"tracking": torch.randn(2, 2, 1)},
+                    ("next", "done"): torch.zeros(2, 2, 1, dtype=torch.bool),
+                    ("next", "terminated"): torch.zeros(2, 2, 1, dtype=torch.bool),
                 },
                 batch_size=[2, 2],
             )

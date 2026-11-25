@@ -125,6 +125,14 @@ class CudaMemoryProfiler:
             metrics["memory/buffers/optimizer_mib"] = (
                 storage_bytes(optimizer.state_dict(), seen=seen) / _MIB
             )
+        replay = getattr(policy, "replay", None)
+        if replay is not None:
+            metrics["memory/buffers/replay_mib"] = storage_bytes(replay.storage, seen=seen) / _MIB
+        optimizers = getattr(policy, "optimizers", ())
+        if optimizers:
+            metrics["memory/buffers/optimizer_mib"] = storage_bytes(
+                *(opt.state_dict() for opt in optimizers), seen=seen
+            ) / _MIB
         return metrics
 
     def rollout(self, batch: TensorDict, carry: TensorDict) -> dict[str, float]:

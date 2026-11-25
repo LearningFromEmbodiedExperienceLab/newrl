@@ -6,6 +6,7 @@ import unittest
 import newton
 import numpy as np
 import torch
+from tensordict import TensorDict
 import warp as wp
 
 from newrl.configs import AS2WLocomotion, M20SLocomotion
@@ -132,7 +133,7 @@ class WheelTerrainTests(unittest.TestCase):
                         loads = []
                         wheel_positions = []
                         for _ in range(20):
-                            step = env.step(action)
+                            step = env.step(TensorDict({"action": action}, action.shape[:-1]))
                             gaps.append(clearance())
                             loads.append(step["physical_state", "feet_ground", "loaded"])
                             poses = wp.to_torch(env.state.body_q)[wheel_bodies]

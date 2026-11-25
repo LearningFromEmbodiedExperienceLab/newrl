@@ -43,7 +43,8 @@ the true successor observation, including on termination or truncation; any
 requested physical snapshot describes that same successor. Preserve the physics and MDP state of unselected worlds during
 a partial reset.
 
-- `StatefulEnvironment.step(action)` returns a transition and advances the
+- `StatefulEnvironment.step(sim_inputs)` accepts a TensorDict containing the
+  action and returns a transition and advances the
   environment's internal physics and MDP state. Use this API for play and
   ordinary rollout collection. Call `reset()` before the first step and
   `reset(env_ids)` to reset selected worlds.
@@ -57,6 +58,62 @@ a partial reset.
   [env.py](src/newrl/env.py). Preserve ordering between Torch and Warp when
   using shared GPU buffers. CUDA graph capture is opt-in and covers the
   physics loop. Preserve both starting-buffer cases for odd substep counts.
+
+## Transition schema and training
+
+Both environment step APIs accept a TensorDict of simulator inputs containing
+`action` with shape `[num_envs, action_dim]`. The environment owns the
+interpretation of simulator inputs. Its step output contains the true successor
+observation, MDP outputs, optional physical snapshot, reward and ending flags.
+
+The shared collector in [rollout.py](src/newrl/algos/rollout.py) assembles a
+TensorDict with batch size `[num_envs]` for each real transition.
+
+```text
+observation/<group>             decision-time observation
+mdp_state/<field>               decision-time MDP output
+physical_state/<entity>/<field> optional decision-time physical snapshot
+action                          action applied to the simulator
+<learner fields>                data produced by act()
+next/
+    observation/<group>         true successor observation
+    mdp_state/<field>            successor MDP output
+    physical_state/<entity>/<field>
+                                optional true successor physical snapshot
+    reward/<group>               reward for the action
+    terminated                  terminal flag
+    truncated                   truncation flag
+    done                        terminated | truncated
+    termination_terms/<name>    individual termination flags
+    truncation_terms/<name>     individual truncation flags
+```
+
+- `act(decision)` adds action and learner-specific data at the root.
+  The collector passes the resulting TensorDict to the environment's step,
+  attaches its output at `next`, and calls `record(transition)` before
+  any reset. Reset observations replace only the selected worlds in the
+  carry for the following decision.
+- `record(transition)` returns the row to retain for training and episode
+  statistics. Stacked rollout rows have batch size `[num_envs, steps]`.
+  Retain `mdp_state.episode_step` from decision time and reward groups and
+  ending flags under `next`. Episode length is the decision-time count plus
+  one at an ending transition.
+- PPO, PPO SymAug and GenPO retain the normalized actor input as
+  `policy_observation`, the behavior action log probability as
+  `action_log_prob`, and critic inputs at `critic_observation` and
+  `("next", "critic_observation")`. Extra algorithm-specific inputs, such
+  as flow history or normalized mirrored observations, remain at the root.
+  Use `next.terminated` to mask value bootstrapping and `next.done` to
+  stop the advantage trace.
+- SuperMimic encodes physical snapshots into `state` and
+  `("next", "state")`, and copies these, decision-time replay MDP state,
+  action, summed reward and ending flags into persistent replay storage.
+  Its returned rollout rows retain episode statistics.
+- The shared trainer uses `collect(env, steps, carry)` and
+  `train_op(batch)` for all learners. A learner may implement
+  `warmup(env, carry)` returning a batch and the next carry. Warmup frames
+  and episode statistics count toward training totals. SuperMimic performs
+  world-model and imagined actor/critic updates inside `train_op`.
 
 ## Scene, terrain, and task
 

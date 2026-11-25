@@ -143,7 +143,8 @@ class RepresentationTests(unittest.TestCase):
             logger = stack.enter_context(patch.object(module, '_make_logger'))
             save = stack.enter_context(patch.object(module, '_save_checkpoint', return_value=Path('/tmp/test-checkpoint.pt')))
             stack.enter_context(patch.object(module, 'EpisodeStats', return_value=stats))
-            stack.enter_context(patch.object(module, 'collect_rollout', return_value=(batch, carry)))
+            policy.collect.return_value = (batch, carry)
+            policy.warmup = None
             stack.enter_context(patch.object(module, 'setproctitle'))
             stack.enter_context(redirect_stdout(StringIO()))
             module.train.__wrapped__(cfg)

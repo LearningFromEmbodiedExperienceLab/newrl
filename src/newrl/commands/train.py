@@ -1,4 +1,4 @@
-"""Train an on-policy learner on a NewRL environment."""
+"""Train a learner on a NewRL environment."""
 
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
@@ -13,8 +13,7 @@ import torch
 import torch.distributed as dist
 from tensordict import TensorDict
 
-from newrl.algos.interfaces import LearnerConfig, Learner
-from newrl.algos.rollout import collect_rollout
+from newrl.algos.interfaces import TrainingConfig, Learner
 from newrl.commands import with_used_observations
 from newrl.configs import EnvironmentConfig
 from newrl.env import StatefulEnvironment
@@ -31,7 +30,7 @@ TRAIN_OUTPUT_DIR = Path("outputs_train")
 @dataclass
 class TrainConfig:
     task: EnvironmentConfig
-    algo: LearnerConfig = field(metadata={"preset_group": "algo"})
+    algo: TrainingConfig = field(metadata={"preset_group": "algo"})
     seed: int = 0
     iterations: int = 2000
     logger: WandbConfig = field(default_factory=WandbConfig)
@@ -128,7 +127,7 @@ class EpisodeStats:
         self.completed_episodes = 0
 
     def update(self, batch: TensorDict) -> dict[str, float | int]:
-        groups, done = batch["reward"], batch["done"]
+        groups, done = batch["next", "reward"], batch["next", "done"]
         names = tuple(groups.keys())
         group_totals = [groups[name].sum(dim=-1, keepdim=True) for name in names]
         reward = (
@@ -159,14 +158,14 @@ class EpisodeStats:
                     "train/episode_len": float(reduce_sum(lengths.float().sum()) / completed),
                     "train/return": float(reduce_sum(returns.sum()) / completed),
                     "train/termination_rate": float(
-                        reduce_sum(batch["terminated"][done].float().sum()) / completed
+                        reduce_sum(batch["next", "terminated"][done].float().sum()) / completed
                     ),
                 }
             )
             for name, mean in zip(names, (reduce_sum(returns.sum(dim=0)) / completed).tolist(), strict=True):
                 metrics[f"train/return/{name}"] = mean
             for kind in ("termination", "truncation"):
-                terms = batch.get(f"{kind}_terms")
+                terms = batch.get(("next", f"{kind}_terms"))
                 if terms is not None:
                     for name, flags in terms.items():
                         count = int(reduce_sum((flags & done).sum()))
@@ -187,12 +186,6 @@ def train(cfg: TrainConfig) -> None:
 
 
 def _train(cfg: TrainConfig) -> None:
-    from newrl.algos.supermimic import SuperMimicConfig
-
-    if isinstance(cfg.algo, SuperMimicConfig):
-        from newrl.commands.train_supermimic import train_supermimic
-
-        return train_supermimic(cfg)
     title = f"{cfg.task.name}-{cfg.algo.name}-ETA:"
     setproctitle(f"{title}--:--:--")
     run_id = token_hex(4)
@@ -248,6 +241,15 @@ def _train(cfg: TrainConfig) -> None:
             dist.barrier()
             if primary:
                 print(f"All {world_size()} workers ready. Starting rollout collection.", flush=True)
+        frames = 0
+
+        # Optional warmup phase
+        warmup = getattr(policy, "warmup", None)
+        if warmup is not None:
+            batch, carry = warmup(env, carry)
+            frames += batch.numel() * world_size()
+            episode_stats.update(batch)
+
         loop_start = perf_counter()
         for iteration in range(cfg.iterations):
             sample_memory = profiler is not None and (
@@ -258,9 +260,7 @@ def _train(cfg: TrainConfig) -> None:
             if sample_memory:
                 profiler.begin_phase()
             iteration_start = perf_counter()
-            if world_size() > 1:
-                policy.begin_rollout()
-            batch, carry = collect_rollout(env, policy, cfg.algo.update_every, carry)
+            batch, carry = policy.collect(env, cfg.algo.update_every, carry)
             if env.device.type == "cuda":
                 torch.cuda.synchronize(env.device)
             rollout_time = perf_counter() - iteration_start
@@ -292,7 +292,7 @@ def _train(cfg: TrainConfig) -> None:
                     "performance/iter_time": iteration_time,
                 }
             )
-            frames = (iteration + 1) * batch.numel() * world_size()
+            frames += batch.numel() * world_size()
             if logger is not None:
                 logger.log({**metrics, "env_frames": frames}, step=iteration)
             summary = " ".join(f"{key}={value:.4f}" for key, value in metrics.items())
@@ -306,7 +306,7 @@ def _train(cfg: TrainConfig) -> None:
                 )
                 write_memory_chart(chart_path, memory_samples)
                 print(f"Saved GPU memory chart to {chart_path}", flush=True)
-            if logger is not None and checkpoint_dir is not None and completed % cfg.checkpoint_interval == 0:
+            if logger is not None and checkpoint_dir is not None and (completed % cfg.checkpoint_interval == 0 or completed == cfg.iterations):
                 path = _save_checkpoint(checkpoint_dir, policy, cfg, completed, frames)
                 logger.save_checkpoint(path)
                 print(f"Saved checkpoint {path}", flush=True)

@@ -34,6 +34,7 @@ from .common.optimizer import make_optimizer
 from .common.policy_evaluation import clip_bounds, generalized_advantage
 from newrl.utils.config import cs  # noqa: E402
 from newrl.utils.profiling import StageProfiler
+from newrl.algos.rollout import collect_rollout
 from newrl.utils.distributed import average_gradients, average_metrics, world_size
 from newrl.utils.symmetry import SymmetryTransform
 
@@ -211,15 +212,19 @@ class PPOSymAug(nn.Module):
         )
         return tensordict
 
+    def collect(self, env: "StatefulEnvironment", steps: int, carry: TensorDict) -> tuple[TensorDict, TensorDict]:
+        self.begin_rollout()
+        return collect_rollout(env, self, steps, carry)
+
     @torch.no_grad()
-    def record(self, tensordict: TensorDict, transition: TensorDict) -> None:
-        """Write the successor critic features from the true next observation."""
-        tensordict[NEXT_CRITIC_OBSERVATION] = stack_groups(
-            transition["observation"], self.cfg.critic_obs_keys
+    def record(self, transition: TensorDict) -> TensorDict:
+        transition[NEXT_CRITIC_OBSERVATION] = stack_groups(
+            transition["next", "observation"], self.cfg.critic_obs_keys
         ).detach()
+        return transition.exclude("observation", "physical_state", ("next", "observation"), ("next", "physical_state"), ("next", "mdp_state"))
 
     def train_op(self, batch: TensorDict) -> dict[str, float]:
-        missing = [key for key in BATCH_KEYS if key not in batch]
+        missing = [key for key in BATCH_KEYS if key not in batch.keys(include_nested=True)]
         if missing:
             raise KeyError(f"On-policy batch is missing {missing}")
         scalar_shape = (*batch.batch_size, 1)

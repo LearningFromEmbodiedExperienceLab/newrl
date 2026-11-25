@@ -48,7 +48,7 @@ class TrackingEnvironmentTests(unittest.TestCase):
         )
         env = StatefulEnvironment(cfg.prepare_task(G1MotionTracking(num_envs=8,graph_capture=False)))
         learner = cfg.build(env)
-        _,carry = learner.collect(env,4)
+        _,carry = learner.collect(env,4,env.reset())
         self.assertEqual(learner.wm.observations.shape, (42,))
         state = learner.representation.encode(carry['physical_state'])
         # Before compilation/capture, verify hidden BF16 and FP32 physical outputs.
@@ -90,7 +90,7 @@ class TrackingEnvironmentTests(unittest.TestCase):
         task.mdp.truncations['timeout'] = Timeout(2)
         env = StatefulEnvironment(task)
         learner = cfg.build(env)
-        batch, carry = learner.collect(env, 4)
+        batch, carry = learner.collect(env, 4, env.reset())
         self.assertEqual(batch.batch_size, (4, 4))
         storage = learner.replay.storage
         self.assertTrue(storage['next', 'done'][1].all())
@@ -117,7 +117,7 @@ class TrackingEnvironmentTests(unittest.TestCase):
         env.reset()
         before = env.mdp_state.clone()
         action = torch.full((3, 29), .1, device=env.device)
-        real = env.step(action)
+        real = env.step(TensorDict({"action": action}, action.shape[:-1]))
         physical = real['physical_state']
         compact = rep.encode(physical)
         decoded = rep.decode(compact)
@@ -198,7 +198,7 @@ class TrackingEnvironmentTests(unittest.TestCase):
             initial_snapshot = initial.clone()
             action = torch.zeros(2, 29, device=live.device)
             for _ in range(3):
-                transition = live.step(action)
+                transition = live.step(TensorDict({"action": action}, action.shape[:-1]))
                 sim, mdp, other = branch.step(sim, mdp, TensorDict({"action": action}, [2]))
                 torch.testing.assert_close(transition, other)
             torch.testing.assert_close(initial, initial_snapshot)

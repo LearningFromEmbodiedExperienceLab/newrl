@@ -6,6 +6,7 @@ from socket import socket
 
 import newton
 import torch
+from tensordict import TensorDict
 
 from newrl.algos.interfaces import LearnerConfig
 from newrl.commands import with_used_observations
@@ -163,7 +164,7 @@ def play(cfg: PlayConfig) -> None:
             if viewer is None or viewer.should_step():
                 if policy is not None:
                     actions = policy.act(carry, deterministic=cfg.deterministic)["action"]
-                transition = env.step(actions)
+                transition = env.step(TensorDict({"action": actions}, batch_size=[env.num_envs]))
                 carry = transition.select("observation")
                 steps += 1
                 finished = transition["done"].squeeze(-1).nonzero(as_tuple=True)[0]

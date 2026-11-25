@@ -77,7 +77,7 @@ class EnvironmentTests(unittest.TestCase):
                     mask = entity.velocity_mask
                     action = torch.zeros(2, env.action_dim, device=env.device)
                     action[:, mask] = 0.5
-                    env.step(action)
+                    env.step(TensorDict({"action": action}, action.shape[:-1]))
                     target = wp.to_torch(env.control.joint_target_qd)[entity.joint_qd_indices]
                     torch.testing.assert_close(target[:, mask], torch.full_like(target[:, mask], 5.0))
                     self.assertGreater(
@@ -112,7 +112,7 @@ class EnvironmentTests(unittest.TestCase):
                 env.mdp_state["command_steps_left"][:] = 2
                 action = torch.linspace(-0.2, 0.15, env.action_dim, device=env.device)
                 mirror_action = env.scene.action_symmetry_transform().to(env.device)
-                transition = env.step(torch.stack((action, mirror_action(action))))
+                transition = env.step(TensorDict({"action": torch.stack((action, mirror_action(action)))}, [2]))
 
                 for name, values in transition["observation"].items():
                     with self.subTest(observation=name):
@@ -176,7 +176,7 @@ class EnvironmentTests(unittest.TestCase):
                 seen = torch.zeros((2, 4), dtype=torch.bool, device=env.device)
                 for _ in range(30):
                     sim, mdp, transition = env.step(sim, mdp, inputs)
-                    actual = stateful.step(inputs["action"])
+                    actual = stateful.step(inputs)
                     torch.testing.assert_close(actual, transition, atol=2e-3, rtol=2e-3)
                     seen |= transition["physical_state", "feet_ground", "first_contact"]
                 self.assertTrue(seen.any(dim=-1).all())
@@ -497,7 +497,7 @@ class EnvironmentTests(unittest.TestCase):
         )
         for step in range(40):
             action = 0.1 * (phase + 0.17 * step).sin()
-            actual = stateful.step(action)
+            actual = stateful.step(TensorDict({"action": action}, action.shape[:-1]))
             sim, mdp, expected = stateless.step(
                 sim, mdp, TensorDict({"action": action}, batch_size=[3])
             )
@@ -611,7 +611,7 @@ class EnvironmentTests(unittest.TestCase):
         )
         self.assertEqual(initial["mdp_state", "episode_step"].shape, (2, 1))
         action = torch.zeros((2, env.action_dim), device=env.device)
-        transition = env.step(action)
+        transition = env.step(TensorDict({"action": action}, action.shape[:-1]))
         self.assertTrue(transition["done"].all())
         self.assertEqual(env.mdp_state["episode_step"].tolist(), [[1], [1]])
         self.assertEqual(transition["mdp_state", "episode_step"].tolist(), [[1], [1]])
@@ -644,7 +644,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(set(first["robot"].keys()), {"joint_pos"})
         saved = first.clone()
         action = torch.full((2, env.action_dim), 0.1, device=env.device)
-        result = env.step(action)
+        result = env.step(TensorDict({"action": action}, action.shape[:-1]))
         self.assertEqual(set(result["physical_state", "robot"].keys()), {"joint_pos"})
         torch.testing.assert_close(first, saved, atol=0, rtol=0)
         cfg.output_physical_fields = (("robot", "body_pose_w"),)
@@ -684,4 +684,4 @@ class EnvironmentTests(unittest.TestCase):
             },
         )
         self.assertNotIn("physical_state", env.reset())
-        env.step(torch.zeros((1, env.action_dim), device=env.device))
+        env.step(TensorDict({"action": torch.zeros((1, env.action_dim), device=env.device)}, [1]))
