@@ -6,7 +6,6 @@ from socket import socket
 
 import newton
 import torch
-from tensordict import TensorDict
 
 from newrl.algos.interfaces import LearnerConfig
 from newrl.commands import with_used_observations
@@ -15,7 +14,7 @@ from newrl.env import StatefulEnvironment
 from newrl.mdp.episode_ends import Timeout
 from newrl.projects import load_projects
 from newrl.terrains import PlaneTerrainConfig, Terrain
-from newrl.utils.config import load
+from newrl.utils.config import cs, load
 from newrl.utils.config import main as config_main
 from newrl.utils.wandb import resolve_checkpoint
 
@@ -36,20 +35,60 @@ def viewer_world_offsets(terrain: Terrain | None, num_envs: int) -> tuple[float,
     return (0.0, 0.0, 0.0)
 
 
+@dataclass(frozen=True)
+class GLViewerConfig:
+    def build(self, env: StatefulEnvironment) -> newton.viewer.ViewerGL:
+        return newton.viewer.ViewerGL()
+
+
+@dataclass(frozen=True)
+class ViserViewerConfig:
+    host: str = "127.0.0.1"
+    port: int = 8081
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.port <= 65535:
+            raise ValueError("viewer.port must be between 0 and 65535")
+
+    def build(self, env: StatefulEnvironment) -> newton.viewer.ViewerViser:
+        port = viewer_port_or_ephemeral(self.host, self.port)
+        return newton.viewer.ViewerViser(host=self.host, port=port)
+
+
+@dataclass(frozen=True)
+class BrowserViewerConfig:
+    port: int = 8081
+    splat_path: str | None = None
+    recording_dir: str = "recordings"
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.port <= 65535:
+            raise ValueError("viewer.port must be between 0 and 65535")
+
+    def build(self, env: StatefulEnvironment) -> newton.viewer.ViewerNull:
+        from newrl.browser_view import BrowserViewer
+
+        return BrowserViewer(
+            env.scene, self.port, self.splat_path,
+            recording_dir=self.recording_dir, task_name=env.config.name,
+        )
+
+
+cs.store("gl", GLViewerConfig(), group="viewer")
+cs.store("viser", ViserViewerConfig(), group="viewer")
+cs.store("browser", BrowserViewerConfig(), group="viewer")
+
+
 @dataclass
 class PlayConfig:
     task: EnvironmentConfig | None = None
     episode_steps: int = 1000
     steps: int | None = None
-    viewer: bool | str = True
+    viewer: GLViewerConfig | ViserViewerConfig | BrowserViewerConfig | None = field(default_factory=GLViewerConfig)
     checkpoint: str | None = None
     num_envs: int | None = None
     deterministic: bool = True
     algo: LearnerConfig | None = field(default=None, metadata={"preset_group": "algo"})
-    viser_host: str = "127.0.0.1"
-    viewer_port: int = 8081
-    splat_path: str | None = None
-    recording_dir: str = "recordings"
     discard_unused_obs: bool = False
 
     def __post_init__(self) -> None:
@@ -57,14 +96,6 @@ class PlayConfig:
             raise ValueError("episode_steps and steps must be positive")
         if self.num_envs is not None and self.num_envs < 1:
             raise ValueError("num_envs must be positive")
-        if not isinstance(self.viewer, bool) and self.viewer not in (
-            "gl",
-            "viser",
-            "browser",
-        ):
-            raise ValueError("viewer must be true, false, gl, viser, or browser")
-        if not 0 <= self.viewer_port <= 65535:
-            raise ValueError("viewer_port must be between 0 and 65535")
 
 
 def viewer_port_or_ephemeral(host: str, port: int) -> int:
@@ -85,10 +116,8 @@ def viewer_port_or_ephemeral(host: str, port: int) -> int:
 
 @config_main(PlayConfig, defaults={"task.num_envs": 4})
 def play(cfg: PlayConfig) -> None:
-    if cfg.algo is not None and cfg.checkpoint is None:
-        raise ValueError("algo requires a checkpoint")
     task = cfg.task
-    algo = None
+    algo = cfg.algo
     weights = None
     if cfg.checkpoint is not None:
         path = resolve_checkpoint(cfg.checkpoint, CHECKPOINT_CACHE_DIR)
@@ -124,48 +153,40 @@ def play(cfg: PlayConfig) -> None:
         task = with_used_observations(task, algo)
 
     viewer = None
-    if cfg.viewer == "viser":
-        port = viewer_port_or_ephemeral(cfg.viser_host, cfg.viewer_port)
-        viewer = newton.viewer.ViewerViser(host=cfg.viser_host, port=port)
-    elif cfg.viewer and cfg.viewer != "browser":
-        viewer = newton.viewer.ViewerGL()
     try:
         task.mdp.truncations["timeout"] = Timeout(cfg.episode_steps)
         env = StatefulEnvironment(task)
         policy = None
         if algo is not None:
             policy = algo.build(env)
-            policy.load_state_dict(weights)
+            if weights is not None:
+                policy.load_state_dict(weights)
             policy.eval()
         actions = torch.zeros((env.num_envs, env.action_dim), device=env.device)
-        if cfg.viewer == "browser":
-            from newrl.browser_view import BrowserViewer
-
-            viewer = BrowserViewer(
-                env.scene,
-                cfg.viewer_port,
-                cfg.splat_path,
-                recording_dir=cfg.recording_dir,
-                task_name=task.name,
-            )
+        if cfg.viewer is not None:
+            viewer = cfg.viewer.build(env)
         viser_playback = None
         if viewer is not None:
             viewer.set_model(env.model)
             viewer.set_world_offsets(viewer_world_offsets(task.terrain, env.num_envs))
-            if cfg.viewer == "viser":
+            if isinstance(cfg.viewer, ViserViewerConfig):
                 from newrl.viser_view import ViserPlayback
 
                 viser_playback = ViserPlayback(viewer, env.scene)
-        carry = env.reset().select("observation")
+
+        carry = env.reset()
         steps = resets = 0
         while (cfg.steps is None or steps < cfg.steps) and (
             viewer is None or viewer.is_running()
         ):
             if viewer is None or viewer.should_step():
+                decision = carry.clone()
                 if policy is not None:
-                    actions = policy.act(carry, deterministic=cfg.deterministic)["action"]
-                transition = env.step(TensorDict({"action": actions}, batch_size=[env.num_envs]))
-                carry = transition.select("observation")
+                    decision = policy.act(decision, deterministic=cfg.deterministic)
+                else:
+                    decision["action"] = actions
+                transition = env.step(decision)
+                carry = transition.select(*carry.keys())
                 steps += 1
                 finished = transition["done"].squeeze(-1).nonzero(as_tuple=True)[0]
             else:
@@ -178,7 +199,7 @@ def play(cfg: PlayConfig) -> None:
                 viewer.end_frame()
             if finished is not None and finished.numel():
                 reset = env.reset(finished)
-                carry[finished] = reset.select("observation")[finished]
+                carry[finished] = reset.select(*carry.keys())[finished]
                 resets += finished.numel()
         print(f"worlds={env.num_envs} control_steps={steps} world_resets={resets}")
     except KeyboardInterrupt:

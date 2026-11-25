@@ -132,12 +132,12 @@ newrl play checkpoint=path/to/checkpoint.pt
 
 Playback defaults to four worlds and deterministic actions. Use `num_envs=1`
 for a single world, `deterministic=false` to sample actions, or
-`viewer=false steps=100` for a headless run.
+`viewer=none steps=100` for a headless run.
 Use `uv run --extra viser newrl play task=AnymalLocoFlat viewer=viser`
 to open playback in a browser. Both web viewers use port `8080` by default.
 If it is unavailable, they request a free port from the operating system and
-print the resulting URL. Set `viewer_port` to choose a different preferred
-port. A value of `0` always requests an OS-assigned port. `viser_host` changes
+print the resulting URL. Set `viewer.port` to choose a different preferred
+port. A value of `0` always requests an OS-assigned port. `viewer.host` changes
 Viser's listen address.
 In the browser's **Robot view** panel, choose a world and robot, then enable
 **Follow robot**. Enable **Camera frustums** to see the selected robot's
@@ -173,12 +173,12 @@ move more slowly. **X** also slows movement when the viewport has focus,
 including for keys that Chrome reserves as Ctrl shortcuts.
 Press **Space** in the viewport or click **Pause simulation** to stop
 simulation stepping. The camera and recording remain active while paused.
-Use `viewer_port` to select the preferred port. The **Entities** panel toggles
+Use `viewer.port` to select the preferred port. The **Entities** panel toggles
 ground, robot visuals, collision geometry, camera frustums, and individual
 Gaussian clouds. Frustums follow the selected world and remain available
 when playback skips camera observations.
 Gaussian clouds load the first time they are enabled. Pass
-`splat_path=/path/to/scene.ply` (or `.spz`) to add a cloud already aligned to
+`viewer.splat_path=/path/to/scene.ply` (or `.spz`) to add a cloud already aligned to
 simulation coordinates. Use Viser for live camera images on the frustums.
 
 The **Performance** panel shows browser FPS, main thread time per frame, draw
@@ -188,7 +188,7 @@ running the simulation. The browser can render on a different GPU.
 
 Use **Record** and **Stop & Save** to capture the live viewport at up to 30 FPS.
 NewRL saves the video in `recordings/` under the directory where you launched
-`newrl play`. Set `recording_dir=/path/to/recordings` to choose a different
+`newrl play`. Set `viewer.recording_dir=/path/to/recordings` to choose a different
 directory. The viewer uses H.264 MP4 when the browser supports it and WebM
 otherwise. The saved path appears in the viewer. Keep the tab and playback
 open until the save completes.
