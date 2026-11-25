@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import warp as wp
 
-from .sensors import DepthCamera, GaussianCamera
+from newrl.sensors import DepthCamera, GaussianCamera
 
 if TYPE_CHECKING:
     import newton

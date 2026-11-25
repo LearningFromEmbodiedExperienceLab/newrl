@@ -274,48 +274,6 @@ class _EnvironmentCore:
             transition = self._transition(physical_state, next_mdp_state, result)
         return next_mdp_state, transition
 
-
-class StatefulEnvironment(_EnvironmentCore):
-    """Own live physics buffers and MDP state. Resets are always explicit.
-
-    Reset and step outputs include a snapshot of ``mdp_state.episode_step``
-    for the returned observation; other MDP and physical fields are opt-in.
-    """
-
-    def __init__(self, config: EnvironmentConfig, mdp: MDP | None  =  None) -> None:
-        super().__init__(config, mdp)
-        self.mdp_state: TensorDict | None = None
-
-    @torch.no_grad()
-    def reset(self, env_ids: torch.Tensor | None = None) -> TensorDict:
-        with self._stream(), self._profile_stage("reset"):
-            self.mdp_state, transition = self._reset(env_ids, self.mdp_state)
-            return transition
-
-    @torch.no_grad()
-    def step(self, sim_inputs: TensorDict) -> TensorDict:
-        if self.mdp_state is None:
-            raise RuntimeError("Call reset() before the first step")
-        with self._stream():
-            self.mdp_state, transition = self._step(sim_inputs, self.mdp_state)
-            return transition
-
-
-class StatelessEnvironment(_EnvironmentCore):
-    """Use explicit checkpoints and private Newton working buffers.
-
-    A checkpoint is tied to the environment's scene and batch layout. It carries
-    Newton's joint and body states and persistent solver integration buffers.
-    Steel uses point friction and recomputes its mass matrix each step, so its
-    collision and constraint work does not require additional checkpoint history. Custom MDP
-    terms must derive their results from the supplied physical snapshot and MDP state.
-    """
-
-    def __init__(self, config: EnvironmentConfig, mdp: MDP | None  =  None) -> None:
-        super().__init__(config, mdp)
-        if self.model.particle_count:
-            raise ValueError("Simulator checkpoints currently support rigid scenes")
-
     def _checkpoint_views(self) -> dict[str, torch.Tensor]:
         arrays = {
             name: getattr(self.state, name)
@@ -381,6 +339,70 @@ class StatelessEnvironment(_EnvironmentCore):
             if name.startswith("randomization:"):
                 continue
             view.copy_(sim_state[name])
+
+
+class StatefulEnvironment(_EnvironmentCore):
+    """Own live physics buffers and MDP state. Resets are always explicit.
+
+    Reset and step outputs include a snapshot of ``mdp_state.episode_step``
+    for the returned observation; other MDP and physical fields are opt-in.
+    """
+
+    def __init__(self, config: EnvironmentConfig, mdp: MDP | None  =  None) -> None:
+        super().__init__(config, mdp)
+        self.mdp_state: TensorDict | None = None
+
+    @torch.no_grad()
+    def reset(self, env_ids: torch.Tensor | None = None) -> TensorDict:
+        with self._stream(), self._profile_stage("reset"):
+            self.mdp_state, transition = self._reset(env_ids, self.mdp_state)
+            return transition
+
+    @torch.no_grad()
+    def step(self, sim_inputs: TensorDict) -> TensorDict:
+        if self.mdp_state is None:
+            raise RuntimeError("Call reset() before the first step")
+        with self._stream():
+            self.mdp_state, transition = self._step(sim_inputs, self.mdp_state)
+            return transition
+
+    @torch.no_grad()
+    def snapshot(self) -> tuple[TensorDict, TensorDict]:
+        """Copy the current rigid simulator and MDP state at a decision boundary."""
+        if self.model.particle_count:
+            raise ValueError("Simulator checkpoints currently support rigid scenes")
+        if self.mdp_state is None:
+            raise RuntimeError("Call reset() before taking a checkpoint")
+        with self._stream():
+            return self._snapshot(), self.mdp_state.clone()
+
+    @torch.no_grad()
+    def restore(self, sim_state: TensorDict, mdp_state: TensorDict) -> None:
+        """Restore a checkpoint from this environment into the live buffers."""
+        if self.model.particle_count:
+            raise ValueError("Simulator checkpoints currently support rigid scenes")
+        if mdp_state.batch_size != torch.Size([self.num_envs]):
+            raise ValueError("MDP checkpoint does not match the environment")
+        with self._stream():
+            next_mdp_state = mdp_state.clone()
+            self._restore(sim_state)
+            self.mdp_state = next_mdp_state
+
+
+class StatelessEnvironment(_EnvironmentCore):
+    """Use explicit checkpoints and private Newton working buffers.
+
+    A checkpoint is tied to the environment's scene and batch layout. It carries
+    Newton's joint and body states and persistent solver integration buffers.
+    Steel uses point friction and recomputes its mass matrix each step, so its
+    collision and constraint work does not require additional checkpoint history. Custom MDP
+    terms must derive their results from the supplied physical snapshot and MDP state.
+    """
+
+    def __init__(self, config: EnvironmentConfig, mdp: MDP | None  =  None) -> None:
+        super().__init__(config, mdp)
+        if self.model.particle_count:
+            raise ValueError("Simulator checkpoints currently support rigid scenes")
 
     @torch.no_grad()
     def reset(

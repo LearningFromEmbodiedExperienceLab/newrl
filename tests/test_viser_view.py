@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from newrl.viser_view import _ClientView
+from newrl.visualizations.viser import _ClientView
 
 
 class _Camera:

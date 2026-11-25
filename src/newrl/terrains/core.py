@@ -23,6 +23,7 @@ class Terrain:
 
     spawn_locations: SpawnLocations = ()
     meta: dict[str, object] = field(default_factory=dict)
+    tile_origins: SpawnLocations = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -262,7 +263,7 @@ class GeneratedTerrainConfig(TerrainConfig):
         ):
             raise ValueError("Border height must be finite and positive")
 
-    def build(self, builder: newton.ModelBuilder) -> SpawnLocations:
+    def build(self, builder: newton.ModelBuilder) -> Terrain:
         rng = np.random.default_rng(self.seed)
         anchors = []
         for row in range(self.rows):
@@ -301,7 +302,8 @@ class GeneratedTerrainConfig(TerrainConfig):
                     hz=(top + self.border.thickness) / 2,
                     label=f"border_{name}",
                 )
-        return self.spawn_locations or tuple(anchors)
+        origins = tuple(anchors)
+        return Terrain(spawn_locations=self.spawn_locations or origins, tile_origins=origins)
 
 
 def _add_ground_box(

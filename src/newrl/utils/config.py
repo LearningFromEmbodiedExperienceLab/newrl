@@ -86,6 +86,10 @@ class ConfigStore:
     def groups(self) -> list[str]:
         return sorted({group for group, _name in self._nodes})
 
+    def definitions(self, group: str) -> dict[str, Any]:
+        """Inspect registered presets without invoking their constructors."""
+        return {name: node for (key, name), node in self._nodes.items() if key == group}
+
     def __contains__(self, key: tuple[str, str]) -> bool:
         group, name = key
         return (group, name.partition("(")[0]) in self._nodes

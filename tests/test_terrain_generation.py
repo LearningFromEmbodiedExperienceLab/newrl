@@ -6,7 +6,7 @@ from dataclasses import replace
 import newton
 import numpy as np
 
-from newrl.commands.play import viewer_world_offsets
+from newrl.visualizations.configs import viewer_world_offsets
 from newrl.commands.train import TrainConfig
 from newrl.terrains import GeneratedTerrainConfig, PlaneTerrainConfig, PyramidSlopeTileConfig
 from newrl.utils.config import cs, dump, load, resolve
@@ -22,7 +22,9 @@ class GeneratedTerrainTests(unittest.TestCase):
             with self.subTest(name=name):
                 terrain = cs.get("terrain", name)
                 builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-                anchors = terrain.build(builder)
+                built = terrain.build(builder)
+                anchors = built.spawn_locations
+                self.assertEqual(built.tile_origins, anchors)
                 self.assertEqual(len(anchors), terrain.rows * len(terrain.tiles))
                 self.assertEqual(set(builder.shape_type), types)
                 self.assertEqual(set(builder.shape_world), {-1})
@@ -83,7 +85,7 @@ class GeneratedTerrainTests(unittest.TestCase):
             border_height=1.5,
         )
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-        anchors = terrain.build(builder)
+        anchors = terrain.build(builder).spawn_locations
         for index, sign in ((0, 1), (1, -1)):
             field = builder.shape_source[index]
             grid = field.min_z + field.data * (field.max_z - field.min_z)
@@ -135,7 +137,7 @@ class GeneratedTerrainTests(unittest.TestCase):
             with self.subTest(name=name):
                 terrain = cs.get("terrain", name)
                 builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-                anchors = terrain.build(builder)
+                anchors = terrain.build(builder).spawn_locations
                 self.assertEqual(len(anchors), terrain.rows * len(terrain.tiles))
                 self.assertTrue(all(anchor[2] == 0 for anchor in anchors))
                 self.assertTrue(all(kind == newton.GeoType.BOX for kind in builder.shape_type))

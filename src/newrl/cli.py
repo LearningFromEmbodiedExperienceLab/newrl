@@ -2,18 +2,21 @@
 
 import argparse
 import subprocess
+from importlib import import_module
 from pathlib import Path
 
 
-def main(argv: list[str] | None = None) -> None:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="newrl")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name, description in (
-        ("train", "Train a policy with the built-in on-policy loop"),
-        ("play", "Play a policy or inspect a task"),
+    for name, description, module, schema in (
+        ("train", "Train a policy with the built-in on-policy loop", "train", "TrainConfig"),
+        ("play", "Play a policy or inspect a task", "play", "PlayConfig"),
+        ("play-timeline", "Play, rewind, and branch a single world", "play_timeline", "TimelinePlayConfig"),
     ):
         command = commands.add_parser(name, help=description)
         command.add_argument("overrides", nargs=argparse.REMAINDER, metavar="key=value")
+        command.set_defaults(config_command=f"newrl.commands.{module}", config_schema=schema)
     assets = commands.add_parser('assets', help='Manage cached robot assets')
     asset_commands = assets.add_subparsers(dest='assets_command', required=True)
     rebuild = asset_commands.add_parser('rebuild', help='Explicitly rebuild cooked robot bundles')
@@ -32,17 +35,18 @@ def main(argv: list[str] | None = None) -> None:
     remove.add_argument("name", help="Directory name shown by project list")
     remove.add_argument("--dir", type=Path, help="Parent directory containing projects")
     remove.add_argument("-y", "--yes", action="store_true", help="Confirm deletion without prompting")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command in ("train", "play"):
+    if hasattr(args, "config_command"):
         from newrl.utils.config import ConfigError
 
-        if args.command == "train":
-            from newrl.commands.train import main as run
-        else:
-            from newrl.commands.play import main as run
         try:
-            run(args.overrides)
+            import_module(args.config_command).main(args.overrides)
         except ConfigError as error:
             parser.error(str(error))
     elif args.command == 'assets':
@@ -51,7 +55,7 @@ def main(argv: list[str] | None = None) -> None:
 
         unknown = set(args.names) - RECIPES.keys()
         if unknown:
-            assets.error(f"Unknown robots: {', '.join(sorted(unknown))}. Choose from: {', '.join(RECIPES)}")
+            parser.error(f"Unknown robots: {', '.join(sorted(unknown))}. Choose from: {', '.join(RECIPES)}")
         for name in dict.fromkeys(args.names):
             print(f'Rebuilt {name}: {cooked_robot(name, robot_model_dir(), rebuild=True)}')
     else:
@@ -86,7 +90,7 @@ def main(argv: list[str] | None = None) -> None:
                         return
                 print(f"Removed project {remove_project(args.name, args.dir)}")
         except (OSError, ValueError, subprocess.CalledProcessError, EOFError) as error:
-            project.error(str(error))
+            parser.error(str(error))
 
 
 if __name__ == "__main__":

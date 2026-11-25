@@ -26,4 +26,4 @@ wheels/
 # Codex
 .codex/
 /viewer/node_modules/
-/src/newrl/browser_assets/
+/src/newrl/visualizations/browser_assets/

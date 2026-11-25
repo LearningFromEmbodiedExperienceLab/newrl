@@ -4,28 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NewRL Viewer</title>
-<style>
-body { margin: 0; background: #1c2127; color: #e8edf3; font: 14px system-ui; }
-canvas { display: block; }
-#controls { position: absolute; top: 16px; left: 16px; background: #14191fee; padding: 12px; border-radius: 6px; max-width: calc(100vw - 56px); max-height: calc(100dvh - 56px); overflow: auto; }
-select { background: #303841; color: inherit; }
-#controls > label { margin-right: 12px; }
-details, #status, #recording { margin-top: 10px; }
-#record-status { overflow-wrap: anywhere; }
-summary { cursor: pointer; }
-#entities label { display: block; margin-top: 4px; }
-.asset-status { color: #b7c4d2; overflow-wrap: anywhere; }
-dl { display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; margin: 6px 0 0; }
-dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
-</style>
+<link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<div id="viewport">
 <div id="controls">
 <label>Follow target <select id="target" aria-label="Follow target"></select></label>
 <label><input id="follow" type="checkbox" checked> Follow</label>
 <button id="pause" type="button" disabled aria-keyshortcuts="Space" title="Space">Pause simulation</button>
 <div id="free-camera-keys" hidden>WASD move · Q / E down / up · Shift fast · Ctrl / X slow</div>
-<details open><summary>Entities</summary><div id="entities"></div></details>
+<details open><summary><i data-lucide="layers-3" aria-hidden="true"></i> Scene</summary><div id="entities"></div></details>
+<details id="markers" open hidden><summary><i data-lucide="axis-3d" aria-hidden="true"></i> Markers</summary><div></div></details>
 <details open>
 <summary>Performance</summary>
 <dl>
@@ -44,6 +33,33 @@ dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
 </div>
 <div id="status" role="status">Connecting…</div>
 </div>
+<details id="camera-preview" hidden>
+<summary><i data-lucide="camera" aria-hidden="true"></i> Camera preview</summary>
+<div class="preview-controls">
+<label>Sensor <select id="preview-camera"></select></label>
+<label>Image <select id="preview-channel"></select></label>
+<label><input id="preview-frustum" type="checkbox"> Show on frustum</label>
+</div>
+<canvas id="preview-image" role="img" aria-label="Selected robot camera image" hidden></canvas>
+<div id="preview-status" role="status"></div>
+</details>
+</div>
+<section id="timeline" aria-label="Timeline" hidden>
+<div class="timeline-row">
+<label>History <select id="history-branch"></select></label>
+<span class="episode-key">■ Episode split</span>
+<span id="history-range"></span>
+</div>
+<div id="history-ruler"></div>
+<input id="history-position" type="range" aria-label="Timeline position" disabled>
+<div class="timeline-row">
+<button id="history-play" type="button" disabled>Play history</button>
+<button id="history-live" type="button" disabled>Return to live</button>
+<button id="history-fork" type="button" disabled>Branch from here</button>
+<button id="history-split-side" type="button" hidden></button>
+<div id="history-status" role="status"></div>
+</div>
+</section>
 <script type="module" src="/main.js"></script>
 </body>
 </html>

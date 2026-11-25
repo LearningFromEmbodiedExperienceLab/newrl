@@ -4,6 +4,7 @@ import base64
 import json
 import re
 import shutil
+from dataclasses import asdict
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,7 +17,9 @@ from uuid import uuid4
 import newton
 import numpy as np
 
-from .sensors import DepthCamera, GaussianCamera
+from newrl.sensors import DepthCamera, GaussianCamera
+from .camera_preview import CameraPreviews
+from .markers import Marker, Pose, check_pose
 
 
 def _pack(values, dtype):
@@ -77,7 +80,8 @@ class BrowserViewer(newton.viewer.ViewerNull):
     """Publish the latest pose snapshot and serve local viewer assets."""
 
     def __init__(
-        self, scene, port, splat_path=None, *, recording_dir="recordings", task_name="viewport"
+        self, scene, port, splat_path=None, *, recording_dir="recordings",
+        task_name="viewport", timeline=None, terrain_origin_frames=True,
     ):
         assets = Path(__file__).with_name("browser_assets")
         if not (assets / "index.html").is_file():
@@ -91,13 +95,25 @@ class BrowserViewer(newton.viewer.ViewerNull):
         self.manifest = None
         self.frame = None
         self.frame_id = 0
+        self.frame_epoch = 0
         self.started_at = None
         self._last_frame_time = None
         self._paused = Event()
         self.running = True
+        self.timeline = timeline
         self.recordings = ViewportRecordings(recording_dir, task_name)
         self.clouds = []
         self.cloud_paths = {}
+        self._markers = {}
+        self._marker_poses = {}
+        self._marker_bodies = {}
+        self._body_world = scene.model.body_world.numpy()
+        self.camera_previews = CameraPreviews(scene.cameras, scene.model.world_count)
+        for i, (x, y, z) in enumerate(scene.terrain.tile_origins):
+            self.add_marker(Marker(
+                name=f"Tile {i + 1}", kind="frame", pose=(x, y, z, 0, 0, 0, 1),
+                size=0.4, group="Terrain origins", visible=terrain_origin_frames,
+            ))
         self.gpu_stats = b"null"
         self._stop_stats = Event()
         self._terrain_shapes = set(scene.terrain_shapes)
@@ -125,6 +141,11 @@ class BrowserViewer(newton.viewer.ViewerNull):
                     "mount": list(sensor.mount_transform),
                     "fovY": config.fov_y,
                     "aspect": config.width / config.height,
+                    "width": config.width,
+                    "height": config.height,
+                    "previewFields": [
+                        field for field in sensor.fields if field in ("rgb", "depth")
+                    ] if name in scene.cameras else [],
                 })
                 camera_bodies.append(sensor.body_ids.tolist())
             if isinstance(sensor, GaussianCamera):
@@ -159,15 +180,14 @@ class BrowserViewer(newton.viewer.ViewerNull):
                 status = 200
                 try:
                     if parts in (["playback", "pause"], ["playback", "resume"]):
-                        if parts[1] == "pause":
-                            viewer._paused.set()
-                        else:
-                            viewer._paused.clear()
+                        viewer.set_paused(parts[1] == "pause")
                         result = {"paused": viewer.is_paused()}
+                    elif timeline is not None and len(parts) == 3 and parts[:2] == ["timeline", "branch"]:
+                        timeline.request_branch(int(parts[2]))
                     else:
                         result = self._recording_request(parts)
                 except KeyError:
-                    status, result = 404, {"error": "Recording not found"}
+                    status, result = 404, {"error": "Recording or timeline frame not found"}
                 except (ValueError, TimeoutError) as error:
                     status, result = 400, {"error": str(error)}
                 except OSError as error:
@@ -200,21 +220,54 @@ class BrowserViewer(newton.viewer.ViewerNull):
 
             def do_GET(self):
                 route = urlsplit(self.path).path
+                if route.startswith("/camera/"):
+                    try:
+                        _, camera, world, field = route.lstrip("/").split("/")
+                        camera = int(camera)
+                        if not 0 <= camera < len(viewer.cameras):
+                            raise ValueError
+                        name = viewer.cameras[camera]["name"]
+                        cached = viewer.camera_previews.request(name, int(world), field)
+                    except (KeyError, ValueError):
+                        self.send_error(404, "Camera preview unavailable")
+                        return
+                    if cached is None:
+                        self.send_response(204)
+                        self.end_headers()
+                    elif self.headers.get("If-None-Match") == cached[0]:
+                        self.send_response(304)
+                        self.end_headers()
+                    else:
+                        tag, payload = cached
+                        self.send_response(200)
+                        self.send_header("Cache-Control", "no-store")
+                        self.send_header("Content-Type", "application/octet-stream")
+                        self.send_header("Content-Length", str(len(payload)))
+                        self.send_header("ETag", tag)
+                        self.end_headers()
+                        self.wfile.write(payload)
+                    return
+                if timeline is not None and route == "/timeline.json":
+                    self._send_json(json.dumps(timeline.index()).encode())
+                    return
+                if timeline is not None and route.startswith("/timeline/frame/"):
+                    try:
+                        frame = timeline.frame(int(route.removeprefix("/timeline/frame/")))
+                    except (ValueError, KeyError):
+                        self.send_error(404, "Timeline frame is no longer available")
+                        return
+                    self._send_json(frame.poses, headers={
+                        "X-Timeline-Branchable": str(int(frame.checkpoint is not None)),
+                    })
+                    return
                 if route in ("/scene.json", "/frame.json", "/gpu.json"):
                     payload = {
                         "/scene.json": viewer.manifest,
                         "/frame.json": viewer.frame,
                         "/gpu.json": viewer.gpu_stats,
                     }[route]
-                    self.send_response(200 if payload is not None else 204)
-                    self.send_header("Cache-Control", "no-store")
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(payload or b"")))
-                    if route == "/frame.json":
-                        self.send_header("X-Simulation-Paused", str(int(viewer.is_paused())))
-                    self.end_headers()
-                    if payload is not None:
-                        self.wfile.write(payload)
+                    headers = {"X-Simulation-Paused": str(int(viewer.is_paused()))} if route == "/frame.json" else {}
+                    self._send_json(payload, headers=headers)
                     return
                 path = viewer.cloud_paths.get(route)
                 if route == "/":
@@ -228,6 +281,7 @@ class BrowserViewer(newton.viewer.ViewerNull):
                     return
                 types = {
                     ".html": "text/html",
+                    ".css": "text/css",
                     ".js": "text/javascript",
                     ".wasm": "application/wasm",
                 }
@@ -240,6 +294,17 @@ class BrowserViewer(newton.viewer.ViewerNull):
                     self.send_header("Content-Length", str(path.stat().st_size))
                     self.end_headers()
                     shutil.copyfileobj(stream, self.wfile)
+
+            def _send_json(self, payload, *, headers=()):
+                self.send_response(200 if payload is not None else 204)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload or b"")))
+                for name, value in dict(headers).items():
+                    self.send_header(name, value)
+                self.end_headers()
+                if payload is not None:
+                    self.wfile.write(payload)
 
             def log_message(self, *args):
                 pass
@@ -290,6 +355,21 @@ class BrowserViewer(newton.viewer.ViewerNull):
     def set_model(self, model):
         super().set_model(model)
         self._batches_by_name = {batch.name: batch for batch in self._shape_instances.values()}
+
+    def add_marker(self, marker: Marker) -> None:
+        """Register a marker before publishing the first viewport frame."""
+        if self.manifest is not None or marker.name in self._markers:
+            raise ValueError("Register each marker once before the first frame")
+        if marker.body is not None and not 0 <= marker.body < len(self._body_world):
+            raise ValueError("Marker body index is out of range")
+        self._markers[marker.name] = marker
+
+    def set_marker_pose(self, name: str, pose: Pose) -> None:
+        """Update a marker in its original coordinate space for subsequent frames."""
+        if name not in self._markers:
+            raise KeyError(name)
+        check_pose(pose)
+        self._marker_poses[name] = pose
 
     def _should_show_shape(self, flags, is_static, geo_type=None, *, layer=None):
         # Publish collision poses for client-side visibility without enabling
@@ -356,13 +436,22 @@ class BrowserViewer(newton.viewer.ViewerNull):
         body_poses = state.body_q.numpy()
         self.body_positions = body_poses[[body for _, _, body in self.targets], :3]
         self.camera_body_poses = body_poses[self._camera_bodies]
+        self._marker_bodies = {
+            marker.body: body_poses[marker.body].tolist()
+            for marker in self._markers.values()
+            if marker.body is not None
+        }
 
-    def begin_frame(self, time):
+    def begin_frame(self, time, *, jump=False):
         self.time = time
-        if self.started_at is None:
+        if jump:
+            self.frame_epoch += 1
+            self._last_frame_time = None
+        if self.started_at is None or jump:
             self.started_at = monotonic() - time
 
-    def end_frame(self):
+    def end_frame(self, *, pace=True):
+        self.camera_previews.sample()
         if self.time == self._last_frame_time:
             sleep(0.02)
             # Keep playback paced after a pause instead of catching up to wall time.
@@ -378,6 +467,16 @@ class BrowserViewer(newton.viewer.ViewerNull):
                     "instances": self.instances,
                     "clouds": self.clouds,
                     "cameras": self.cameras,
+                    "markers": [
+                        {
+                            **asdict(marker),
+                            "offset": offsets[self._body_world[marker.body]].tolist()
+                            if marker.body is not None and self._body_world[marker.body] >= 0
+                            else [0, 0, 0],
+                        }
+                        for marker in self._markers.values()
+                    ],
+                    "timeline": self.timeline is not None,
                     "targets": [
                         {
                             "world": world,
@@ -399,15 +498,18 @@ class BrowserViewer(newton.viewer.ViewerNull):
         self.frame = json.dumps(
             {
                 "id": self.frame_id,
+                "epoch": self.frame_epoch,
                 "time": self.time,
                 "poses": self.poses,
                 "targets": [position.tolist() for position in targets],
                 "cameraBodies": self.camera_body_poses.tolist(),
+                "markerPoses": self._marker_poses,
+                "markerBodies": self._marker_bodies,
             },
             separators=(",", ":"),
         ).encode()
         remaining = self.started_at + self.time - monotonic()
-        if remaining > 0:
+        if pace and remaining > 0:
             sleep(remaining)
 
     def is_running(self):
@@ -415,6 +517,12 @@ class BrowserViewer(newton.viewer.ViewerNull):
 
     def is_paused(self):
         return self._paused.is_set()
+
+    def set_paused(self, paused):
+        if paused:
+            self._paused.set()
+        else:
+            self._paused.clear()
 
     def close(self):
         self.running = False

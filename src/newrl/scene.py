@@ -290,6 +290,14 @@ class Scene:
         self.camera_bvh_refit = any(camera.requires_bvh_refit for camera in self.cameras.values())
         return mdp
 
+    def enable_camera_previews(self) -> None:
+        """Activate configured frame cameras for playback before the first reset."""
+        for name, sensor in self.sensors.items():
+            if name not in self.cameras and isinstance(sensor, FrameCamera):
+                sensor.initialize(self)
+                self.cameras[name] = sensor
+                self.camera_bvh_refit |= sensor.requires_bvh_refit
+
     def action_symmetry_transform(self) -> SymmetryTransform:
         """Build a CPU transform in the same entity and joint order as actions."""
         transforms = []

@@ -2,7 +2,10 @@ import * as THREE from "three";
 import { WebGPURenderer } from "three/webgpu";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GaussianSplatRenderer, SplatMesh } from "gaussian-splat-lite";
+import { Axis3d, Camera, createIcons, Layers3 } from "lucide";
+import { setupCameraPreview } from "./camera-preview.js";
 import { setupRecording } from "./recording.js";
+import { setupTimeline } from "./timeline.js";
 
 const status = document.querySelector("#status");
 const targetSelect = document.querySelector("#target");
@@ -13,7 +16,7 @@ const updateCameraHint = () => { freeCameraKeys.hidden = follow.checked; };
 follow.addEventListener("change", updateCameraHint);
 updateCameraHint();
 
-function visibilityControl(name, checked) {
+function visibilityControl(name, checked, container = entities) {
   const row = document.createElement("label");
   const input = document.createElement("input");
   input.type = "checkbox";
@@ -22,7 +25,7 @@ function visibilityControl(name, checked) {
   message.className = "asset-status";
   message.setAttribute("role", "status");
   row.append(input, ` ${name}`, message);
-  entities.append(row);
+  container.append(row);
   return {input, message};
 }
 
@@ -52,10 +55,53 @@ function cameraFrustum({fovY, aspect, mount}, material) {
   const wireframe = new THREE.LineSegments(geometry, material);
   wireframe.position.fromArray(mount);
   wireframe.quaternion.fromArray(mount, 3);
+  const image = new THREE.Mesh(
+    new THREE.PlaneGeometry(2 * width, 2 * height),
+    new THREE.MeshBasicMaterial({side: THREE.DoubleSide, toneMapped: false})
+  );
+  image.position.z = -depth;
+  image.visible = false;
+  wireframe.add(image);
   const body = new THREE.Group();
   body.add(wireframe);
   body.visible = false;
-  return body;
+  return {body, image};
+}
+
+function addMarkers(scene, specifications) {
+  const panel = document.querySelector("#markers");
+  panel.hidden = !specifications.length;
+  const controls = new Map();
+  return specifications.map(spec => {
+    const group = spec.group ?? {frame: "Frames", arrow: "Arrows", point: "Points"}[spec.kind];
+    if (!controls.has(group)) {
+      controls.set(group, visibilityControl(group, spec.visible, panel.querySelector("div")).input);
+    }
+    const input = controls.get(group);
+    let geometry;
+    if (spec.kind === "frame") {
+      geometry = new THREE.AxesHelper(spec.size);
+      geometry.material.depthTest = false;
+      geometry.renderOrder = 2;
+    } else if (spec.kind === "arrow") {
+      geometry = new THREE.ArrowHelper(
+        new THREE.Vector3(1, 0, 0), new THREE.Vector3(), spec.size, spec.color
+      );
+    } else {
+      geometry = new THREE.Mesh(
+        new THREE.SphereGeometry(spec.size, 12, 8),
+        new THREE.MeshBasicMaterial({color: spec.color})
+      );
+    }
+    const root = new THREE.Group();
+    root.add(geometry);
+    root.position.fromArray(spec.offset);
+    geometry.position.fromArray(spec.pose);
+    geometry.quaternion.fromArray(spec.pose, 3);
+    root.visible = input.checked && spec.body === null;
+    scene.add(root);
+    return {spec, root, geometry, input};
+  });
 }
 
 function freeCameraMovement(camera, orbit, canvas) {
@@ -106,11 +152,13 @@ function freeCameraMovement(camera, orbit, canvas) {
 }
 
 async function main() {
+  createIcons({icons: {Axis3d, Camera, Layers3}});
   const forceWebGL = new URLSearchParams(location.search).get("renderer") === "webgl";
   const renderer = new WebGPURenderer({antialias: false, forceWebGL});
   await renderer.init();
   document.querySelector("#backend").textContent = renderer.backend.isWebGPUBackend ? "WebGPU" : "WebGL2";
-  document.body.prepend(renderer.domElement);
+  const viewport = document.querySelector("#viewport");
+  viewport.prepend(renderer.domElement);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x1c2127);
   const camera = new THREE.PerspectiveCamera(55, 1, 0.04, 1000);
@@ -130,11 +178,14 @@ async function main() {
   const resize = () => {
     if (recordingActive()) return;
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-    renderer.setSize(innerWidth, innerHeight);
-    camera.aspect = innerWidth / Math.max(1, innerHeight);
+    const width = Math.max(1, viewport.clientWidth);
+    const height = Math.max(1, viewport.clientHeight);
+    renderer.setSize(width, height);
+    camera.aspect = width / height;
     camera.updateProjectionMatrix();
   };
   addEventListener("resize", resize);
+  new ResizeObserver(resize).observe(viewport);
   resize();
 
   let manifest;
@@ -182,10 +233,11 @@ async function main() {
   const frustumMaterial = new THREE.LineBasicMaterial({color: 0x40c0ff});
   const frustums = manifest.cameras.map(spec => {
     const {input} = visibilityControl(`Camera frustum · ${spec.name}`, false);
-    const body = cameraFrustum(spec, frustumMaterial);
+    const {body, image} = cameraFrustum(spec, frustumMaterial);
     scene.add(body);
-    return {input, body};
+    return {input, body, image};
   });
+  const markers = addMarkers(scene, manifest.markers);
   const cloudOffset = new THREE.Vector3();
   function placeCloud(cloud, spec) {
     cloudOffset.fromArray(manifest.targets[Number(targetSelect.value)]?.offset ?? [0, 0, 0]);
@@ -239,7 +291,7 @@ async function main() {
   });
 
   const frames = [];
-  let lastId;
+  let liveFrame;
   let lastRender = performance.now();
   let statsAt = lastRender;
   let renderCount = 0;
@@ -284,19 +336,41 @@ async function main() {
     paused = value;
     pauseButton.textContent = paused ? "Resume simulation" : "Pause simulation";
   }
-  async function togglePause() {
-    if (pauseButton.disabled) return;
+  async function setPaused(value) {
     pauseRequest++;
     pauseButton.disabled = true;
     try {
-      const action = paused ? "resume" : "pause";
+      const action = value ? "pause" : "resume";
       const response = await fetch(`/playback/${action}`, {method: "POST"});
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       updatePauseButton((await response.json()).paused);
-    } catch (error) {
-      status.textContent = `Could not change simulation pause. ${error.message}`;
     } finally {
       pauseButton.disabled = false;
+    }
+  }
+  function showFrame(frame, jump = false) {
+    if (jump || (frames.length && frames.at(-1).frame.epoch !== frame.epoch)) frames.length = 0;
+    frames.push({time: performance.now(), frame});
+    if (frames.length > 16) frames.shift();
+  }
+  const timeline = manifest.timeline ? setupTimeline({
+    setPaused,
+    showFrame,
+    showLive: () => {
+      if (liveFrame) showFrame(liveFrame, true);
+    },
+  }) : null;
+  const previewTexture = setupCameraPreview(
+    manifest.cameras,
+    () => manifest.targets[Number(targetSelect.value)]?.world,
+    () => timeline?.isHistorical()
+  );
+  function togglePause() {
+    if (!pauseButton.disabled) {
+      if (timeline?.isHistorical()) timeline.returnToLive();
+      setPaused(!paused).catch(error => {
+        status.textContent = `Could not change simulation pause. ${error.message}`;
+      });
     }
   }
   pauseButton.disabled = false;
@@ -305,7 +379,10 @@ async function main() {
     if (event.code !== "Space" || event.ctrlKey || event.metaKey || event.altKey ||
         event.target.closest?.("button, input, select, textarea, summary, a, [contenteditable]")) return;
     event.preventDefault();
-    if (!event.repeat) togglePause();
+    if (!event.repeat) {
+      if (timeline?.isHistorical()) timeline.toggleHistory();
+      else togglePause();
+    }
   });
   async function poll() {
     try {
@@ -315,11 +392,11 @@ async function main() {
           updatePauseButton(headers.get("X-Simulation-Paused") === "1");
         }
       });
-      if (frame && frame.id !== lastId) {
-        lastId = frame.id;
+      if (frame && frame.id !== liveFrame?.id) {
+        if (frame.epoch !== liveFrame?.epoch) previousSimulationTime = undefined;
+        liveFrame = frame;
         simulationTime = frame.time;
-        frames.push({time: performance.now(), frame});
-        if (frames.length > 16) frames.shift();
+        if (!timeline?.isHistorical()) showFrame(frame);
       }
     } catch {
       status.textContent = "Playback disconnected";
@@ -358,12 +435,29 @@ async function main() {
       const selected = manifest.targets[target];
       if (selected) worldOffset.fromArray(selected.offset);
       for (let i = 0; i < frustums.length; i++) {
-        const {input, body} = frustums[i];
-        body.visible = selected !== undefined && input.checked;
+        const {input, body, image} = frustums[i];
+        const texture = previewTexture(i);
+        body.visible = selected !== undefined && (input.checked || texture !== null);
+        image.visible = texture !== null;
+        if (texture && texture !== image.material.map) {
+          image.material.map = texture;
+          image.material.needsUpdate = true;
+        }
         if (!body.visible) continue;
         const world = selected.world;
         interpolatePose(body, from.cameraBodies[i][world], to.cameraBodies[i][world], alpha);
         body.position.add(worldOffset);
+      }
+      for (const {spec, root, geometry, input} of markers) {
+        root.visible = input.checked;
+        if (!root.visible) continue;
+        if (spec.body !== null) {
+          interpolatePose(root, from.markerBodies[spec.body], to.markerBodies[spec.body], alpha);
+          root.position.add(worldOffset.fromArray(spec.offset));
+        }
+        const previous = Object.hasOwn(from.markerPoses, spec.name) ? from.markerPoses[spec.name] : spec.pose;
+        const next = Object.hasOwn(to.markerPoses, spec.name) ? to.markerPoses[spec.name] : spec.pose;
+        interpolatePose(geometry, previous, next, alpha);
       }
       if (follow.checked && to.targets[target]) {
         followTarget.fromArray(from.targets[target]);

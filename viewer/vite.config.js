@@ -10,6 +10,7 @@ export default defineConfig({
       mkdirSync(dir, {recursive: true});
       for (const [name, files] of [
         ["three", ["LICENSE"]],
+        ["lucide", ["LICENSE"]],
         ["gaussian-splat-lite", ["LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.md"]],
       ]) {
         for (const file of files) {

@@ -461,31 +461,9 @@ class EnvironmentTests(unittest.TestCase):
 
         def compare(sim, mdp, actual, expected):
             torch.testing.assert_close(actual, expected, atol=2e-4, rtol=2e-4)
-            torch.testing.assert_close(stateful.mdp_state, mdp, atol=2e-4, rtol=2e-4)
-            # Inspect all checkpoint fields without changing either environment.
-
-            for name, value in sim.items():
-                source = getattr(stateful.state, name, None)
-                if source is None:
-                    if name == "qfrc_actuator":
-                        source = stateful.observables.qfrc_actuator
-                    elif name == "constraint_overflow":
-                        torch.testing.assert_close(
-                            wp.to_torch(stateful.sim.constraint_overflow)[
-                                :3
-                            ].reshape_as(value),
-                            value,
-                        )
-                        continue
-                    else:
-                        source = getattr(stateful.sim.mjw_data, name)
-                torch.testing.assert_close(
-                    wp.to_torch(source).reshape_as(value),
-                    value,
-                    atol=2e-4,
-                    rtol=2e-4,
-                    msg=lambda msg, field=name: f"{field}: {msg}",
-                )
+            live_sim, live_mdp = stateful.snapshot()
+            torch.testing.assert_close(live_mdp, mdp, atol=2e-4, rtol=2e-4)
+            torch.testing.assert_close(live_sim, sim, atol=2e-4, rtol=2e-4)
 
         sim, mdp, expected = stateless.reset()
         compare(sim, mdp, stateful.reset(), expected)

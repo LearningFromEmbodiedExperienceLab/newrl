@@ -3,10 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build --base ./ --outDir ../src/newrl/browser_assets --emptyOutDir"
+    "build": "vite build --base ./ --outDir ../src/newrl/visualizations/browser_assets --emptyOutDir"
   },
   "dependencies": {
     "gaussian-splat-lite": "1.10.2",
+    "lucide": "1.80.0",
     "three": "0.187.0"
   },
   "devDependencies": {
