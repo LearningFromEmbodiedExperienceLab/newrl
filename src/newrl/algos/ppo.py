@@ -32,6 +32,7 @@ from .common.optimizer import make_optimizer
 from .common.policy_evaluation import clip_bounds, generalized_advantage
 from newrl.utils.config import cs  # noqa: E402
 from newrl.utils.profiling import StageProfiler
+from newrl.utils.distributed import average_gradients, average_metrics, world_size
 
 if TYPE_CHECKING:
     from newrl.env import StatefulEnvironment
@@ -146,6 +147,7 @@ class PPO(nn.Module):
         self.policy_norm = EmpiricalNormalization(policy_dim)
         self.critic_norm = EmpiricalNormalization(critic_dim)
         self.return_norm = ReturnNormalization(cfg.gamma)
+        self._rollout_moments: tuple[torch.Tensor, ...] | None = None
         self.optimizer = make_optimizer(
             self.actor,
             self.critic,
@@ -157,6 +159,11 @@ class PPO(nn.Module):
     @property
     def device(self) -> torch.device:
         return self.policy_norm.sum.device
+
+    def begin_rollout(self) -> None:
+        if world_size() > 1:
+            norm = self.policy_norm
+            self._rollout_moments = tuple(v.clone() for v in (norm.sum, norm.sum_sq, norm.count))
 
     def training_state_dict(self) -> dict:
         """Return model, normalizer, and optimizer state for a checkpoint."""
@@ -180,7 +187,7 @@ class PPO(nn.Module):
         normalized = self.policy_norm(policy_observation.to(self.device))
         distribution = self.actor.distribution(normalized)
         action = distribution.mean if deterministic else distribution.rsample()
-        tensordict[POLICY_OBSERVATION] = policy_observation
+        tensordict[POLICY_OBSERVATION] = normalized
         tensordict[CRITIC_OBSERVATION] = critic_observation
         tensordict[ACTION] = action
         tensordict[ACTION_LOG_PROB] = distribution.log_prob(action).sum(
@@ -206,19 +213,24 @@ class PPO(nn.Module):
                     f"Expected {key!r} shape {scalar_shape}, got {tuple(batch[key].shape)}"
                 )
         batch = batch.to(self.device)
+        if world_size() > 1:
+            if self._rollout_moments is None:
+                raise RuntimeError("Call begin_rollout before distributed PPO collection")
+            self.policy_norm.merge(self._rollout_moments, batch.batch_size[1])
+            self._rollout_moments = None
         profiler = StageProfiler(self.device) if self.cfg.profile else None
         raw_reward = aggregate_reward(batch)
         reward = raw_reward.clamp_min(0.0) if self.cfg.clamp_reward else raw_reward
         if self.cfg.normalize_reward:
-            self.return_norm.update(reward, batch[DONE])
+            self.return_norm.update(reward, batch[DONE], distributed=True)
             reward = reward / self.return_norm.scale()
         reward = reward * (1.0 - self.cfg.gamma)
         self.critic_norm.update(
             torch.cat(
                 [batch[CRITIC_OBSERVATION], batch[NEXT_CRITIC_OBSERVATION]], dim=1
-            )
+            ), distributed=True
         )
-        with self.policy_norm.freeze(), self.critic_norm.freeze():
+        with self.critic_norm.freeze():
             with torch.no_grad():
                 value = self.critic(self.critic_norm(batch[CRITIC_OBSERVATION]))
                 next_value = self.critic(
@@ -260,9 +272,9 @@ class PPO(nn.Module):
             "critic/adv_mean": advantage_mean,
             "critic/adv_std": advantage_std,
         }
-        with torch.no_grad(), self.policy_norm.freeze(), self.critic_norm.freeze():
+        with torch.no_grad(), self.critic_norm.freeze():
             new_log_prob = self.actor.log_prob(
-                self.policy_norm(batch[POLICY_OBSERVATION]), batch[ACTION]
+                batch[POLICY_OBSERVATION], batch[ACTION]
             )
             log_ratio = new_log_prob - batch[ACTION_LOG_PROB]
             rollout_metrics["actor/policy_gain"] = (log_ratio * advantage).mean()
@@ -271,7 +283,7 @@ class PPO(nn.Module):
             rollout_metrics["critic/explained_var"] = (
                 1.0 - (predicted - returns).square().mean() / return_variance
             )
-        metrics = collect_metrics(last_epoch, rollout_metrics)
+        metrics = average_metrics(collect_metrics(last_epoch, rollout_metrics), self.device)
         metrics["actor/lr"] = self.optimizer.param_groups[0]["lr"]
         if profiler is not None:
             # The metric transfer above already waited for this stream.
@@ -288,7 +300,7 @@ class PPO(nn.Module):
     ) -> dict[str, torch.Tensor]:
         stage = nullcontext if profiler is None else profiler.stage
         with stage("forward_loss"):
-            observation = self.policy_norm(batch[POLICY_OBSERVATION])
+            observation = batch[POLICY_OBSERVATION]
             distribution = self.actor.distribution(observation)
             log_prob = distribution.log_prob(batch[ACTION]).sum(-1, keepdim=True)
             log_ratio = log_prob - batch[ACTION_LOG_PROB]
@@ -308,6 +320,8 @@ class PPO(nn.Module):
         with stage("backward"):
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
+        with stage("gradient_sync"):
+            average_gradients(self.parameters())
         with stage("grad_clip"):
             actor_grad = torch.nn.utils.clip_grad_norm_(
                 self.actor.parameters(), self.cfg.max_grad_norm

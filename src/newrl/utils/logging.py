@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from math import isfinite
+import sys
 
 from newrl.utils.config import config_for_logging
 
@@ -13,10 +15,13 @@ class WandbConfig:
     name: str | None = None
     group: str | None = None
     mode: str = "online"
+    init_timeout: float = 30.0
 
     def __post_init__(self) -> None:
         if self.mode not in ("online", "offline", "disabled"):
             raise ValueError("logger.mode must be online, offline, or disabled")
+        if not isfinite(self.init_timeout) or self.init_timeout <= 0:
+            raise ValueError("logger.init_timeout must be finite and positive")
 
 
 class RunLogger:
@@ -37,15 +42,25 @@ class RunLogger:
 
         if directory is not None:
             directory.mkdir(parents=True, exist_ok=True)
-        self._run = wandb.init(
-            project=cfg.project,
-            id=run_id,
-            dir=directory,
-            name=cfg.name,
-            group=cfg.group,
-            config=config_for_logging(config),
-            mode=cfg.mode,
+        print(
+            f"Initializing W&B (mode={cfg.mode}, timeout={cfg.init_timeout:g}s)...",
+            flush=True,
         )
+        try:
+            self._run = wandb.init(
+                project=cfg.project,
+                id=run_id,
+                dir=directory,
+                name=cfg.name,
+                group=cfg.group,
+                config=config_for_logging(config),
+                mode=cfg.mode,
+                settings=wandb.Settings(init_timeout=cfg.init_timeout),
+            )
+        except Exception as error:
+            print(f"W&B initialization failed: {error}", file=sys.stderr, flush=True)
+            raise
+        print("W&B initialized.", flush=True)
 
     def log(self, metrics: dict[str, float], step: int) -> None:
         if self._run is not None:
