@@ -8,6 +8,7 @@ from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
+from newrl.utils.distributed import reduce_sum, world_size
 
 
 class EmpiricalNormalization(nn.Module):
@@ -41,8 +42,16 @@ class EmpiricalNormalization(nn.Module):
         return self.normalize(values)
 
     @torch.no_grad()
-    def update(self, values: torch.Tensor) -> None:
+    def update(self, values: torch.Tensor, *, distributed: bool = False) -> None:
         flat = values.detach().reshape(-1, self.sum.shape[0]).to(self.sum.dtype)
+        if distributed and world_size() > 1:
+            moments = torch.cat((flat.sum(0), flat.square().sum(0), self.count.new_tensor([flat.shape[0]])))
+            reduce_sum(moments)
+            total, squares, count = moments.split((self.sum.numel(), self.sum.numel(), 1))
+            self.sum.mul_(self.decay).add_(total)
+            self.sum_sq.mul_(self.decay).add_(squares)
+            self.count.mul_(self.decay).add_(count.squeeze(0))
+            return
         if self.decay < 1.0:
             self.count.mul_(self.decay).add_(flat.shape[0])
             self.sum.mul_(self.decay).add_(flat.sum(0))
@@ -51,6 +60,16 @@ class EmpiricalNormalization(nn.Module):
             self.count.add_(flat.shape[0])
             self.sum.add_(flat.sum(0))
             self.sum_sq.add_(flat.square().sum(0))
+
+    @torch.no_grad()
+    def merge(self, initial: tuple[torch.Tensor, ...], steps: int) -> None:
+        """Merge local per-step moments while counting decayed history only once."""
+        buffers = (self.sum, self.sum_sq, self.count)
+        history = [value * self.decay**steps for value in initial]
+        delta = torch.cat([(value - old).reshape(-1) for value, old in zip(buffers, history, strict=True)])
+        reduce_sum(delta)
+        for value, old, added in zip(buffers, history, delta.split([v.numel() for v in buffers]), strict=True):
+            value.copy_(old + added.view_as(value))
 
     def mean_std(self) -> tuple[torch.Tensor, torch.Tensor]:
         count = self.count.clamp_min(1.0)
@@ -109,10 +128,16 @@ class ReturnNormalization(nn.Module):
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     @torch.no_grad()
-    def update(self, reward: torch.Tensor, done: torch.Tensor) -> None:
+    def update(self, reward: torch.Tensor, done: torch.Tensor, *, distributed: bool = False) -> None:
         returns = self._advance(reward, done)
-        self.square_sum.add_(returns.square().sum())
-        self.count.add_(returns.numel())
+        if distributed and world_size() > 1:
+            moments = torch.stack((returns.square().sum(), self.count.new_tensor(returns.numel())))
+            reduce_sum(moments)
+            self.square_sum.add_(moments[0])
+            self.count.add_(moments[1])
+        else:
+            self.square_sum.add_(returns.square().sum())
+            self.count.add_(returns.numel())
 
     def scale(self) -> torch.Tensor:
         scale = (self.square_sum / self.count.clamp_min(2.0)).sqrt()

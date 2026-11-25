@@ -26,6 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 viser = ["viser>=1.1.1"]
+torchrunx = ["torchrunx>=0.3.4"]
 
 [project.scripts]
 newrl = "newrl.cli:main"

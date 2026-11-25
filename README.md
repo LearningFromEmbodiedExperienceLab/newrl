@@ -60,6 +60,32 @@ Select Gaussian PPO with `algo=ppo` or the GenPO++ flow policy with
 `algo=genpo`. GenPO adapts the actor learning rate toward `algo.desired_kl`
 using augmented KL.
 
+For multi-GPU training with PPO, PPO SymAug, or GenPO, use one torchrun worker per GPU:
+
+```sh
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nproc-per-node=4 \
+    -m newrl.cli train task=G1LocoFlat algo=ppo task.num_envs=4096
+```
+
+`task.num_envs` is per GPU. The workers collect independent rollouts,
+merge running normalization statistics once per rollout, and average
+gradients before clipping each minibatch. Advantage normalization is local
+to each worker. GenPO adapts its actor learning rate using the average
+augmented KL across workers. Rank zero logs global environment frames and saves the
+shared policy and optimizer. Memory profiling reports rank zero's GPU.
+
+An experimental torchrunx launcher is available separately:
+
+```sh
+uv sync --extra torchrunx
+python scripts/train_torchrunx.py 'gpu_ids=[0,1]' task=AnymalLocoFlat algo=genpo
+python scripts/train_torchrunx.py gpu_ids=all task=AnymalLocoFlat algo=ppo
+```
+
+GPU indices are relative to `CUDA_VISIBLE_DEVICES`. The launcher delegates
+to the built-in trainer. Use `TORCHRUNX_LOG_DIR` to select a worker log
+directory (default `outputs_train/torchrunx`).
+
 Enable startup domain randomization for Unitree G1 with MuJoCo Warp or Steel
 (`task.solver=steel`).
 

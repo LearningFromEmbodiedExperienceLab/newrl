@@ -3,11 +3,14 @@
 from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
 from pathlib import Path
+import os
+import copy
 from secrets import token_hex
 from time import perf_counter
 
 from setproctitle import setproctitle
 import torch
+import torch.distributed as dist
 from tensordict import TensorDict
 
 from newrl.algos.interfaces import LearnerConfig, Learner
@@ -20,6 +23,7 @@ from newrl.projects import load_projects
 from newrl.utils.config import dump, main
 from newrl.utils.logging import RunLogger, WandbConfig
 from newrl.utils.memory import CudaMemoryProfiler, write_memory_chart
+from newrl.utils.distributed import broadcast_module, max_times, rank, reduce_sum, training_process, world_size
 
 TRAIN_OUTPUT_DIR = Path("outputs_train")
 
@@ -80,6 +84,8 @@ def _make_logger(cfg: TrainConfig, *, run_id: str | None = None) -> RunLogger:
         task_config=cfg.task,
         algo_config=cfg.algo,
         logger=logger_cfg,
+        world_size=world_size(),
+        total_num_envs=cfg.task.num_envs * world_size(),
     )
     return RunLogger(logger_cfg, run_config, run_id=run_id, directory=_task_output_dir(task))
 
@@ -138,11 +144,11 @@ class EpisodeStats:
             completed_returns[:, step] = self.returns
             self.returns.masked_fill_(done[:, step], 0)
 
-        completed = int(done.sum())
+        completed = int(reduce_sum(done.sum()))
         self.completed_episodes += completed
         metrics = {
             "train/episodes": self.completed_episodes,
-            "train/reward_mean": float(reward.sum(dim=-1).mean()),
+            "train/reward_mean": float(reduce_sum(reward.sum()) / (batch.numel() * world_size())),
         }
         if completed:
             # The batch carries the step count from before the action.
@@ -150,23 +156,23 @@ class EpisodeStats:
             returns = completed_returns[done.squeeze(-1)]
             metrics.update(
                 {
-                    "train/episode_len": float(lengths.float().mean()),
-                    "train/return": float(returns.sum(dim=-1).mean()),
+                    "train/episode_len": float(reduce_sum(lengths.float().sum()) / completed),
+                    "train/return": float(reduce_sum(returns.sum()) / completed),
                     "train/termination_rate": float(
-                        batch["terminated"][done].float().mean()
+                        reduce_sum(batch["terminated"][done].float().sum()) / completed
                     ),
                 }
             )
-            for name, mean in zip(names, returns.mean(dim=0).tolist(), strict=True):
+            for name, mean in zip(names, (reduce_sum(returns.sum(dim=0)) / completed).tolist(), strict=True):
                 metrics[f"train/return/{name}"] = mean
             for kind in ("termination", "truncation"):
                 terms = batch.get(f"{kind}_terms")
                 if terms is not None:
                     for name, flags in terms.items():
-                        count = int((flags & done).sum())
+                        count = int(reduce_sum((flags & done).sum()))
                         metrics[f"train/{kind}/{name}"] = count / completed
         for name in names:
-            means = groups[name].mean(dim=(0, 1)).tolist()
+            means = (reduce_sum(groups[name].sum(dim=(0, 1))) / (batch.numel() * world_size())).tolist()
             for term, mean in zip(self.reward_groups[name].keys, means, strict=True):
                 metrics[f"train/reward_terms/{name}/{term}"] = mean
         return metrics
@@ -174,6 +180,13 @@ class EpisodeStats:
 
 @main(TrainConfig)
 def train(cfg: TrainConfig) -> None:
+    if int(os.environ.get("WORLD_SIZE", "1")) > 1 and cfg.algo.algo_id not in ("ppo", "ppo_symaug", "genpo"):
+        raise ValueError("Distributed training supports ppo, ppo_symaug, and genpo")
+    with training_process():
+        _train(cfg)
+
+
+def _train(cfg: TrainConfig) -> None:
     from newrl.algos.supermimic import SuperMimicConfig
 
     if isinstance(cfg.algo, SuperMimicConfig):
@@ -194,27 +207,48 @@ def train(cfg: TrainConfig) -> None:
     )
     torch.manual_seed(cfg.seed)
     cfg.task.mdp.seed = cfg.seed
+    task = copy.deepcopy(cfg.task) if world_size() > 1 else cfg.task
+    worker_seed = cfg.seed + rank() * 1000003
+    task.mdp.seed = worker_seed
+    if world_size() > 1:
+        task.device = f"cuda:{os.environ['LOCAL_RANK']}"
+        if task.randomization is not None:
+            task.randomization = replace(task.randomization, seed=(task.randomization.seed + worker_seed) % 2**64)
+    primary = rank() == 0
     profiler = None
     memory_metrics = {}
     memory_samples = []
     memory_profile_end = min(
         cfg.iterations, cfg.memory_profile_warmup + cfg.memory_profile_iters
     )
-    if cfg.memory_profile_iters:
-        profiler = CudaMemoryProfiler(torch.device(cfg.task.device))
+    if cfg.memory_profile_iters and primary:
+        profiler = CudaMemoryProfiler(torch.device(task.device))
         profiler.begin_phase()
-    task = with_used_observations(cfg.task, cfg.algo) if cfg.discard_unused_obs else cfg.task
+    task = with_used_observations(task, cfg.algo) if cfg.discard_unused_obs else task
+    # Let the local leader prepare lazy assets before other workers use the cache.
+    local_leader = int(os.environ.get("LOCAL_RANK", "0")) == 0
+    if world_size() > 1 and not local_leader:
+        dist.barrier()
     env = StatefulEnvironment(task)
+    if world_size() > 1 and local_leader:
+        dist.barrier()
     if profiler is not None:
         memory_metrics.update(profiler.end_phase("env_build"))
     policy = cfg.algo.build(env)
+    if world_size() > 1:
+        broadcast_module(policy)
+    torch.manual_seed(worker_seed)
     if cfg.compile_policy:
         policy.act = torch.compile(policy.act, fullgraph=True)
     carry = env.reset()
     episode_stats = EpisodeStats(env.mdp.rewards)
-    logger = _make_logger(cfg, run_id=run_id)
-    loop_start = perf_counter()
+    logger = _make_logger(cfg, run_id=run_id) if primary else None
     try:
+        if world_size() > 1:
+            dist.barrier()
+            if primary:
+                print(f"All {world_size()} workers ready. Starting rollout collection.", flush=True)
+        loop_start = perf_counter()
         for iteration in range(cfg.iterations):
             sample_memory = profiler is not None and (
                 iteration == 0
@@ -224,6 +258,8 @@ def train(cfg: TrainConfig) -> None:
             if sample_memory:
                 profiler.begin_phase()
             iteration_start = perf_counter()
+            if world_size() > 1:
+                policy.begin_rollout()
             batch, carry = collect_rollout(env, policy, cfg.algo.update_every, carry)
             if env.device.type == "cuda":
                 torch.cuda.synchronize(env.device)
@@ -245,18 +281,23 @@ def train(cfg: TrainConfig) -> None:
                 metrics.update(memory_metrics)
                 memory_samples.append(memory_metrics.copy())
                 memory_metrics.clear()
+            rollout_time, training_time, iteration_time = max_times(
+                (rollout_time, training_end - training_start, training_end - iteration_start), env.device
+            )
             metrics.update(
                 {
-                    "performance/rollout_fps": batch.numel() / rollout_time,
+                    "performance/rollout_fps": batch.numel() * world_size() / rollout_time,
                     "performance/rollout_time": rollout_time,
-                    "performance/training_time": training_end - training_start,
-                    "performance/iter_time": training_end - iteration_start,
+                    "performance/training_time": training_time,
+                    "performance/iter_time": iteration_time,
                 }
             )
-            frames = (iteration + 1) * batch.numel()
-            logger.log({**metrics, "env_frames": frames}, step=iteration)
+            frames = (iteration + 1) * batch.numel() * world_size()
+            if logger is not None:
+                logger.log({**metrics, "env_frames": frames}, step=iteration)
             summary = " ".join(f"{key}={value:.4f}" for key, value in metrics.items())
-            print(f"iter={iteration} env_frames={frames} {summary}", flush=True)
+            if primary:
+                print(f"iter={iteration} env_frames={frames} {summary}", flush=True)
             completed = iteration + 1
             if memory_samples and completed == memory_profile_end:
                 chart_path = (
@@ -265,7 +306,7 @@ def train(cfg: TrainConfig) -> None:
                 )
                 write_memory_chart(chart_path, memory_samples)
                 print(f"Saved GPU memory chart to {chart_path}", flush=True)
-            if checkpoint_dir is not None and completed % cfg.checkpoint_interval == 0:
+            if logger is not None and checkpoint_dir is not None and completed % cfg.checkpoint_interval == 0:
                 path = _save_checkpoint(checkpoint_dir, policy, cfg, completed, frames)
                 logger.save_checkpoint(path)
                 print(f"Saved checkpoint {path}", flush=True)
@@ -276,7 +317,8 @@ def train(cfg: TrainConfig) -> None:
             minutes, seconds = divmod(remainder, 60)
             setproctitle(f"{title}{hours:02d}:{minutes:02d}:{seconds:02d}")
     finally:
-        logger.finish()
+        if logger is not None:
+            logger.finish()
 
 
 def main(argv: list[str] | None = None) -> None:

@@ -48,6 +48,29 @@ class AdvantageTests(unittest.TestCase):
 
 
 class NormalizationTests(unittest.TestCase):
+    def test_merge_counts_shared_decayed_history_once(self):
+        left = EmpiricalNormalization(2, decay=0.9)
+        left.update(torch.ones(3, 2))
+        right = EmpiricalNormalization(2, decay=0.9)
+        right.load_state_dict(left.state_dict())
+        expected = EmpiricalNormalization(2, decay=0.9)
+        expected.load_state_dict(left.state_dict())
+        initial = tuple(v.clone() for v in (left.sum, left.sum_sq, left.count))
+        for step in range(4):
+            a = torch.full((3, 2), float(step))
+            b = torch.full((3, 2), float(step + 2))
+            left.update(a)
+            right.update(b)
+            expected.update(torch.cat((a, b)))
+        history = [v * 0.9**4 for v in initial]
+        remote = torch.cat([
+            (v - h).reshape(-1)
+            for v, h in zip((right.sum, right.sum_sq, right.count), history, strict=True)
+        ])
+        with patch("newrl.algos.common.normalization.reduce_sum", side_effect=lambda x: x.add_(remote)):
+            left.merge(initial, 4)
+        torch.testing.assert_close(left.state_dict(), expected.state_dict())
+
     def test_eval_keeps_observation_statistics_fixed(self):
         norm = EmpiricalNormalization(2, decay=1.0)
         norm(torch.zeros(4, 2))
@@ -112,6 +135,18 @@ class RolloutTests(unittest.TestCase):
 
 
 class PPOTests(unittest.TestCase):
+    def test_collection_preserves_actor_inputs(self):
+        cfg = PPOConfig(
+            policy_obs_keys=("state",), critic_obs_keys=("state",),
+            actor_hidden=(8,), critic_hidden=(8,),
+        )
+        policy = PPO(cfg, policy_dim=1, critic_dim=1, action_dim=2)
+        env = _ScriptedEnvironment()
+        batch, _ = collect_rollout(env, policy, 3, env.reset())
+        with torch.no_grad():
+            actual = policy.actor.log_prob(batch["policy_observation"], batch["action"])
+        torch.testing.assert_close(actual, batch["action_log_prob"])
+
     def test_training_checkpoint_restores_model_normalizers_and_optimizer(self):
         for muon in (False, True):
             with self.subTest(muon=muon):
