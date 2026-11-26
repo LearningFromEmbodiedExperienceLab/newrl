@@ -58,6 +58,10 @@ Use `viewer.port` to select the preferred port. The **Scene** panel toggles
 ground, robot visuals, collision geometry, camera frustums, and individual
 Gaussian clouds. Frustums follow the selected world and remain available
 when playback skips camera observations.
+**Shadows** is on by default for mesh and plane terrain and turns off while
+a Gaussian cloud is visible. Only robot geometry in view casts shadows.
+Enable **1 m grid** to project a world-aligned, one-meter grid across the
+ground. Fine lines fade smoothly with distance.
 Gaussian clouds load the first time they are enabled. Pass
 `viewer.splat_path=/path/to/scene.ply` (or `.spz`) to add a cloud already aligned to
 simulation coordinates.
@@ -81,6 +85,10 @@ draw pink dots at each body's most recent valid touchdown. These remain visible
 in the air until the next touchdown or reset. Toggle them under **Last contacts**.
 Timeline frames keep the marker values
 that were drawn when the frame was published.
+
+`G1LAFAN1Tracking` shows a translucent G1 ghost at each world's current
+reference pose. Toggle **Reference motion** under **Scene**. Each ghost
+follows its own clip and frame, including when scrubbing the timeline.
 
 Open **Camera preview** to inspect the selected world's cached RGB or depth
 images. Enable **Show on frustum** to display the same image in the 3D scene.
