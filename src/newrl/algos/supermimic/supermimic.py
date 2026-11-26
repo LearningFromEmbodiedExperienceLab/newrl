@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 from torch import nn
+from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from tensordict import TensorDict
 
 from newrl.algos.common.batch import aggregate_reward, group_width, stack_groups
@@ -19,12 +20,18 @@ from newrl.algos.common.normalization import EmpiricalNormalization, ReturnNorma
 from newrl.algos.common.optimizer import build_optimizer
 from newrl.algos.common.capture import CapturedUpdate
 from newrl.mdp.base import ObservationGroup, MDP
+from newrl.mdp.motion_tracking import MotionTrackingMDP
 from newrl.mdp.observations import BodyPosition
 from newrl.utils.config import cs
 from .replay import ReplayBuffer
 from .world_models import ExplicitWorldModel
 
-from .representations import GeneralizedCoordinates, GeneralizedCoordinatesConfig
+from .representations import (
+    GeneralizedCoordinates,
+    GeneralizedCoordinatesConfig,
+    MaximalCoordinates,
+    MaximalCoordinatesConfig,
+)
 
 if TYPE_CHECKING:
     from newrl.env import StatefulEnvironment
@@ -107,9 +114,15 @@ class SuperMimicConfig:
         )),
     })
     # Physical state encoding and differentiable reconstruction for imagination.
-    representation: GeneralizedCoordinatesConfig = field(default_factory=GeneralizedCoordinatesConfig)
+    representation: GeneralizedCoordinatesConfig | MaximalCoordinatesConfig = field(
+        default_factory=GeneralizedCoordinatesConfig
+    )
     # Observation groups concatenated in order for the actor.
     policy_obs_keys: tuple[str, ...] = ('proprio', 'privileged', 'command')
+    # Predict a correction to the next reference pose in joint target action units.
+    residual_action: bool = True
+    # Evaluation actor and observation normalizer EMA. Zero disables averaging.
+    actor_ema: float = 0.995
     # Observation groups concatenated in order for the critic.
     critic_obs_keys: tuple[str, ...] = ('proprio', 'privileged', 'command')
 
@@ -126,6 +139,8 @@ class SuperMimicConfig:
             raise ValueError('Replay capacity and warmup must cover wm_window')
         if not 0 <= self.gamma < 1 or not 0 <= self.lam <= 1:
             raise ValueError('Invalid return discounts')
+        if not 0 <= self.actor_ema < 1:
+            raise ValueError('actor_ema must be in [0, 1)')
         for name in ('actor_lr', 'critic_lr', 'wm_lr', 'grad_clip'):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f'{name} must be finite and positive')
@@ -144,6 +159,7 @@ class SuperMimicConfig:
         )))
         task.output_mdp_fields = tuple(dict.fromkeys((
             *task.output_mdp_fields, *task.mdp.replay_fields,
+            *(('future_reference',) if self.residual_action else ()),
         )))
         return task
 
@@ -186,7 +202,21 @@ class SuperMimicConfig:
         from newrl.terrains import PlaneTerrainConfig
         if not isinstance(env.config.terrain, PlaneTerrainConfig) and env.config.terrain != 'plane':
             raise ValueError('SuperMimic currently requires plane terrain; nonuniform terrain needs dynamics context')
-        return SuperMimic(self, mdp, representation, env.device, env.action_dim, dynamics)
+        action_mapping = None
+        if self.residual_action:
+            if not isinstance(mdp, MotionTrackingMDP) or set(env.scene.entities) != {mdp.entity}:
+                raise ValueError('Residual actions require a single motion-tracking robot')
+            if 'future_reference' not in env.output_mdp_fields:
+                raise ValueError('Residual actions require future_reference in MDP outputs')
+            robot = env.scene.entities[mdp.entity]
+            if robot.velocity_mask is not None:
+                raise ValueError('Residual actions require position-controlled joints')
+            nominal = robot.default_position[0]
+            scale = torch.as_tensor(robot.action.scale, device=nominal.device, dtype=nominal.dtype)
+            if not (torch.isfinite(scale) & (scale > 0)).all():
+                raise ValueError('Residual actions require finite, positive action scales')
+            action_mapping = nominal.detach().clone(), scale.reciprocal()
+        return SuperMimic(self, mdp, representation, env.device, env.action_dim, dynamics, action_mapping)
 
 
 cs.store(SuperMimicConfig.algo_id, SuperMimicConfig(), group='algo')
@@ -260,10 +290,11 @@ class SuperMimic(nn.Module):
         self,
         config: SuperMimicConfig,
         mdp: MDP,
-        representation: GeneralizedCoordinates,
+        representation: GeneralizedCoordinates | MaximalCoordinates,
         device: torch.device | str,
         action_dim: int,
         dynamics: ObservationGroup | None,
+        action_mapping: tuple[torch.Tensor, torch.Tensor] | None,
     ) -> None:
         super().__init__()
         self.config, self.mdp = config, mdp
@@ -280,6 +311,17 @@ class SuperMimic(nn.Module):
         self.actor[-1].weight._non_muon = True
         nn.init.zeros_(self.actor[-1].weight)
         nn.init.zeros_(self.actor[-1].bias)
+        nominal, inverse_scale = action_mapping if action_mapping is not None else (None, None)
+        self.register_buffer('_nominal_joint_pos', nominal, persistent=False)
+        self.register_buffer('_inverse_action_scale', inverse_scale, persistent=False)
+        self.actor_ema = (
+            AveragedModel(
+                nn.ModuleList([self.actor, self.actor_norm]),
+                multi_avg_fn=get_ema_multi_avg_fn(config.actor_ema),
+                use_buffers=True,
+            ).requires_grad_(False)
+            if config.actor_ema else None
+        )
         self.critics = nn.ModuleList(Value(critic_width, config.critic_hidden, nn.SiLU) for _ in range(config.critic_heads))
         for critic in self.critics:
             nn.init.zeros_(critic.head.weight)
@@ -311,16 +353,27 @@ class SuperMimic(nn.Module):
         return self.opt_wm, self.opt_actor, self.opt_critic
 
     @property
-    def representation(self) -> GeneralizedCoordinates:
+    def representation(self) -> GeneralizedCoordinates | MaximalCoordinates:
         return self.wm.representation
 
-    def actor_action(self, observation: TensorDict) -> torch.Tensor:
-        features = self.actor_norm.normalize(stack_groups(observation, self.config.policy_obs_keys))
+    def actor_action(
+        self, observation: TensorDict, memory: TensorDict | None = None, *, use_ema: bool = False,
+    ) -> torch.Tensor:
+        actor, norm = self.actor, self.actor_norm
+        if use_ema and self.actor_ema is not None:
+            actor, norm = self.actor_ema.module
+        features = norm.normalize(stack_groups(observation, self.config.policy_obs_keys))
         with torch.autocast(features.device.type, dtype=torch.bfloat16,
                             enabled=self.config.amp == 'bf16' and features.is_cuda):
-            hidden = self.actor[0](features)
+            hidden = actor[0](features)
         with torch.autocast(features.device.type, enabled=False):
-            return self.actor[-1](hidden.float())
+            action = actor[-1](hidden.float())
+            if self._nominal_joint_pos is not None:
+                if memory is None:
+                    raise ValueError('Residual actions require decision-time MDP state')
+                reference = memory['future_reference', 'joint_pos'][..., 0, :]
+                action = action + (reference - self._nominal_joint_pos) * self._inverse_action_scale
+            return action
 
     def value(self, observation: TensorDict) -> torch.Tensor:
         features = self.critic_norm.normalize(stack_groups(observation, self.config.critic_obs_keys))
@@ -335,7 +388,9 @@ class SuperMimic(nn.Module):
         if self.training:
             self.actor_norm.update(stack_groups(tensordict['observation'], self.config.policy_obs_keys))
             self.critic_norm.update(stack_groups(tensordict['observation'], self.config.critic_obs_keys))
-        action = self.actor_action(tensordict['observation'])
+        action = self.actor_action(
+            tensordict['observation'], tensordict.get('mdp_state'), use_ema=not self.training,
+        )
         if not deterministic:
             action = action + self.config.action_noise * torch.randn_like(action)
         tensordict['action'] = action
@@ -427,7 +482,7 @@ class SuperMimic(nn.Module):
         observation = self.mdp.compute_observation(physical, memory)
         observations, rewards, continuations = [observation], [], []
         for _ in range(horizon):
-            action = self.actor_action(observation)
+            action = self.actor_action(observation, memory)
             state, physical = self.wm.predict(state, action, physical, memory)
             memory, transition = self.mdp.step(physical, memory, action)
             observation = transition['observation']
@@ -441,6 +496,8 @@ class SuperMimic(nn.Module):
         cfg = self.config
         start = self.replay.sample_starts(cfg.imagination_batch, horizon=cfg.horizon, motion=getattr(self.mdp,'_motion',None))
         metrics = self._policy_update(start['state'], start['mdp_state'])
+        if self.actor_ema is not None:
+            self.actor_ema.update_parameters(nn.ModuleList([self.actor, self.actor_norm]))
         self.policy_steps += 1
         return {key: value.item() for key, value in metrics.items()}
 

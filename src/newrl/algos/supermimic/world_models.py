@@ -11,13 +11,13 @@ from newrl.algos.common.normalization import EmpiricalNormalization
 from newrl.mdp.base import MDP, ObservationGroup
 
 if TYPE_CHECKING:
-    from newrl.algos.supermimic.representations import GeneralizedCoordinates
+    from newrl.algos.supermimic.representations import GeneralizedCoordinates, MaximalCoordinates
 
 
 class ExplicitWorldModel(nn.Module):
     def __init__(
         self,
-        representation: "GeneralizedCoordinates",
+        representation: "GeneralizedCoordinates | MaximalCoordinates",
         action_dim: int,
         hidden: tuple[int, ...],
         observations: ObservationGroup | None,

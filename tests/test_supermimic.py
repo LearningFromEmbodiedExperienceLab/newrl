@@ -87,6 +87,42 @@ class RepresentationTests(unittest.TestCase):
             return value['robot', 'body_pose_w'], value['robot', 'body_twist_w']
         self.assertTrue(torch.autograd.gradcheck(forward, (delta,), fast_mode=True))
 
+    def test_coordinate_and_integration_combinations(self):
+        from newrl.algos.supermimic import MaximalCoordinatesConfig
+
+        self.scene.control_dt = 0.02
+        self.scene.config = SimpleNamespace(substeps=4)
+        for config in (GeneralizedCoordinatesConfig, MaximalCoordinatesConfig):
+            for integration in ("direct", "velocity"):
+                with self.subTest(config=config.__name__, integration=integration):
+                    rep = config(integration=integration).build(self.scene)
+                    state = rep.encode(self.physical)
+                    decoded = rep.decode(state)
+                    for key in self.physical.keys(True, True):
+                        torch.testing.assert_close(decoded[key], self.physical[key], atol=2e-6, rtol=2e-6)
+                    self.assertEqual(rep.features(state).shape[-1], rep.feature_dim)
+                    prediction = torch.zeros(3, rep.prediction_dim)
+                    prediction[..., 12 + len(rep.joint_names)] = 1
+                    prediction.requires_grad_()
+                    successor = rep.apply_prediction(state, prediction)
+                    drift = 0 if integration == "direct" else 0.02 * (
+                        state["joint_vel"] + 0.625 * torch.tensor([1., 0.])
+                    )
+                    torch.testing.assert_close(successor["joint_pos"], state["joint_pos"] + drift)
+                    if integration == "velocity":
+                        torch.testing.assert_close(
+                            successor["root_pose"][..., :3],
+                            state["root_pose"][..., :3] + 0.02 * state["root_twist"][..., :3],
+                        )
+                    if "link_pose" in state and integration == "velocity":
+                        torch.testing.assert_close(
+                            successor["link_pose"][..., :3],
+                            state["link_pose"][..., :3] + 0.02 * state["link_twist"][..., :3],
+                        )
+                    loss = rep.compute_loss(successor, state, torch.ones(3, 1, dtype=torch.bool))
+                    gradient, = torch.autograd.grad(loss, prediction)
+                    self.assertTrue(torch.isfinite(gradient).all())
+
     def test_task_preparation_independent_of_policy_observations(self):
         task = G1MotionTracking()
         task.output_physical_fields = (('robot', 'projected_gravity'),)
@@ -107,7 +143,7 @@ class RepresentationTests(unittest.TestCase):
         from newrl.mdp.base import ObservationGroup
         from newrl.mdp.observations import EntityField
 
-        cfg = SuperMimicConfig(policy_obs_keys=('state',), critic_obs_keys=('state',),
+        cfg = SuperMimicConfig(residual_action=False, policy_obs_keys=('state',), critic_obs_keys=('state',),
                               actor_hidden=(16,), critic_hidden=(16,), wm_hidden=(16,), wm_observations={})
         mdp = MDP(observations={'state':ObservationGroup({'q':EntityField('robot','joint_pos')})})._initialize(self.scene)
         env = SimpleNamespace(scene=self.scene, mdp=mdp, device=torch.device('cpu'), action_dim=2,

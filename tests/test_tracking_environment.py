@@ -90,7 +90,15 @@ class TrackingEnvironmentTests(unittest.TestCase):
         task.mdp.truncations['timeout'] = Timeout(2)
         env = StatefulEnvironment(task)
         learner = cfg.build(env)
-        batch, carry = learner.collect(env, 4, env.reset())
+        initial = env.reset()
+        action = learner.eval().act(initial.clone(), deterministic=True)["action"]
+        learner.train()
+        robot = env.scene.entities[task.mdp.entity]
+        torch.testing.assert_close(
+            robot.action(action, robot.default_position),
+            initial["mdp_state", "future_reference", "joint_pos"][:, 0],
+        )
+        batch, carry = learner.collect(env, 4, initial)
         self.assertEqual(batch.batch_size, (4, 4))
         storage = learner.replay.storage
         self.assertTrue(storage['next', 'done'][1].all())

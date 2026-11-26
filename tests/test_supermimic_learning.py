@@ -27,6 +27,7 @@ class LearningTests(unittest.TestCase):
         height.physical_fields = frozenset({('robot','body_pose_w')})
         height.range = (-float('inf'),0.)
         self.cfg = SuperMimicConfig(
+            residual_action=False,
             wm_observations={}, optim='adamw', critic_optim='adamw', normalize_reward=False,
             policy_obs_keys=('state',), critic_obs_keys=('state',), actor_hidden=(16,), critic_hidden=(16,), wm_hidden=(32,),
             wm_batch=8, wm_window=2, wm_updates=1, warmup_steps=2, buffer_steps=16,
@@ -119,7 +120,7 @@ class LearningTests(unittest.TestCase):
         self.assertIsNone(other.replay)
         obs=learner.mdp.compute_observation(learner.representation.decode(self.initial),learner.mdp.initial_state(3,2,torch.device('cpu')))
         result=other.eval().act(TensorDict({'observation':obs},[3]),deterministic=True)
-        torch.testing.assert_close(result['action'],learner.actor_action(obs))
+        torch.testing.assert_close(result['action'],learner.actor_action(obs, use_ema=True))
 
     def test_lambda_returns_bootstrap_truncations_but_not_falls(self):
         reward=torch.tensor([[[2.]],[[2.]]])
