@@ -354,9 +354,12 @@ class Scene:
         self,
         state: newton.State,
         observables: newton.solvers.SolverMuJoCo.Observables | SimpleNamespace | None,
+        *,
+        field_plan: dict[str, tuple[str, ...]] | None = None,
     ) -> TensorDict:
         values = {}
-        for name, fields in self.physical_read_plan.items():
+        plan = self.physical_read_plan if field_plan is None else field_plan
+        for name, fields in plan.items():
             if name in self.entities:
                 values[name] = self.entities[name].read(state, fields, observables)
             else:

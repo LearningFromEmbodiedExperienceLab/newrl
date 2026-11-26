@@ -11,6 +11,7 @@ from pathlib import Path
 from subprocess import SubprocessError, run
 from threading import Event, Lock, Thread
 from time import monotonic, sleep
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -21,6 +22,9 @@ from newrl.sensors import DepthCamera, GaussianCamera
 from newrl.utils.gaussian_scene import resolve_gaussian_scene
 from .camera_preview import CameraPreviews
 from .markers import Marker, Pose, check_pose
+
+if TYPE_CHECKING:
+    from torch import Tensor
 
 
 def _pack(values, dtype):
@@ -102,11 +106,13 @@ class BrowserViewer(newton.viewer.ViewerNull):
         self._paused = Event()
         self.running = True
         self.timeline = timeline
+        self.num_worlds = scene.model.world_count
         self.recordings = ViewportRecordings(recording_dir, task_name)
         self.clouds = []
         self.cloud_paths = {}
         self._markers = {}
         self._marker_poses = {}
+        self._marker_vectors = {}
         self._marker_bodies = {}
         self._body_world = scene.model.body_world.numpy()
         self.camera_previews = CameraPreviews(scene.cameras, scene.model.world_count)
@@ -373,6 +379,18 @@ class BrowserViewer(newton.viewer.ViewerNull):
         check_pose(pose)
         self._marker_poses[name] = pose
 
+    def set_marker_vectors(self, name: str, vectors: "Tensor") -> None:
+        """Supply XYZ origin and vector per world to a world-space arrow."""
+        marker = self._markers[name]
+        if marker.kind != "arrow" or marker.body is not None:
+            raise ValueError("Batched vectors require a world-space arrow marker")
+        if vectors.shape != (self.num_worlds, 6):
+            raise ValueError("Marker vectors require shape [num_worlds, 6]")
+        values = vectors.detach().cpu().numpy()
+        self._marker_vectors[name] = np.where(
+            np.isfinite(values).all(axis=1, keepdims=True), values, 0
+        ).tolist()
+
     def _should_show_shape(self, flags, is_static, geo_type=None, *, layer=None):
         # Publish collision poses for client-side visibility without enabling
         # Newton's extra collision debugging geometry.
@@ -506,6 +524,7 @@ class BrowserViewer(newton.viewer.ViewerNull):
                 "targets": [position.tolist() for position in targets],
                 "cameraBodies": self.camera_body_poses.tolist(),
                 "markerPoses": self._marker_poses,
+                "markerVectors": self._marker_vectors,
                 "markerBodies": self._marker_bodies,
             },
             separators=(",", ":"),

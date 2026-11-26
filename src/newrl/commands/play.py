@@ -8,6 +8,7 @@ from newrl.commands.playback import PlaybackConfig, build_playback
 from newrl.projects import load_projects
 from newrl.utils.config import main as config_main
 from newrl.visualizations.configs import BrowserViewerConfig, GLViewerConfig, ViserViewerConfig, viewer_world_offsets
+from newrl.visualizations.task import TaskVisualizationPlayback
 
 
 @dataclass
@@ -33,6 +34,7 @@ def play(cfg: PlayConfig) -> None:
         if cfg.viewer is not None:
             viewer = cfg.viewer.build(env)
         viser_playback = None
+        task_playback = None
         if viewer is not None:
             viewer.set_model(env.model)
             viewer.set_world_offsets(viewer_world_offsets(env.config.terrain, env.num_envs))
@@ -40,9 +42,12 @@ def play(cfg: PlayConfig) -> None:
                 from newrl.visualizations.viser import ViserPlayback
 
                 viser_playback = ViserPlayback(viewer, env.scene)
+            elif isinstance(cfg.viewer, BrowserViewerConfig) and cfg.viewer.task_visualizations:
+                task_playback = TaskVisualizationPlayback(env, viewer)
 
         carry = env.reset()
         steps = resets = 0
+        marker_step = None
         while (cfg.steps is None or steps < cfg.steps) and (
             viewer is None or viewer.is_running()
         ):
@@ -60,6 +65,9 @@ def play(cfg: PlayConfig) -> None:
                 finished = None
             if viewer is not None:
                 viewer.begin_frame(steps * env.control_dt)
+                if task_playback is not None and marker_step != steps:
+                    task_playback.update()
+                    marker_step = steps
                 viewer.log_state(env.state)
                 if viser_playback is not None:
                     viser_playback.update(env.state)

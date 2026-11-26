@@ -70,6 +70,13 @@ scripts can register a `Marker` from `newrl.visualizations.markers` with
 Newton body index and a body-relative pose. Use `viewer.set_marker_pose()`
 to update a marker during playback.
 
+Velocity tracking tasks draw the commanded planar velocity in blue and the
+measured planar velocity in orange for the selected world. Both arrows use
+the same scale. The command is the one the policy sees for the next decision.
+Toggle either arrow under **Markers**, or set `viewer.task_visualizations=false`
+to skip task marker reads entirely. Timeline frames keep the marker values
+that were drawn when the frame was published.
+
 Open **Camera preview** to inspect the selected world's cached RGB or depth
 images. Enable **Show on frustum** to display the same image in the 3D scene.
 Cameras already used by the simulator are available by default. Set

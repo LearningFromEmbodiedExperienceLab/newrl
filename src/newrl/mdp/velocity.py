@@ -14,6 +14,7 @@ from .base import MDP
 
 if TYPE_CHECKING:
     from newrl.scene import Scene
+    from newrl.visualizations.task import TaskVisualization
 
 
 @dataclass
@@ -60,6 +61,11 @@ class VelocityMDP(MDP):
             wp.to_torch(scene.model.joint_limit_upper)[robot.joint_qd_indices],
         )
         return bound
+
+    def visualizations(self) -> tuple["TaskVisualization", ...]:
+        from newrl.visualizations.velocity import VelocityVectors
+
+        return (*super().visualizations(), VelocityVectors(self.entity))
 
     def initial_state(self, num_envs: int, action_dim: int, device: torch.device) -> TensorDict:
         mdp_state = super().initial_state(num_envs, action_dim, device)

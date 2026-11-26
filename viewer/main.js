@@ -79,14 +79,17 @@ function addMarkers(scene, specifications) {
     }
     const input = controls.get(group);
     let geometry;
+    let arrow;
     if (spec.kind === "frame") {
       geometry = new THREE.AxesHelper(spec.size);
       geometry.material.depthTest = false;
       geometry.renderOrder = 2;
     } else if (spec.kind === "arrow") {
-      geometry = new THREE.ArrowHelper(
+      arrow = new THREE.ArrowHelper(
         new THREE.Vector3(1, 0, 0), new THREE.Vector3(), spec.size, spec.color
       );
+      geometry = new THREE.Group();
+      geometry.add(arrow);
     } else {
       geometry = new THREE.Mesh(
         new THREE.SphereGeometry(spec.size, 12, 8),
@@ -100,7 +103,7 @@ function addMarkers(scene, specifications) {
     geometry.quaternion.fromArray(spec.pose, 3);
     root.visible = input.checked && spec.body === null;
     scene.add(root);
-    return {spec, root, geometry, input};
+    return {spec, root, geometry, input, arrow};
   });
 }
 
@@ -316,6 +319,7 @@ async function main() {
     setTimeout(pollGpu, 1000);
   }
   const position = new THREE.Vector3();
+  const arrowVector = new THREE.Vector3();
   const rotation = new THREE.Quaternion();
   const worldOffset = new THREE.Vector3();
   function interpolatePose(object, from, to, alpha) {
@@ -448,9 +452,30 @@ async function main() {
         interpolatePose(body, from.cameraBodies[i][world], to.cameraBodies[i][world], alpha);
         body.position.add(worldOffset);
       }
-      for (const {spec, root, geometry, input} of markers) {
+      for (const {spec, root, geometry, input, arrow} of markers) {
         root.visible = input.checked;
         if (!root.visible) continue;
+        if (Object.hasOwn(to.markerVectors, spec.name)) {
+          const next = to.markerVectors[spec.name][selected?.world];
+          const previous = from.markerVectors[spec.name]?.[selected?.world] ?? next;
+          if (!next) {
+            root.visible = false;
+            continue;
+          }
+          geometry.position.fromArray(previous);
+          position.fromArray(next);
+          const t = geometry.position.distanceToSquared(position) > 1 ? 1 : alpha;
+          geometry.position.lerp(position, t);
+          root.position.fromArray(selected.offset);
+          arrowVector.fromArray(previous, 3).lerp(position.fromArray(next, 3), t);
+          const magnitude = arrowVector.length();
+          root.visible = magnitude > 1e-5;
+          if (root.visible) {
+            arrow.setDirection(arrowVector.multiplyScalar(1 / magnitude));
+            arrow.setLength(spec.size * magnitude);
+          }
+          continue;
+        }
         if (spec.body !== null) {
           interpolatePose(root, from.markerBodies[spec.body], to.markerBodies[spec.body], alpha);
           root.position.add(worldOffset.fromArray(spec.offset));

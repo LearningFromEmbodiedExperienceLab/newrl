@@ -10,6 +10,7 @@ from newrl.projects import load_projects
 from newrl.visualizations.timeline import Timeline
 from newrl.utils.config import main as config_main
 from newrl.visualizations.configs import BrowserViewerConfig
+from newrl.visualizations.task import TaskVisualizationPlayback
 
 
 @dataclass
@@ -40,6 +41,8 @@ def play_timeline(cfg: TimelinePlayConfig) -> None:
             sim_state, mdp_state = env.snapshot()
             checkpoint = (sim_state.cpu(), mdp_state.cpu(), carry.cpu())
         viewer.begin_frame(tick * env.control_dt, jump=jump)
+        if task_playback is not None:
+            task_playback.update()
         viewer.log_state(env.state)
         viewer.end_frame(pace=False)
         timeline.append(
@@ -47,6 +50,7 @@ def play_timeline(cfg: TimelinePlayConfig) -> None:
         )
 
     try:
+        task_playback = TaskVisualizationPlayback(env, viewer) if cfg.viewer.task_visualizations else None
         viewer.set_model(env.model)
         viewer.set_world_offsets((0.0, 0.0, 0.0))
         carry = env.reset()

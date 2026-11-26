@@ -58,6 +58,7 @@ class BrowserViewerConfig:
     recording_dir: str = "recordings"
     terrain_origin_frames: bool = True
     camera_preview: bool = False
+    task_visualizations: bool = True
 
     def __post_init__(self) -> None:
         if not 0 <= self.port <= 65535:

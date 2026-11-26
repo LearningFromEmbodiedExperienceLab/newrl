@@ -14,6 +14,7 @@ from .terms import EpisodeEndTerm, ObservationTerm, RewardTerm
 
 if TYPE_CHECKING:
     from newrl.scene import Scene
+    from newrl.visualizations.task import TaskVisualization
 
 
 TermT = TypeVar("TermT")
@@ -228,6 +229,10 @@ class MDP:
                 return None
             fields.update(required)
         return frozenset(fields)
+
+    def visualizations(self) -> tuple["TaskVisualization", ...]:
+        """Declare optional components for interactive playback."""
+        return ()
 
     def initial_state(
         self, num_envs: int, action_dim: int, device: torch.device
