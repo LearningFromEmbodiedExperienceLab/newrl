@@ -10,6 +10,7 @@ from newrl.commands import with_used_observations
 from newrl.configs import EnvironmentConfig
 from newrl.env import StatefulEnvironment
 from newrl.mdp.episode_ends import Timeout
+from newrl.sensors.contact import TerrainContactConfig
 from newrl.utils.config import load
 from newrl.utils.wandb import resolve_checkpoint
 
@@ -31,7 +32,10 @@ class PlaybackConfig:
             raise ValueError("episode_steps must be positive")
 
 
-def build_playback(cfg: PlaybackConfig, *, default_worlds: int, num_envs: int | None = None):
+def build_playback(
+    cfg: PlaybackConfig, *, default_worlds: int, num_envs: int | None = None,
+    task_visualizations: bool = False,
+):
     task = cfg.task
     algo = cfg.algo
     weights = None
@@ -67,6 +71,18 @@ def build_playback(cfg: PlaybackConfig, *, default_worlds: int, num_envs: int | 
         task = prepare_task(task)
     if cfg.discard_unused_obs:
         task = with_used_observations(task, algo)
+
+    if task_visualizations:
+        # Contact history must be enabled before the solver is constructed.
+        contact_fields = tuple(
+            (name, field)
+            for name, sensor in task.sensors.items()
+            if isinstance(sensor, TerrainContactConfig) and sensor.track_contact_position
+            for field in ("last_contact_pos_w", "last_contact_pos_valid")
+        )
+        task = replace(task, output_physical_fields=tuple(dict.fromkeys(
+            (*task.output_physical_fields, *contact_fields)
+        )))
 
     task.mdp.truncations["timeout"] = Timeout(cfg.episode_steps)
     env = StatefulEnvironment(task)

@@ -29,7 +29,10 @@ class PlayConfig(PlaybackConfig):
 def play(cfg: PlayConfig) -> None:
     viewer = None
     try:
-        env, policy = build_playback(cfg, default_worlds=4, num_envs=cfg.num_envs)
+        env, policy = build_playback(
+            cfg, default_worlds=4, num_envs=cfg.num_envs,
+            task_visualizations=isinstance(cfg.viewer, BrowserViewerConfig) and cfg.viewer.task_visualizations,
+        )
         actions = torch.zeros((env.num_envs, env.action_dim), device=env.device)
         if cfg.viewer is not None:
             viewer = cfg.viewer.build(env)

@@ -30,7 +30,10 @@ class TimelinePlayConfig(PlaybackConfig):
 
 @config_main(TimelinePlayConfig, defaults={"task.num_envs": 1})
 def play_timeline(cfg: TimelinePlayConfig) -> None:
-    env, policy = build_playback(cfg, default_worlds=1, num_envs=1)
+    env, policy = build_playback(
+        cfg, default_worlds=1, num_envs=1,
+        task_visualizations=cfg.viewer.task_visualizations,
+    )
     timeline = Timeline(cfg.history_frames, cfg.history_mib * 1024**2, env.control_dt)
     actions = torch.zeros((1, env.action_dim), device=env.device)
     viewer = cfg.viewer.build(env, timeline=timeline)

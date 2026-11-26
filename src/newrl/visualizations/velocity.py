@@ -27,7 +27,7 @@ class VelocityVectors:
         return ("velocity_command",)
 
     @property
-    def arrows(self) -> tuple[Marker, ...]:
+    def markers(self) -> tuple[Marker, ...]:
         return tuple(
             Marker(name, "arrow", (0, 0, 0, 0, 0, 0, 1), size=0.65, color=color, group=label)
             for name, color, label in (

@@ -74,7 +74,12 @@ Velocity tracking tasks draw the commanded planar velocity in blue and the
 measured planar velocity in orange for the selected world. Both arrows use
 the same scale. The command is the one the policy sees for the next decision.
 Toggle either arrow under **Markers**, or set `viewer.task_visualizations=false`
-to skip task marker reads entirely. Timeline frames keep the marker values
+to skip task and sensor marker reads entirely. Height-map sensors draw green
+dots at valid terrain intersections for the selected world. Toggle each map
+under **Markers**. Contact sensors configured with `track_contact_position=True`
+draw pink dots at each body's most recent valid touchdown. These remain visible
+in the air until the next touchdown or reset. Toggle them under **Last contacts**.
+Timeline frames keep the marker values
 that were drawn when the frame was published.
 
 Open **Camera preview** to inspect the selected world's cached RGB or depth

@@ -13,6 +13,7 @@ from tensordict import TensorDict
 if TYPE_CHECKING:
     from newrl.scene import Scene
     from newrl.scene import RobotEntity
+    from newrl.visualizations.task import TaskVisualization
 
 
 
@@ -73,7 +74,7 @@ def _height_ray_origins(
 
 
 class HeightMap:
-    fields = ("height", "valid")
+    fields = ("height", "valid", "hit_pos_w")
 
     def __init__(self, config: HeightMapConfig, entity: "RobotEntity", model: newton.Model) -> None:
         self.config = config
@@ -81,6 +82,11 @@ class HeightMap:
         (body,), _ = entity.find_bodies(config.body)
         self._bodies = wp.from_torch(entity.body_indices[:, body].to(torch.int32), dtype=wp.int32)
         self.shape = torch.Size((config.rows, config.cols))
+
+    def visualizations(self, name: str) -> tuple["TaskVisualization", ...]:
+        from newrl.visualizations.height_map import HeightScan
+
+        return (HeightScan(name, min(0.025, self.config.spacing * 0.25)),)
 
     def initialize(self, scene: "Scene") -> None:
         device = self.model.device
@@ -112,4 +118,9 @@ class HeightMap:
         values = {"valid": valid}
         if "height" in fields:
             values["height"] = torch.where(valid, config.ray_start_height - distance, 0.0)
+        if "hit_pos_w" in fields:
+            origins = wp.to_torch(self._origins).reshape(worlds, *self.shape, 3)
+            directions = wp.to_torch(self._directions).reshape_as(origins)
+            hits = origins + directions * torch.where(valid, distance, 0.0).unsqueeze(-1)
+            values["hit_pos_w"] = torch.where(valid.unsqueeze(-1), hits, 0.0)
         return TensorDict({name: values[name] for name in fields}, batch_size=[worlds])

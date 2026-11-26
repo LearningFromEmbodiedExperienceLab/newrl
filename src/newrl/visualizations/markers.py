@@ -19,8 +19,8 @@ class Marker:
     """Draw a frame, a +X arrow, or a point in world or body coordinates."""
 
     name: str
-    kind: Literal["frame", "arrow", "point"]
-    pose: Pose
+    kind: Literal["frame", "arrow", "point", "points"]
+    pose: Pose = (0, 0, 0, 0, 0, 0, 1)
     size: float = 0.25
     color: int = 0xFFBA68
     group: str | None = None
@@ -29,7 +29,9 @@ class Marker:
 
     def __post_init__(self) -> None:
         check_pose(self.pose)
-        if self.kind not in ("frame", "arrow", "point"):
+        if self.kind not in ("frame", "arrow", "point", "points"):
             raise ValueError("Unknown marker kind")
+        if self.kind == "points" and self.body is not None:
+            raise ValueError("Batched point markers use world coordinates")
         if not isfinite(self.size) or self.size <= 0 or not 0 <= self.color <= 0xFFFFFF:
             raise ValueError("Markers require a positive size and an RGB color")

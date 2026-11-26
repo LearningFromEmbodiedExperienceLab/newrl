@@ -113,6 +113,7 @@ class BrowserViewer(newton.viewer.ViewerNull):
         self._markers = {}
         self._marker_poses = {}
         self._marker_vectors = {}
+        self._marker_points = {}
         self._marker_bodies = {}
         self._body_world = scene.model.body_world.numpy()
         self.camera_previews = CameraPreviews(scene.cameras, scene.model.world_count)
@@ -391,6 +392,21 @@ class BrowserViewer(newton.viewer.ViewerNull):
             np.isfinite(values).all(axis=1, keepdims=True), values, 0
         ).tolist()
 
+    def set_marker_points(self, name: str, positions: "Tensor", valid: "Tensor") -> None:
+        """Supply world-space point positions and a validity mask for each world."""
+        marker = self._markers[name]
+        if marker.kind != "points":
+            raise ValueError("Batched positions require a points marker")
+        if positions.ndim != 3 or positions.shape[0] != self.num_worlds or positions.shape[-1] != 3:
+            raise ValueError("Marker points require shape [num_worlds, num_points, 3]")
+        if valid.shape != positions.shape[:2]:
+            raise ValueError("Marker validity requires shape [num_worlds, num_points]")
+        values = positions.detach().cpu().numpy()
+        mask = valid.detach().cpu().numpy().astype(bool) & np.isfinite(values).all(axis=-1)
+        self._marker_points[name] = [
+            points[keep].tolist() for points, keep in zip(values, mask, strict=True)
+        ]
+
     def _should_show_shape(self, flags, is_static, geo_type=None, *, layer=None):
         # Publish collision poses for client-side visibility without enabling
         # Newton's extra collision debugging geometry.
@@ -525,6 +541,7 @@ class BrowserViewer(newton.viewer.ViewerNull):
                 "cameraBodies": self.camera_body_poses.tolist(),
                 "markerPoses": self._marker_poses,
                 "markerVectors": self._marker_vectors,
+                "markerPoints": self._marker_points,
                 "markerBodies": self._marker_bodies,
             },
             separators=(",", ":"),

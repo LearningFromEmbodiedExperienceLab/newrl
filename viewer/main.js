@@ -73,7 +73,7 @@ function addMarkers(scene, specifications) {
   panel.hidden = !specifications.length;
   const controls = new Map();
   return specifications.map(spec => {
-    const group = spec.group ?? {frame: "Frames", arrow: "Arrows", point: "Points"}[spec.kind];
+    const group = spec.group ?? {frame: "Frames", arrow: "Arrows", point: "Points", points: "Points"}[spec.kind];
     if (!controls.has(group)) {
       controls.set(group, visibilityControl(group, spec.visible, panel.querySelector("div")).input);
     }
@@ -90,6 +90,8 @@ function addMarkers(scene, specifications) {
       );
       geometry = new THREE.Group();
       geometry.add(arrow);
+    } else if (spec.kind === "points") {
+      geometry = new THREE.Group();
     } else {
       geometry = new THREE.Mesh(
         new THREE.SphereGeometry(spec.size, 12, 8),
@@ -103,7 +105,7 @@ function addMarkers(scene, specifications) {
     geometry.quaternion.fromArray(spec.pose, 3);
     root.visible = input.checked && spec.body === null;
     scene.add(root);
-    return {spec, root, geometry, input, arrow};
+    return {spec, root, geometry, input, arrow, points: null};
   });
 }
 
@@ -452,9 +454,37 @@ async function main() {
         interpolatePose(body, from.cameraBodies[i][world], to.cameraBodies[i][world], alpha);
         body.position.add(worldOffset);
       }
-      for (const {spec, root, geometry, input, arrow} of markers) {
+      for (const marker of markers) {
+        const {spec, root, geometry, input, arrow} = marker;
         root.visible = input.checked;
         if (!root.visible) continue;
+        if (spec.kind === "points") {
+          const positions = to.markerPoints[spec.name]?.[selected?.world];
+          root.visible = Boolean(positions?.length);
+          if (!root.visible) continue;
+          root.position.fromArray(selected.offset);
+          if (!marker.points || marker.points.instanceMatrix.count < positions.length) {
+            marker.points?.removeFromParent();
+            marker.points?.dispose();
+            marker.points?.geometry.dispose();
+            marker.points?.material.dispose();
+            marker.points = new THREE.InstancedMesh(
+              new THREE.SphereGeometry(spec.size, 8, 6),
+              new THREE.MeshBasicMaterial({color: spec.color}),
+              positions.length
+            );
+            marker.points.frustumCulled = false;
+            root.add(marker.points);
+          }
+          const matrix = new THREE.Matrix4();
+          positions.forEach((point, i) => {
+            matrix.makeTranslation(...point);
+            marker.points.setMatrixAt(i, matrix);
+          });
+          marker.points.count = positions.length;
+          marker.points.instanceMatrix.needsUpdate = true;
+          continue;
+        }
         if (Object.hasOwn(to.markerVectors, spec.name)) {
           const next = to.markerVectors[spec.name][selected?.world];
           const previous = from.markerVectors[spec.name]?.[selected?.world] ?? next;

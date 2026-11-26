@@ -12,6 +12,7 @@ from tensordict import TensorDict
 if TYPE_CHECKING:
     from newrl.scene import Scene
     from newrl.scene import RobotEntity
+    from newrl.visualizations.task import TaskVisualization
 
 
 
@@ -106,6 +107,11 @@ class TerrainContact:
         self.config = config
         indices, _ = entity.find_bodies(config.body_names)
         self.body_ids = entity.body_indices[:, indices]
+
+    def visualizations(self, name: str) -> tuple["TaskVisualization", ...]:
+        from newrl.visualizations.contact import ContactPositions
+
+        return (ContactPositions(name),) if self.config.track_contact_position else ()
 
     def initialize(self, scene: "Scene") -> None:
         model = scene.model
