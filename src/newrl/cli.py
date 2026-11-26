@@ -54,8 +54,7 @@ def main(argv: list[str] | None = None) -> None:
             parser.error(str(error))
     elif args.command in ("assets", "robots"):
         from newrl.projects import load_projects
-        from newrl.assets import cooked_robot
-        from newrl.robots import robot_model_dir
+        from newrl.assets.cooking import cooked_robot, robot_model_dir
         from newrl.utils.config import cs
 
         load_projects()

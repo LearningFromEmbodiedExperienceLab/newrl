@@ -66,7 +66,7 @@ class _EnvironmentCore:
         self._physics_warmed_up = False
         self.control = self.model.control()
         self.action_sizes = [
-            entity.joint_q_indices.shape[1] for entity in self.scene.entities.values()
+            entity.joint_q_indices.shape[1] for entity in self.scene.robots.values()
         ]
         self.action_dim = sum(self.action_sizes)
         self.control_dt = self.scene.control_dt
@@ -236,7 +236,7 @@ class _EnvironmentCore:
             joint_mask=wp.from_torch(joint_mask, dtype=wp.bool),
         )
         targets = wp.to_torch(self.control.joint_target_q)
-        for entity in self.scene.entities.values():
+        for entity in self.scene.robots.values():
             targets[entity.joint_target_indices[ids]] = entity.default_position[ids]
             if entity.velocity_mask is not None:
                 wp.to_torch(self.control.joint_target_qd)[entity.joint_qd_indices[ids]] = 0.0
@@ -260,7 +260,7 @@ class _EnvironmentCore:
         with self._profile_stage("action"):
             action = action.to(device=self.device, dtype=torch.float32).clone()
             for entity, values in zip(
-                self.scene.entities.values(),
+                self.scene.robots.values(),
                 action.split(self.action_sizes, dim=-1),
                 strict=True,
             ):

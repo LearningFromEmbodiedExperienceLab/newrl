@@ -12,7 +12,7 @@ from tensordict import TensorDict
 
 if TYPE_CHECKING:
     from newrl.scene import Scene
-    from newrl.scene import RobotEntity
+    from newrl.scene import Entity
     from newrl.visualizations.task import TaskVisualization
 
 
@@ -76,7 +76,7 @@ def _height_ray_origins(
 class HeightMap:
     fields = ("height", "valid", "hit_pos_w")
 
-    def __init__(self, config: HeightMapConfig, entity: "RobotEntity", model: newton.Model) -> None:
+    def __init__(self, config: HeightMapConfig, entity: "Entity", model: newton.Model) -> None:
         self.config = config
         self.model = model
         (body,), _ = entity.find_bodies(config.body)

@@ -46,6 +46,9 @@ built-in commands don't fit their workflow.
 
 ## Project robots and assets
 
+See the [robot contribution guide](robots.md) for asset preparation, ownership,
+factory configuration and validation.
+
 Register an importable, zero-argument robot factory in the project callback.
 
 ```python

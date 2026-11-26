@@ -9,7 +9,7 @@ import torch
 import warp as wp
 
 if TYPE_CHECKING:
-    from .scene import RobotEntity, Scene
+    from .scene import Entity, Scene
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -64,6 +64,7 @@ class _ModelWrite:
     ids: torch.Tensor
     baseline: torch.Tensor | None = None
     inverse: bool = False
+    valid: torch.Tensor | None = None
 
     def apply(self, value: torch.Tensor) -> None:
         if self.baseline is not None:
@@ -71,7 +72,10 @@ class _ModelWrite:
                 value = value.reciprocal()
             value = value.reshape(*value.shape, *((1,) * (self.baseline.ndim - value.ndim)))
             value = self.baseline * value
-        self.target[self.ids] = value
+        if self.valid is None:
+            self.target[self.ids] = value
+        else:
+            self.target[self.ids[self.valid]] = value[self.valid]
 
 
 class DomainRandomization:
@@ -110,11 +114,17 @@ class DomainRandomization:
                 & selected_bodies[owners.clamp_min(0)]
                 & ((flags & int(newton.ShapeFlags.COLLIDE_SHAPES)) != 0)
             )
-            ids = selected.nonzero().reshape(model.world_count, -1)
-            if ids.shape[1] == 0:
+            shape_ids = selected.nonzero().flatten()
+            if not shape_ids.numel():
                 raise ValueError("Shape friction selector matched no collision shapes")
+            worlds = wp.to_torch(model.shape_world)[shape_ids].long()
+            counts = worlds.bincount(minlength=model.world_count)
+            columns = torch.arange(int(counts.max()), device=device)
+            valid = columns < counts[:, None]
+            ids = torch.zeros(valid.shape, dtype=torch.long, device=device)
+            ids[valid] = shape_ids
             target = wp.to_torch(model.shape_material_mu)
-            self._add("shape_friction", term, entity, (_ModelWrite(target, ids),), generator)
+            self._add("shape_friction", term, entity, (_ModelWrite(target, ids, valid=valid),), generator)
             self.flags |= newton.ModelFlags.SHAPE_PROPERTIES
 
         if (term := config.gains) is not None:
@@ -131,13 +141,15 @@ class DomainRandomization:
         self._apply()
 
     def _add(
-        self, name: str, term: _Parameter, entity: "RobotEntity",
+        self, name: str, term: _Parameter, entity: "Entity",
         writes: tuple[_ModelWrite, ...], generator: torch.Generator,
     ) -> None:
         low, high = term.bounds
         self.values[name] = torch.empty(writes[0].ids.shape).uniform_(
             low, high, generator=generator
         ).to(writes[0].target.device)
+        if (valid := writes[0].valid) is not None:
+            self.values[name].masked_fill_(~valid, 0)
         entity.model_parameters[name] = self.values[name]
         self._writes[name] = writes
         self._bounds[name] = term.bounds
@@ -153,7 +165,10 @@ class DomainRandomization:
             return False
         for name, value in values.items():
             low, high = self._bounds[name]
-            if not ((value >= low) & (value <= high)).all():
+            in_range = (value >= low) & (value <= high)
+            if (valid := self._writes[name][0].valid) is not None:
+                in_range = torch.where(valid, in_range, value == 0)
+            if not in_range.all():
                 raise ValueError(f"Simulator checkpoint randomization field {name!r} is out of range")
         for name, value in values.items():
             self.values[name].copy_(value)

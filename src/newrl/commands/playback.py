@@ -10,7 +10,7 @@ from newrl.commands import with_used_observations
 from newrl.configs import EnvironmentConfig
 from newrl.env import StatefulEnvironment
 from newrl.mdp.episode_ends import Timeout
-from newrl.sensors.contact import TerrainContactConfig
+from newrl.sensors.contact import ContactSensorConfig
 from newrl.utils.config import load
 from newrl.utils.wandb import resolve_checkpoint
 
@@ -77,7 +77,7 @@ def build_playback(
         contact_fields = tuple(
             (name, field)
             for name, sensor in task.sensors.items()
-            if isinstance(sensor, TerrainContactConfig) and sensor.track_contact_position
+            if isinstance(sensor, ContactSensorConfig) and sensor.track_contact_position
             for field in ("last_contact_pos_w", "last_contact_pos_valid")
         )
         task = replace(task, output_physical_fields=tuple(dict.fromkeys(

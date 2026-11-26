@@ -17,7 +17,7 @@ from newrl.datasets.lafan1 import JOINT_NAMES
 from newrl.env import StatefulEnvironment, StatelessEnvironment
 from newrl.mdp.base import MDP
 from newrl.mdp.episode_ends import Timeout
-from newrl.robots import assetx_g1
+from newrl.assets.robots import assetx_g1
 from newrl.solver_adapters import MujocoSimConfig, SteelSimConfig
 
 

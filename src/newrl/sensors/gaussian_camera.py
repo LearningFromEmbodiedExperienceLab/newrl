@@ -16,7 +16,7 @@ from .camera import camera_refresh_mask
 
 if TYPE_CHECKING:
     from newrl.scene import Scene
-    from newrl.scene import RobotEntity
+    from newrl.scene import Entity
 
 
 @dataclass(frozen=True)
@@ -103,7 +103,7 @@ class GaussianCamera:
     def __init__(
         self,
         config: GaussianCameraConfig,
-        entity: "RobotEntity",
+        entity: "Entity",
         model: newton.Model,
     ) -> None:
         self.config = config

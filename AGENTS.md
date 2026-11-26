@@ -35,6 +35,18 @@ PPO and GenPO++.
 - Projects own custom training and playback scripts. Use NewRL's built-in
   commands when they fit the experiment.
 
+## Robot assets and factories
+
+- Register every robot as an importable, zero-argument factory returning a
+  fresh `RobotConfig` in the `robot` group. Core factories live in
+  `newrl.assets.robots`. Project factories use the project entry point and namespace.
+- Keep asset acquisition lazy. Projects own their asset sources and may ship
+  prepared USD files, fetch assets, or use assetx. Register assetx recipes
+  in the `asset` group and use namespaced asset names for project recipes.
+  Reuse complete cooked bundles and rebuild explicitly when recipes change.
+- Check asset and robot discovery, config serialization, USD import and a
+  short rollout when adding a robot. Follow the [robot contribution guide](docs/robots.md).
+
 ## Environment lifecycle
 
 **The environment never auto-resets.** The outer loop consumes terminal
@@ -122,7 +134,7 @@ next/
   timestep scaling. Any reward scaling is the algorithm or trainer's
   responsibility, for example scaling by the effective horizon.
 - Define environment presets in [configs.py](src/newrl/configs.py), robot
-  asset and actuator settings in [robots.py](src/newrl/robots.py), and
+  asset and actuator settings in [robot families](src/newrl/assets/robots/), and
   terrain geometry in [terrains](src/newrl/terrains). The scene builds
   a template world and replicates it with Newton.
 - Plane terrain is the default. Mesh terrain accepts a Newton mesh, a mesh
@@ -212,3 +224,10 @@ terms. Terms without a declaration retain a full scene snapshot.
 `mdp_state.episode_step`, with shape `[num_envs, 1]`, describing the returned
 observation: zero on reset and the successor count on step. Output snapshots
 own their storage and remain valid after later steps and partial resets.
+
+Passive objects use `EnvironmentConfig.objects`. Bind physical fields and
+contact sensors through named scene entities. Use `scene.robots` for action
+dimensions, actuator targets and action symmetry. Object variants preserve
+ordered body and joint topology across worlds. See the
+[simulation guide](docs/simulation.md#passive-objects-and-per-world-variants)
+for the backend-specific geometry constraints and replay contract.

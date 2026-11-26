@@ -170,7 +170,7 @@ class SteelSim:
                 torch.cat(
                     [
                         getattr(entity, name).reshape(-1)
-                        for entity in scene.entities.values()
+                        for entity in scene.robots.values()
                     ]
                 )
                 .int()

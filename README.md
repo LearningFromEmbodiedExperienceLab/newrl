@@ -61,7 +61,8 @@ headless run, `viewer=viser` for Viser, or `viewer.port=0` to request a free por
   camera images, markers, video recording, and a timeline for rewinding and
   branching. [Viewer guide](docs/viewer.md)
 - **Research projects.** Install separately managed projects with their own
-  dependencies and namespaced presets. [Project guide](docs/projects.md)
+  dependencies and namespaced presets. [Project guide](docs/projects.md) ·
+  [Robot contribution guide](docs/robots.md)
 - **Simulation APIs.** Stateful and stateless environments support explicit
   resets and checkpoints. [Design overview](design.md) ·
   [Benchmark guide](benchmarks/README.md)

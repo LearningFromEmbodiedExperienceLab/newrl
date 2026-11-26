@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 
 import newton
 
+from .assets.objects import BoxConfig, CylinderConfig, ObjectConfig, ObjectVariants, SphereConfig, TableConfig
 from .mdp.base import MDP, ObservationGroup, RewardGroup
 from .mdp.episode_ends import HeightTermination, TiltTermination, Timeout
 from .mdp.observations import (
@@ -37,12 +38,12 @@ from .mdp.episode_ends import ClipEnd, TrackingDeviation
 from .mdp.observations import ReferenceMotion
 from .mdp.rewards import JointLimit, TrackBodyMotion
 from .randomization import BodyMassScale, DomainRandomizationConfig, JointGainScale, ShapeFriction
-from .robots import (
+from .assets.robots import (
     RobotConfig, assetx_as2, assetx_as2w, assetx_as2w_sphere,
     assetx_m20s, assetx_spot, newton_anymal_c,
     assetx_g1,
 )
-from .sensors import SensorConfig, TerrainContactConfig
+from .sensors import SensorConfig, ContactSensorConfig
 from .solver_adapters import MujocoSimConfig, SteelSimConfig
 from .terrains import (
     BorderConfig,
@@ -76,6 +77,8 @@ class EnvironmentConfig:
     robots: dict[str, Callable[[], RobotConfig]] = field(
         default_factory=dict, metadata={"item_preset_group": "robot"}
     )
+    objects: dict[str, ObjectConfig | ObjectVariants] = field(default_factory=dict)
+    object_seed: int = 0
     mdp: MDP = field(default_factory=MDP)
     output_physical_fields: tuple[tuple[str, str], ...] = ()
     output_mdp_fields: tuple[str, ...] = ()
@@ -112,6 +115,35 @@ def locomotion_mdp(mdp_type: type[MDP] = MDP, base: str = "base") -> MDP:
         },
         # rewards={"survival": RewardGroup({"survival": Survival(weight=1.0)})},
         truncations={"timeout": Timeout(1000)},
+    )
+
+
+def G1Tabletop() -> EnvironmentConfig:
+    """A survival-only example with one passive tabletop object per world."""
+    x, y = 0.85, 0.0
+    table = TableConfig(position=(x, y, 0))
+    top = table.height
+    return EnvironmentConfig(
+        name="G1Tabletop",
+        num_envs=4,
+        solver=SteelSimConfig(),
+        robots={"robot": assetx_g1},
+        objects={
+            "table": table,
+            "object": ObjectVariants((
+                BoxConfig(half_extents=(0.09, 0.06, 0.04), position=(x, y, top + 0.04)),
+                SphereConfig(radius=0.065, position=(x, y, top + 0.065)),
+                CylinderConfig(radius=0.05, half_height=0.10, position=(x, y, top + 0.10)),
+            )),
+        },
+        mdp=MDP(
+            observations={
+                "proprio": ObservationGroup({"joint_pos": EntityField("robot", "joint_pos")}),
+                "privileged": ObservationGroup({"object_pose": EntityField("object", "body_pose_w")}),
+            },
+            rewards={"survival": RewardGroup({"survival": Survival(weight=1.0)})},
+            truncations={"timeout": Timeout(1000)},
+        ),
     )
 
 
@@ -320,7 +352,7 @@ def _velocity_locomotion(
         "tilt": TiltTermination(ProjectedGravity("robot", base)),
     }
     sensors = {
-        "feet_ground": TerrainContactConfig("robot", feet, track_air_time=True)
+        "feet_ground": ContactSensorConfig("robot", feet, track_air_time=True)
     }
     defaults = {
         "robots": {"robot": robot},
@@ -416,3 +448,5 @@ cs.store(
     AS2WLocomotion(name="AS2WSphereLocoFlat", num_envs=4096, sphere_wheels=True),
     group="task",
 )
+
+cs.store("G1Tabletop", G1Tabletop(), group="task")

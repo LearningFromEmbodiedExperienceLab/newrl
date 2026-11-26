@@ -107,8 +107,7 @@ class LAFAN1Dataset:
             if not files or any(file.suffix != ".csv" for file in files):
                 raise ValueError("LAFAN1_DATASET must be a CSV, CSV directory, or processed NPZ")
             if model_path is None:
-                from newrl.assets import cooked_robot
-                from newrl.robots import robot_model_dir
+                from newrl.assets.cooking import cooked_robot, robot_model_dir
 
                 model_path = cooked_robot("g1", robot_model_dir()) / "model.xml"
             digest = hashlib.sha256(Path(model_path).read_bytes())

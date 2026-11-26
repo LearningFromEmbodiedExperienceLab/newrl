@@ -17,7 +17,7 @@ class NameMatchingTests(unittest.TestCase):
     def test_g1_config_patterns_preserve_the_original_tracking_bodies(self):
         from newrl.algos.supermimic import SuperMimicConfig
         from newrl.configs import G1MotionTracking
-        from newrl.robots import assetx_g1
+        from newrl.assets.robots import assetx_g1
 
         names = assetx_g1().build().body_label
         original = ('pelvis','left_hip_roll_link','left_knee_link','left_ankle_roll_link',

@@ -1,4 +1,4 @@
-"""Reduce solved terrain contacts to per-body sensor readings."""
+"""Reduce solved contacts to per-body sensor readings."""
 
 from typing import TYPE_CHECKING
 
@@ -10,14 +10,13 @@ import warp as wp
 from tensordict import TensorDict
 
 if TYPE_CHECKING:
-    from newrl.scene import Scene
-    from newrl.scene import RobotEntity
+    from newrl.scene import Entity, Scene
     from newrl.visualizations.task import TaskVisualization
 
 
 
 @dataclass(frozen=True)
-class TerrainContactConfig:
+class ContactSensorConfig:
     entity: str
     body_names: str | tuple[str, ...]
     load_threshold: float = 1.0  # N
@@ -25,16 +24,18 @@ class TerrainContactConfig:
     track_air_time: bool = False
     track_contact_position: bool = False
 
+    counterpart: str | None = None  # None selects terrain shapes.
+
     def __post_init__(self) -> None:
         if not 0.0 < self.load_threshold < float("inf"):
             raise ValueError("load_threshold must be positive and finite")
 
-    def build(self, scene: "Scene") -> "TerrainContact":
-        return TerrainContact(self, scene.entities[self.entity])
+    def build(self, scene: "Scene") -> "ContactSensor":
+        return ContactSensor(self, scene.entities[self.entity])
 
 
 @wp.kernel
-def _sum_terrain_forces(matrix: wp.array2d[wp.vec3], force: wp.array[wp.vec3]) -> None:
+def _sum_forces(matrix: wp.array2d[wp.vec3], force: wp.array[wp.vec3]) -> None:
     row = wp.tid()
     total = wp.vec3(0.0)
     for column in range(matrix.shape[1]):
@@ -83,7 +84,7 @@ def _update_contact_history(
     previous[i] = loaded
 
 
-class TerrainContact:
+class ContactSensor:
     @property
     def fields(self) -> tuple[str, ...]:
         result = ["force_w", "loaded"]
@@ -103,7 +104,7 @@ class TerrainContact:
             or self.config.track_contact_position
         )
 
-    def __init__(self, config: TerrainContactConfig, entity: "RobotEntity") -> None:
+    def __init__(self, config: ContactSensorConfig, entity: "Entity") -> None:
         self.config = config
         indices, _ = entity.find_bodies(config.body_names)
         self.body_ids = entity.body_indices[:, indices]
@@ -115,10 +116,17 @@ class TerrainContact:
 
     def initialize(self, scene: "Scene") -> None:
         model = scene.model
+        counterpart = self.config.counterpart
+        if counterpart is None:
+            targets = {"counterpart_shapes": scene.terrain_shapes}
+        else:
+            if counterpart not in scene.entities:
+                raise ValueError(f"Unknown contact counterpart {counterpart!r}")
+            targets = {"counterpart_bodies": scene.entities[counterpart].body_indices.flatten().tolist()}
         self.sensor = newton.sensors.SensorContact(
             model,
             sensing_bodies=self.body_ids.flatten().tolist(),
-            counterpart_shapes=scene.terrain_shapes,
+            **targets,
             measure_total=False,
         )
         self.force = wp.zeros(self.body_ids.numel(), dtype=wp.vec3, device=model.device)
@@ -170,7 +178,7 @@ class TerrainContact:
             observables=observables,
         )
         wp.launch(
-            _sum_terrain_forces,
+            _sum_forces,
             dim=self.force.size,
             inputs=[self.sensor.force_matrix],
             outputs=[self.force],

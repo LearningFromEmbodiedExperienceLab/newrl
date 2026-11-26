@@ -12,7 +12,7 @@ from .observations import BodyAngularVelocity, BodyLinearVelocity, EntityField
 
 if TYPE_CHECKING:
     from newrl.scene import Scene
-    from newrl.scene import RobotEntity
+    from newrl.scene import Entity
 
 
 def _weighted_range(weight: float, maximum: float = inf) -> tuple[float, float]:
@@ -55,7 +55,7 @@ class ActionRate:
 
 
 def _resolve_joint_indices(
-    entity: "RobotEntity",
+    entity: "Entity",
     joint_names: str | Sequence[str],
     preserve_order: str | Sequence[str] = False,
 ) -> torch.Tensor:

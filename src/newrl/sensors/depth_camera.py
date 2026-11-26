@@ -16,7 +16,7 @@ from .camera import camera_refresh_mask
 
 if TYPE_CHECKING:
     from newrl.scene import Scene
-    from newrl.scene import RobotEntity
+    from newrl.scene import Entity
 
 _MIN_FP16_DEPTH = wp.constant(2.0 ** -24)
 
@@ -95,7 +95,7 @@ class DepthCamera:
     def __init__(
         self,
         config: DepthCameraConfig,
-        entity: "RobotEntity",
+        entity: "Entity",
         model: newton.Model,
     ) -> None:
         self.config = config

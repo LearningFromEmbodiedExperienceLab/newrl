@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import newton
 
-from newrl.robots import ActuatorGroup, RobotConfig, assetx_as2, assetx_g1, assetx_spot, scalar_joints
+from newrl.assets.robots import ActuatorGroup, RobotConfig, assetx_as2, assetx_g1, assetx_spot, scalar_joints
 
 
 class ActuatorSpecTests(unittest.TestCase):

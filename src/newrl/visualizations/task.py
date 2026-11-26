@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Protocol, Self, TYPE_CHECKING
 
 from .markers import Marker
-from newrl.sensors.contact import TerrainContact
+from newrl.sensors.contact import ContactSensor
 
 if TYPE_CHECKING:
     from tensordict import TensorDict
@@ -53,7 +53,7 @@ class TaskVisualizationPlayback:
                 if not sensor_components:
                     continue
                 if name not in active_sensors:
-                    if isinstance(sensor, TerrainContact):
+                    if isinstance(sensor, ContactSensor):
                         raise ValueError(f"Contact visualization requires solver contact tracking for {name}")
                     sensor.initialize(env.scene)
                     active_sensors.add(name)

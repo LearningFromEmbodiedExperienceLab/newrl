@@ -15,7 +15,7 @@ from newrl.commands import train as _module
 from newrl.commands.train import TrainConfig
 from newrl.configs import EnvironmentConfig
 from newrl.env import StatefulEnvironment
-from newrl.robots import newton_anymal_c
+from newrl.assets.robots import newton_anymal_c
 from newrl.solver_adapters import MujocoSimConfig, SteelSimConfig
 from newrl.utils.config import cs, load_config, main, save_config
 from newrl.utils.logging import RunLogger, WandbConfig

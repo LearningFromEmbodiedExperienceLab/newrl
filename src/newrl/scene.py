@@ -1,7 +1,8 @@
-"""Replicate a Newton scene and expose named robot tensors."""
+"""Build batched Newton worlds and expose named entity tensors."""
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from random import Random
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -11,9 +12,10 @@ import warp as wp
 from tensordict import TensorDict
 
 from .mdp.actions import JointPositionAction
+from .assets.objects import ObjectVariants
 from .randomization import DomainRandomization
-from .robots import scalar_joints
-from .sensors import FrameCamera, Sensor, TerrainContact
+from .assets.robots.config import scalar_joints
+from .sensors import FrameCamera, Sensor, ContactSensor
 from .terrains import Terrain, TerrainConfig
 from .utils.symmetry import SymmetryTransform
 from .utils.string import resolve_scene_names
@@ -23,20 +25,17 @@ if TYPE_CHECKING:
     from newrl.mdp.base import MDP
 
 
-@dataclass
-class RobotEntity:
+@dataclass(kw_only=True)
+class Entity:
     joint_names: tuple[str, ...]
     body_names: tuple[str, ...]
     joint_q_indices: torch.Tensor
     joint_qd_indices: torch.Tensor
-    joint_target_indices: torch.Tensor
     body_indices: torch.Tensor
     root_q_indices: torch.Tensor | None
     default_position: torch.Tensor
-    action: JointPositionAction
     joint_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
     body_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
-    velocity_mask: torch.Tensor | None = None
     root_qd_indices: torch.Tensor | None = None
     model_parameters: dict[str, torch.Tensor] = field(default_factory=dict)
 
@@ -133,6 +132,13 @@ class RobotEntity:
             device=self.joint_q_indices.device,
         )
 
+
+@dataclass(kw_only=True)
+class RobotEntity(Entity):
+    joint_target_indices: torch.Tensor
+    action: JointPositionAction
+    velocity_mask: torch.Tensor | None = None
+
     def write_action(self, control: newton.Control, action: torch.Tensor) -> None:
         position = self.action(action, self.default_position)
         if self.velocity_mask is not None:
@@ -150,33 +156,58 @@ class Scene:
         self.config = config
         self.sim_dt = config.sim_dt
         self.control_dt = config.sim_dt * config.substeps
-        template = newton.ModelBuilder(up_axis=newton.Axis.Z)
-        newton.solvers.SolverMuJoCo.register_custom_attributes(template)
+        overlap = config.robots.keys() & config.objects.keys()
+        if overlap:
+            raise ValueError(f"Robot and object names overlap: {sorted(overlap)}")
+        robots = {name: factory() for name, factory in config.robots.items()}
+        components = {name: [cfg.build()] for name, cfg in robots.items()}
+        rng = Random(config.object_seed)
+        self.object_variant_ids: dict[str, tuple[int, ...]] = {}
+        for name, cfg in config.objects.items():
+            if isinstance(cfg, ObjectVariants):
+                options = [variant.build() for variant in cfg.variants]
+                for index, option in enumerate(options[1:], 1):
+                    for attr in ("body_label", "joint_label", "joint_type", "joint_parent",
+                                 "joint_child", "joint_dof_dim", "articulation_start"):
+                        if getattr(options[0], attr) != getattr(option, attr):
+                            raise ValueError(f"Object {name!r} variant {index} differs in {attr}")
+                self.object_variant_ids[name] = tuple(
+                    rng.choices(range(len(options)), weights=cfg.weights, k=config.num_envs)
+                )
+            else:
+                options = [cfg.build()]
+            if any(not option.body_count for option in options):
+                raise ValueError(f"Object {name!r} must have a rigid body")
+            components[name] = options
+
         layouts = {}
-        for name, factory in config.robots.items():
-            robot_cfg = factory()
-            robot = robot_cfg.build()
-            joints = [template.joint_count + j for j in scalar_joints(robot)]
-            bodies = range(template.body_count, template.body_count + robot.body_count)
-            roots = [
-                template.joint_count + j
-                for j, kind in enumerate(robot.joint_type)
-                if kind == newton.JointType.FREE
-            ]
-            labels = [robot.joint_label[joint] for joint in scalar_joints(robot)]
-            template.add_builder(robot, label_prefix=name)
-            layouts[name] = (
-                joints,
-                bodies,
-                roots,
-                robot_cfg.action_scales(labels),
-                robot_cfg.joint_mirror,
-                robot_cfg.body_mirror,
-                robot_cfg.velocity_joints,
-            )
+        templates: dict[tuple[int, ...], newton.ModelBuilder] = {}
+
+        def world_template(selection: tuple[int, ...]) -> newton.ModelBuilder:
+            if selection in templates:
+                return templates[selection]
+            world = newton.ModelBuilder(up_axis=newton.Axis.Z)
+            newton.solvers.SolverMuJoCo.register_custom_attributes(world)
+            chosen = dict(zip(self.object_variant_ids, selection, strict=True))
+            for name, options in components.items():
+                part = options[chosen.get(name, 0)]
+                if name not in layouts:
+                    joints = [world.joint_count + j for j in scalar_joints(part)]
+                    bodies = range(world.body_count, world.body_count + part.body_count)
+                    roots = [world.joint_count + j for j, kind in enumerate(part.joint_type)
+                             if kind == newton.JointType.FREE and part.joint_parent[j] == -1]
+                    layouts[name] = joints, bodies, roots
+                world.add_builder(part, label_prefix=name)
+            templates[selection] = world
+            return world
 
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-        builder.replicate(template, copy_count=config.num_envs)
+        if self.object_variant_ids:
+            for selection in zip(*self.object_variant_ids.values(), strict=True):
+                builder.add_world(world_template(selection))
+        else:
+            builder.replicate(world_template(()), copy_count=config.num_envs)
+        template = next(iter(templates.values()))
         builder.default_shape_cfg.ke = config.ground_stiffness
         builder.default_shape_cfg.kd = config.ground_damping
         terrain_start = builder.shape_count
@@ -204,55 +235,54 @@ class Scene:
         self.spawn_locations = torch.as_tensor(
             self.terrain.spawn_locations, dtype=torch.float32, device=device
         ).reshape(-1, 3)
-        worlds = torch.arange(config.num_envs, device=device)[:, None]
-        self.entities: dict[str, RobotEntity] = {}
-        for name, layout in layouts.items():
-            joints, bodies, roots, scale, joint_mirror, body_mirror, velocity_joints = (
-                layout
-            )
-            joint_ids = worlds * template.joint_count + torch.tensor(
-                joints, device=device, dtype=torch.long
-            )
-            body_ids = worlds * template.body_count + torch.tensor(
-                list(bodies), device=device, dtype=torch.long
-            )
+        joint_offsets = wp.to_torch(model.joint_world_start)[:config.num_envs, None].long()
+        body_offsets = wp.to_torch(model.body_world_start)[:config.num_envs, None].long()
+        self.entities: dict[str, Entity] = {}
+        self.robots: dict[str, RobotEntity] = {}
+        for name, (joints, bodies, roots) in layouts.items():
+            joint_ids = joint_offsets + torch.tensor(joints, device=device, dtype=torch.long)
+            body_ids = body_offsets + torch.tensor(list(bodies), device=device, dtype=torch.long)
             joint_q_indices = wp.to_torch(model.joint_q_start)[joint_ids].long()
             joint_qd_indices = wp.to_torch(model.joint_qd_start)[joint_ids].long()
-            joint_target_indices = wp.to_torch(model.joint_target_q_start)[joint_ids].long()
             root_q_indices = None
             root_qd_indices = None
             if len(roots) == 1:
-                root_joint_ids = worlds * template.joint_count + roots[0]
+                root_joint_ids = joint_offsets + roots[0]
                 root_start = wp.to_torch(model.joint_q_start)[root_joint_ids].long()
                 root_q_indices = root_start + torch.arange(7, device=device)
                 root_dof = wp.to_torch(model.joint_qd_start)[root_joint_ids].long()
                 root_qd_indices = root_dof + torch.arange(6, device=device)
-            velocity_mask = None
-            if velocity_joints:
-                labels = tuple(template.joint_label[j] for j in joints)
-                indices = resolve_scene_names(velocity_joints, labels)
-                velocity_mask = torch.tensor(
-                    [index in indices for index in range(len(joints))],
-                    device=device,
-                    dtype=torch.bool,
-                )
-            self.entities[name] = RobotEntity(
-                joint_names=tuple(template.joint_label[j] for j in joints),
+            labels = tuple(template.joint_label[j] for j in joints)
+            fields = dict(
+                joint_names=labels,
                 body_names=tuple(template.body_label[b] for b in bodies),
                 joint_q_indices=joint_q_indices,
                 joint_qd_indices=joint_qd_indices,
-                joint_target_indices=joint_target_indices,
                 body_indices=body_ids,
                 root_q_indices=root_q_indices,
                 root_qd_indices=root_qd_indices,
                 default_position=wp.to_torch(model.joint_q)[joint_q_indices],
-                action=JointPositionAction(
-                    torch.tensor(scale, dtype=torch.float32, device=device)
-                ),
-                joint_mirror=joint_mirror,
-                body_mirror=body_mirror,
-                velocity_mask=velocity_mask,
             )
+            if name in robots:
+                robot = robots[name]
+                part = components[name][0]
+                local_labels = [part.joint_label[j] for j in scalar_joints(part)]
+                velocity_mask = None
+                if robot.velocity_joints:
+                    indices = resolve_scene_names(robot.velocity_joints, labels)
+                    velocity_mask = torch.zeros(len(labels), dtype=torch.bool, device=device)
+                    velocity_mask[indices] = True
+                self.robots[name] = RobotEntity(
+                    **fields,
+                    joint_target_indices=wp.to_torch(model.joint_target_q_start)[joint_ids].long(),
+                    action=JointPositionAction(torch.tensor(robot.action_scales(local_labels),
+                                                           dtype=torch.float32, device=device)),
+                    joint_mirror=robot.joint_mirror, body_mirror=robot.body_mirror,
+                    velocity_mask=velocity_mask,
+                )
+                self.entities[name] = self.robots[name]
+            else:
+                self.entities[name] = Entity(**fields)
 
         self.randomization: DomainRandomization | None = None
         self.sensors: dict[str, Sensor] = {}
@@ -278,12 +308,12 @@ class Scene:
             "joint_torque" in self.physical_read_plan.get(name, ())
             for name in self.entities
         )
-        self.contact_sensors: dict[str, TerrainContact] = {}
+        self.contact_sensors: dict[str, ContactSensor] = {}
         self.cameras: dict[str, FrameCamera] = {}
         for name, sensor in self.sensors.items():
             if name in self.physical_read_plan:
                 sensor.initialize(self)
-                if isinstance(sensor, TerrainContact):
+                if isinstance(sensor, ContactSensor):
                     self.contact_sensors[name] = sensor
                 if isinstance(sensor, FrameCamera):
                     self.cameras[name] = sensor
@@ -301,7 +331,7 @@ class Scene:
     def action_symmetry_transform(self) -> SymmetryTransform:
         """Build a CPU transform in the same entity and joint order as actions."""
         transforms = []
-        for name, entity in self.entities.items():
+        for name, entity in self.robots.items():
             try:
                 transform = entity.joint_symmetry_transform()
                 default = entity.default_position[0].cpu()
@@ -327,11 +357,10 @@ class Scene:
             "joint_vel",
             "body_pose_w",
             "body_twist_w",
-            "joint_torque",
             "projected_gravity",
         }
         fields_by_name = {
-            name: tuple(sorted(supported | entity.model_parameters.keys()))
+            name: tuple(sorted(supported | entity.model_parameters.keys() | ({"joint_torque"} if name in self.robots else set())))
             for name, entity in self.entities.items()
         }
         fields_by_name.update(

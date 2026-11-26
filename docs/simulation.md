@@ -34,7 +34,7 @@ For diagnostics, request `("feet_ground", "force_w")` or
 solved terrain force in world coordinates on the final physics substep.
 Immediately after reset, selected worlds report zero force until they step.
 
-`TerrainContactConfig` can enable `track_first_contact`, `track_air_time`, and
+`ContactSensorConfig` can enable `track_first_contact`, `track_air_time`, and
 `track_contact_position`. The sensor then samples every physics substep. A
 first-contact event records any unloaded-to-loaded transition during the
 control step, including contact on the first substep after reset. Air time
@@ -114,6 +114,9 @@ substep in training.
 
 ## Robot asset cache
 
+See the [robot contribution guide](robots.md) for adding robot definitions
+and asset recipes to NewRL or a research project.
+
 Robot bundles are fetched and cooked lazily into `.cache/robots` under the
 NewRL checkout (`ROBOT_MODEL_DIR` overrides this location). Complete bundles
 are reused offline, even after recipe or assetx source changes. Missing or
@@ -126,3 +129,76 @@ newrl assets rebuild spot as2w
 
 Robot names are `g1`, `spot`, `as2`, `as2w`, `as2w_sphere`, and `m20s`.
 Rebuilding may fetch vendor sources through assetx's separate vendor cache.
+
+## Passive objects and per-world variants
+
+Run the tabletop example to see a G1 and a fixed four-legged table in each
+world. The four default worlds include all three tabletop shapes (box, sphere
+and cylinder). Steel simulates the mixed primitives, and every transition
+earns one survival point.
+
+```sh
+newrl play task=G1Tabletop
+```
+
+Add named configs to `EnvironmentConfig.objects`. A box, sphere, cylinder,
+or chair has one rigid body. A door exposes a revolute `hinge` and a drawer
+exposes a prismatic `slide`. Both fixtures default to a fixed base.
+Positions are in meters and orientations are XYZW quaternions.
+
+```python
+from newrl.configs import G1Locomotion
+from newrl.assets.objects import BoxConfig, DoorConfig, ObjectVariants
+from newrl.sensors import ContactSensorConfig
+
+task = G1Locomotion(
+    num_envs=32,
+    objects={
+        "parcel": ObjectVariants((
+            BoxConfig(position=(1, 0, 0.2)),
+            BoxConfig(position=(1, 0, 0.2), half_extents=(0.2, 0.1, 0.15)),
+        ), weights=(3, 1)),
+        "door": DoorConfig(position=(2, 0, 0)),
+    },
+    object_seed=17,
+    sensors={"parcel_touch": ContactSensorConfig("robot", ".*wrist.*", counterpart="parcel")},
+    output_physical_fields=(("door", "joint_pos"), ("parcel_touch", "loaded")),
+)
+```
+
+For a rigid or articulated USD, use `USDObjectConfig(asset=path)`.
+The default preserves the asset's root attachment. Set `fixed=True` or
+`fixed=False` to request a fixed or floating base on import. Projects can
+supply a config with a `build() -> newton.ModelBuilder` method and resolve
+their own assets there. Use body and joint labels that remain stable across
+variants. Scalar joint observations and reset overrides address hinges and
+slides by entity order. Free-root pose and twist overrides require one free
+root. Model defaults apply on reset and velocities default to zero. Object
+motion participates in selective reset and stateless replay. Only robots
+consume action columns. Goals and task progress belong in the MDP state.
+
+### Heterogeneity support
+
+The scene samples each object's variant at construction using `object_seed`.
+Inspect `scene.object_variant_ids[name][world]` for its index. Resets keep
+that assignment. Replay requires the same scene layout and assignment.
+Without variants, Newton replicates one template in bulk. With variants,
+NewRL builds each asset once, caches templates for the sampled combinations
+and adds the selected template to each world.
+
+All variants of a named object must share ordered body and joint names, joint
+types, connectivity, DOF dimensions and articulation boundaries. This keeps
+entity tensors, policy inputs and per-world simulator checkpoints rectangular.
+Mass, density, friction, geometry dimensions and initial poses can differ.
+With shape friction randomization, each world exposes its matched shapes in
+model order. Shorter rows have trailing zeros in the physical snapshot.
+
+| Backend | Geometry across worlds |
+| --- | --- |
+| Steel | Each world supplies its own shapes. A single-body chair assembled from six boxes can share a batch with a single box. Steel groups articulation work by size internally. NewRL currently requires matching articulation topology for its batched state API. |
+| MuJoCo Warp | Corresponding primitive slots must match body, type, contact dimension and priority. Primitive sizes can vary. Newton can pad missing mesh slots. Native MuJoCo contacts also require compatible collision flags, groups and exclusions. Padding has restrictions with explicit MuJoCo contact pairs. |
+
+For topology heterogeneity, a future design would need per-world entity
+bindings with validity masks or separate batches per topology, along with
+corresponding observation, action and checkpoint layouts. Backend geometry
+support alone does not supply those task-level contracts.

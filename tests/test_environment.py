@@ -11,7 +11,7 @@ from tensordict import TensorDict
 from newrl.configs import (
     AS2Locomotion, AS2WLocomotion, AnymalLocomotion, G1Locomotion, M20SLocomotion, SpotLocomotion,
 )
-from newrl.sensors import TerrainContactConfig
+from newrl.sensors import ContactSensorConfig
 from newrl.env import StatefulEnvironment, StatelessEnvironment
 from newrl.mdp.episode_ends import Timeout
 from newrl.solver_adapters import MujocoSimConfig, SteelSimConfig
@@ -151,7 +151,7 @@ class EnvironmentTests(unittest.TestCase):
                         )
                     ),
                 )
-                cfg.sensors["feet_ground"] = TerrainContactConfig(
+                cfg.sensors["feet_ground"] = ContactSensorConfig(
                     "robot",
                     r"(LF|LH|RF|RH)_FOOT",
                     track_air_time=True,
@@ -386,8 +386,9 @@ class EnvironmentTests(unittest.TestCase):
         )
         velocity = transition["physical_state", "robot", "joint_vel"]
         energy = _reward_term(env, transition, "regularization", "joint_energy1")
+        weight = dict(env.mdp.rewards["regularization"].terms)["joint_energy1"].weight
         torch.testing.assert_close(
-            energy, -0.01 * (torque * velocity).abs().sum(-1, keepdim=True)
+            energy, -weight * (torque * velocity).abs().sum(-1, keepdim=True)
         )
         self.assertGreater(torque.abs().max().item(), 0)
         first_sim, first_mdp, first = env.step(sim, mdp, inputs)
