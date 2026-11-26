@@ -12,6 +12,7 @@ import warp as wp
 import yaml
 
 from .assets import cooked_robot, cooked_usd
+from .utils.config import cs
 from .utils.string import resolve_scene_names
 
 ValueSpec = float | dict[str, float]
@@ -525,3 +526,15 @@ def assetx_m20s() -> RobotConfig:
             "hr_wheel": ("hl_wheel", 1),
         },
     )
+
+
+for _name, _factory in (
+    ("anymal_c", newton_anymal_c),
+    ("g1", assetx_g1),
+    ("spot", assetx_spot),
+    ("as2", assetx_as2),
+    ("as2w", assetx_as2w),
+    ("as2w_sphere", assetx_as2w_sphere),
+    ("m20s", assetx_m20s),
+):
+    cs.store(_name, _factory, group="robot")

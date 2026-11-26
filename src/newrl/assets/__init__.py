@@ -29,6 +29,7 @@ from assetx import (
     Transform,
 )
 from assetx.cook import Recipe, cook
+from newrl.utils.config import cs
 from assetx.conversion.urdf2mjcf import urdf_to_mjcf
 
 MENAGERIE_SPOT = (
@@ -186,14 +187,15 @@ def build_g1(vendor_dir: Path) -> MujocoAsset:
     ]).transform(MujocoAsset.from_file(vendor_dir / "g1.xml"))
 
 
-RECIPES = {
+for _name, _recipe in {
     "g1": Recipe("g1", build_g1, MJLAB_G1),
     "spot": Recipe("spot", build_spot, MENAGERIE_SPOT),
     "as2": Recipe("as2", build_as2, UNITREE_AS2),
     "as2w": Recipe("as2w", build_as2w, UNITREE_AS2W),
     "as2w_sphere": Recipe("as2w_sphere", build_as2w_sphere, UNITREE_AS2W),
     "m20s": Recipe("m20s", build_m20s, DEEP_M20S),
-}
+}.items():
+    cs.store(_name, _recipe, group="asset")
 
 
 def cooked_robot(name: str, cache: Path, *, rebuild: bool = False) -> Path:
@@ -202,9 +204,14 @@ def cooked_robot(name: str, cache: Path, *, rebuild: bool = False) -> Path:
     Assetx hashes the entire recipe module and its library sources. That hash
     must not invalidate ready robot assets during ordinary task startup.
     """
-    if name not in RECIPES:
-        raise KeyError(f"No robot recipe {name!r}")
-    bundle = Path(cache) / name
+    recipes = cs.definitions("asset")
+    if name not in recipes:
+        raise KeyError(f"No robot recipe {name!r}. Known: {sorted(recipes)}")
+    if not isinstance(recipes[name], Recipe):
+        raise TypeError(f"Asset preset {name!r} must be an assetx Recipe")
+    if any(not part or part in (".", "..") or "/" in part or "\\" in part for part in name.split(":")):
+        raise ValueError(f"Invalid asset name {name!r}")
+    bundle = Path(cache).joinpath(*name.split(":"))
     if not rebuild:
         try:
             manifest = json.loads((bundle / 'assetx.json').read_text())
@@ -222,7 +229,7 @@ def cooked_robot(name: str, cache: Path, *, rebuild: bool = False) -> Path:
         except (OSError, ValueError):
             pass
     # Force also repairs incomplete bundles whose source hash is still current.
-    return cook(name, bundle, get_recipe=RECIPES.get, usd=True, force=True)
+    return cook(name, bundle, get_recipe=recipes.__getitem__, usd=True, force=True)
 
 
 def cooked_usd(bundle: Path) -> Path:

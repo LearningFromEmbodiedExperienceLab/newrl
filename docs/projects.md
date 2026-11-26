@@ -42,3 +42,30 @@ through the `newrl.projects` entry-point group.
 Run the commands from the project directory to keep outputs and downloads
 there. Projects can provide their own training and playback scripts when the
 built-in commands don't fit their workflow.
+
+
+## Project robots and assets
+
+Register an importable, zero-argument robot factory in the project callback.
+
+```python
+def register(store, project):
+    store.store(f"{project}:MyRobot", my_robot, group="robot")
+```
+
+The factory returns a `RobotConfig` with a resolved USD asset path. It can use
+files shipped with the project, download from a project-managed store, or
+use assetx. Registration and listing are lazy. Checkpoints preserve the
+factory's import path, so define it at module scope.
+
+```sh
+newrl robots list
+newrl play task=AS2WSphereLocoFlat task.robots.robot=my_project:MyRobot
+```
+
+Projects using assetx can additionally register a namespaced `Recipe` under
+`asset`. Set its name to the registered name and call
+`cooked_robot(name, robot_model_dir())` in the factory. Cooked bundles use
+namespace subdirectories. List and explicitly rebuild recipes with
+`newrl assets list` and `newrl assets rebuild my_project:MyRobot`.
+Projects control acquisition of all other assets through their own factories.

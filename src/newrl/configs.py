@@ -73,7 +73,9 @@ class EnvironmentConfig:
     terrain: TerrainConfig | str | Callable[[newton.ModelBuilder], None] = field(
         default_factory=PlaneTerrainConfig
     )
-    robots: dict[str, Callable[[], RobotConfig]] = field(default_factory=dict)
+    robots: dict[str, Callable[[], RobotConfig]] = field(
+        default_factory=dict, metadata={"item_preset_group": "robot"}
+    )
     mdp: MDP = field(default_factory=MDP)
     output_physical_fields: tuple[tuple[str, str], ...] = ()
     output_mdp_fields: tuple[str, ...] = ()

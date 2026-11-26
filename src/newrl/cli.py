@@ -19,6 +19,9 @@ def build_parser() -> argparse.ArgumentParser:
         command.set_defaults(config_command=f"newrl.commands.{module}", config_schema=schema)
     assets = commands.add_parser('assets', help='Manage cached robot assets')
     asset_commands = assets.add_subparsers(dest='assets_command', required=True)
+    asset_commands.add_parser("list", help="List registered cooking recipes")
+    robots = commands.add_parser("robots", help="Discover registered robot factories")
+    robots.add_subparsers(dest="robots_command", required=True).add_parser("list")
     rebuild = asset_commands.add_parser('rebuild', help='Explicitly rebuild cooked robot bundles')
     rebuild.add_argument('names', nargs='+', metavar='ROBOT')
     project = commands.add_parser("project", help="Manage research projects")
@@ -49,15 +52,24 @@ def main(argv: list[str] | None = None) -> None:
             import_module(args.config_command).main(args.overrides)
         except ConfigError as error:
             parser.error(str(error))
-    elif args.command == 'assets':
-        from newrl.assets import RECIPES, cooked_robot
+    elif args.command in ("assets", "robots"):
+        from newrl.projects import load_projects
+        from newrl.assets import cooked_robot
         from newrl.robots import robot_model_dir
+        from newrl.utils.config import cs
 
-        unknown = set(args.names) - RECIPES.keys()
-        if unknown:
-            parser.error(f"Unknown robots: {', '.join(sorted(unknown))}. Choose from: {', '.join(RECIPES)}")
-        for name in dict.fromkeys(args.names):
-            print(f'Rebuilt {name}: {cooked_robot(name, robot_model_dir(), rebuild=True)}')
+        load_projects()
+        group = "asset" if args.command == "assets" else "robot"
+        names = cs.names(group)
+        if args.command == "robots" or args.assets_command == "list":
+            for name in names:
+                print(name)
+        else:
+            unknown = set(args.names) - set(names)
+            if unknown:
+                parser.error(f"Unknown robots: {', '.join(sorted(unknown))}. Choose from: {', '.join(names)}")
+            for name in dict.fromkeys(args.names):
+                print(f"Rebuilt {name}: {cooked_robot(name, robot_model_dir(), rebuild=True)}")
     else:
         from newrl.projects import create_project, install_project, list_projects, remove_project
 

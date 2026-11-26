@@ -13,6 +13,8 @@ use ``field(metadata={"preset_group": "group_name"})``. Nested selections
 match the longest registered group suffix, such as ``terrain.border`` in
 ``task.terrain.border``. Preset selections are applied before field overrides,
 so an override can appear before the selection that supplies its field.
+Mapping fields may declare callable item presets using metadata
+``{"item_preset_group": "group_name"}``.
 
 Values accept strings, numbers, booleans, ``None``, lists, tuples, and
 ``slice(start, stop, step)``. Quote the entire shell argument when it
@@ -348,6 +350,12 @@ def _assign(
         raise KeyError(f"{type(obj).__name__} has no field {head!r}")
     if rest:
         current = getattr(obj, head)
+        if len(rest) == 1 and "item_preset_group" in field.metadata and selection is _MISSING:
+            group = field.metadata["item_preset_group"]
+            item = cs.get(group, raw)
+            if not callable(item):
+                raise TypeError(f"Preset {group}/{raw} must be callable")
+            return dataclasses.replace(obj, **{head: {**current, rest[0]: item}})
         if field.metadata.get("named_pairs"):
             current = dict(current)
         return dataclasses.replace(
