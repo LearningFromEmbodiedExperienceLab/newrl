@@ -8,6 +8,28 @@ groups them by task in W&B, and stores logs under `outputs_train/<task>/wandb/`
 relative to the working directory. Use `logger.name` or `logger.group` to
 override the W&B display name or group.
 
+W&B groups training metrics into three sections.
+
+| Section | Horizontal axis | Metrics |
+| --- | --- | --- |
+| `learning` | `env_frames` | Episode return and length, reward, and termination and truncation rates |
+| `performance` | `iteration` | Rollout, update, and iteration time in ms, throughput in environment steps/s, and sampled GPU memory in MiB |
+| `diagnostics` | `iteration` | Learner metrics such as KL and losses, plus per-term rewards |
+
+`env_frames` counts transitions across all workers, including learner warmup.
+`iteration` counts completed training updates starting at one. Rollout
+throughput covers collection. Training throughput includes collection, episode
+statistics, and the update, excluding W&B logging and checkpoint saves.
+
+In the Performance section, you can overlay `rollout_ms` and `update_ms`
+in one panel. Use separate panels for the `*_peak_allocated_mib` series
+(PyTorch allocator peaks) and the `*_device_used_mib` series (whole-device
+usage at phase boundaries, including other processes). Both memory series
+come from rank zero and appear only on sampled iterations. The
+`diagnostics/profile` table holds stage timings, detailed memory samples,
+and buffer inventories with the iteration, environment frame count, and unit.
+It is logged in batches and flushed at run finish.
+
 The trainer saves a local checkpoint every 250 completed updates under
 `outputs_train/<task>/checkpoints/<run-id>/`. Set `checkpoint_interval=<updates>`
 to change the cadence or `checkpoint_interval=0` to disable saves.
@@ -58,8 +80,8 @@ When sampling ends, training writes a chart to
 For left–right actor regularization on the ANYmal, Spot, and AS2 flat tasks,
 select `algo=ppo_symaug` or set `algo=genpo algo.symmetry_coef=1.0`.
 PPO SymAug defaults to a coefficient of `1.0`. GenPO defaults to `0.0`.
-Both log the active penalty as
-`actor/symmetry_loss` and compute likelihood ratios on collected samples.
+Both log the active penalty in W&B as `diagnostics/actor/symmetry_loss`
+and compute likelihood ratios on collected samples.
 
 ## Checkpoints from W&B
 

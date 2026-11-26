@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Protocol, Self, TYPE_CHECKING
 
-from .markers import Marker
+from .markers import Marker, RobotGhost
 from newrl.sensors.contact import ContactSensor
 
 if TYPE_CHECKING:
@@ -27,12 +27,12 @@ class TaskVisualization(Protocol):
     def mdp_fields(self) -> tuple[str, ...]: ...
 
     @property
-    def markers(self) -> tuple[Marker, ...]: ...
+    def markers(self) -> tuple[Marker | RobotGhost, ...]: ...
 
     def _initialize(self, scene: Scene) -> Self: ...
 
     def sample(self, physical_state: TensorDict, mdp_state: TensorDict) -> Mapping[str, Tensor | tuple[Tensor, Tensor]]:
-        """Return arrow origin/vector rows or point positions and validity masks."""
+        """Return arrow rows, point positions and validity, or ghost body poses."""
         ...
 
 
@@ -67,9 +67,15 @@ class TaskVisualizationPlayback:
                 raise ValueError(f"Task visualization requires an active sensor: {name}")
             if "joint_torque" in fields and not env.scene.needs_torque:
                 raise ValueError("Task visualization requires joint torque in the environment read plan")
+        self.ghosts = set()
         for term in self.components:
             for marker in term.markers:
-                self.viewer.add_marker(marker)
+                if isinstance(marker, RobotGhost):
+                    body_ids = env.scene.entities[marker.entity].body_indices[0].tolist()
+                    self.viewer.add_ghost(marker, body_ids)
+                    self.ghosts.add(marker.name)
+                else:
+                    self.viewer.add_marker(marker)
 
     def update(self) -> None:
         if not self.components:
@@ -81,5 +87,7 @@ class TaskVisualizationPlayback:
                 for name, sample in term.sample(physical, env.mdp_state.select(*term.mdp_fields)).items():
                     if isinstance(sample, tuple):
                         self.viewer.set_marker_points(name, *sample)
+                    elif name in self.ghosts:
+                        self.viewer.set_ghost_poses(name, sample)
                     else:
                         self.viewer.set_marker_vectors(name, sample)

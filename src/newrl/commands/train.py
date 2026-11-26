@@ -284,17 +284,20 @@ def _train(cfg: TrainConfig) -> None:
             rollout_time, training_time, iteration_time = max_times(
                 (rollout_time, training_end - training_start, training_end - iteration_start), env.device
             )
+            rollout_frames = batch.numel() * world_size()
             metrics.update(
                 {
-                    "performance/rollout_fps": batch.numel() * world_size() / rollout_time,
+                    "performance/rollout_fps": rollout_frames / rollout_time,
                     "performance/rollout_time": rollout_time,
                     "performance/training_time": training_time,
                     "performance/iter_time": iteration_time,
+                    "performance/train_steps_per_s": rollout_frames / iteration_time,
+                    "env_frames": frames,
                 }
             )
-            frames += batch.numel() * world_size()
+            frames += rollout_frames
             if logger is not None:
-                logger.log({**metrics, "env_frames": frames}, step=iteration)
+                logger.log(metrics, step=iteration)
             summary = " ".join(f"{key}={value:.4f}" for key, value in metrics.items())
             if primary:
                 print(f"iter={iteration} env_frames={frames} {summary}", flush=True)

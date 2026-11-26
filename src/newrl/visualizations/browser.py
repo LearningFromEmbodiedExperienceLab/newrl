@@ -21,14 +21,14 @@ import numpy as np
 from newrl.sensors import DepthCamera, GaussianCamera
 from newrl.utils.gaussian_scene import resolve_gaussian_scene
 from .camera_preview import CameraPreviews
-from .markers import Marker, Pose, check_pose
+from .markers import Marker, Pose, RobotGhost, check_pose
 
 if TYPE_CHECKING:
     from torch import Tensor
 
 
 def _pack(values, dtype):
-    return base64.b64encode(np.asarray(values, dtype=dtype).tobytes()).decode("ascii")
+    return base64.b64encode(np.ascontiguousarray(values, dtype=dtype)).decode("ascii")
 
 
 class ViewportRecordings:
@@ -111,6 +111,8 @@ class BrowserViewer(newton.viewer.ViewerNull):
         self.clouds = []
         self.cloud_paths = {}
         self._markers = {}
+        self._ghosts = {}
+        self._ghost_poses = {}
         self._marker_poses = {}
         self._marker_vectors = {}
         self._marker_points = {}
@@ -367,11 +369,49 @@ class BrowserViewer(newton.viewer.ViewerNull):
 
     def add_marker(self, marker: Marker) -> None:
         """Register a marker before publishing the first viewport frame."""
-        if self.manifest is not None or marker.name in self._markers:
+        if self.manifest is not None or marker.name in self._markers or marker.name in self._ghosts:
             raise ValueError("Register each marker once before the first frame")
         if marker.body is not None and not 0 <= marker.body < len(self._body_world):
             raise ValueError("Marker body index is out of range")
         self._markers[marker.name] = marker
+
+    def add_ghost(self, ghost: RobotGhost, body_ids: list[int]) -> None:
+        """Reuse world zero's visual meshes as a template for each world's reference."""
+        if self.manifest is not None or ghost.name in self._ghosts or ghost.name in self._markers:
+            raise ValueError("Register each marker once before the first frame")
+        self._ghosts[ghost.name] = ghost, dict(zip(body_ids, range(len(body_ids)), strict=True))
+
+    def set_ghost_poses(self, name: str, poses: "Tensor") -> None:
+        _, slots = self._ghosts[name]
+        if poses.shape != (self.num_worlds, len(slots), 7):
+            raise ValueError("Ghost poses require shape [num_worlds, num_bodies, 7]")
+        values = poses.detach().cpu().numpy()
+        self._ghost_poses[name] = _pack(values, "<f4") if np.isfinite(values).all() else None
+
+    def _ghost_manifest(self):
+        specs = []
+        for ghost, slots in self._ghosts.values():
+            shapes = []
+            for batch in self._batches_by_name.values():
+                if batch.mesh not in self.meshes or not batch.flags & int(newton.ShapeFlags.VISIBLE):
+                    continue
+                matching = [
+                    (i, slots[parent])
+                    for i, shape in enumerate(batch.model_shapes)
+                    if (parent := self._shape_bodies[shape]) in slots
+                ]
+                if not matching:
+                    continue
+                indices, bodies = zip(*matching, strict=True)
+                indices = list(indices)
+                poses = batch.xforms.numpy()[indices].tolist()
+                scales = batch.scales.numpy()[indices].tolist()
+                shapes.extend(
+                    {"mesh": batch.mesh, "body": body, "pose": pose, "scale": scale}
+                    for body, pose, scale in zip(bodies, poses, scales, strict=True)
+                )
+            specs.append({**asdict(ghost), "bodyCount": len(slots), "shapes": shapes})
+        return specs
 
     def set_marker_pose(self, name: str, pose: Pose) -> None:
         """Update a marker in its original coordinate space for subsequent frames."""
@@ -452,7 +492,7 @@ class BrowserViewer(newton.viewer.ViewerNull):
     ):
         if hidden or xforms is None:
             return
-        self.poses[name] = xforms.numpy().tolist()
+        self.poses[name] = _pack(xforms.numpy(), "<f4")
         if self.manifest is None:
             self.instances[name] = {
                 "mesh": mesh,
@@ -503,6 +543,7 @@ class BrowserViewer(newton.viewer.ViewerNull):
                     "instances": self.instances,
                     "clouds": self.clouds,
                     "cameras": self.cameras,
+                    "ghosts": self._ghost_manifest(),
                     "markers": [
                         {
                             **asdict(marker),
@@ -543,6 +584,7 @@ class BrowserViewer(newton.viewer.ViewerNull):
                 "markerVectors": self._marker_vectors,
                 "markerPoints": self._marker_points,
                 "markerBodies": self._marker_bodies,
+                "ghostPoses": self._ghost_poses,
             },
             separators=(",", ":"),
         ).encode()

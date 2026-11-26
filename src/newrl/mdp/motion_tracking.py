@@ -14,6 +14,7 @@ from .base import MDP
 
 if TYPE_CHECKING:
     from newrl.scene import Scene
+    from newrl.visualizations.task import TaskVisualization
 
 
 @dataclass
@@ -61,6 +62,11 @@ class MotionTrackingMDP(MDP):
         state["motion_t"] = torch.zeros_like(worlds)
         state["clip_end"] = torch.zeros_like(worlds, dtype=torch.bool)
         return state
+
+    def visualizations(self) -> tuple["TaskVisualization", ...]:
+        from newrl.visualizations.reference import ReferenceGhost
+
+        return (*super().visualizations(), ReferenceGhost(self.entity))
 
     @property
     def replay_fields(self) -> tuple[str, ...]:

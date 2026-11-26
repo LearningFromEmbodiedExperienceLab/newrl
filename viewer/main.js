@@ -1,8 +1,10 @@
 import * as THREE from "three";
 import { WebGPURenderer } from "three/webgpu";
+import { uniform } from "three/tsl";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GaussianSplatRenderer, SplatMesh } from "gaussian-splat-lite";
 import { Axis3d, Camera, createIcons, Layers3 } from "lucide";
+import { buildGhost, buildMeshBatches, instanceUpdater } from "./batches.js";
 import { setupCameraPreview } from "./camera-preview.js";
 import { setupRecording } from "./recording.js";
 import { setupTimeline } from "./timeline.js";
@@ -161,12 +163,14 @@ async function main() {
   const forceWebGL = new URLSearchParams(location.search).get("renderer") === "webgl";
   const renderer = new WebGPURenderer({antialias: false, forceWebGL});
   await renderer.init();
+  renderer.shadowMap.enabled = true;
   document.querySelector("#backend").textContent = renderer.backend.isWebGPUBackend ? "WebGPU" : "WebGL2";
   const viewport = document.querySelector("#viewport");
   viewport.prepend(renderer.domElement);
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x1c2127);
   const camera = new THREE.PerspectiveCamera(55, 1, 0.04, 1000);
+  camera.coordinateSystem = renderer.coordinateSystem;
   camera.up.set(0, 0, 1);
   camera.position.set(3, -4, 2.3);
   const orbit = new OrbitControls(camera, renderer.domElement);
@@ -175,8 +179,20 @@ async function main() {
   orbit.enableDamping = true;
   scene.add(new THREE.HemisphereLight(0xffffff, 0x777f89, 2));
   const light = new THREE.DirectionalLight(0xffffff, 2);
-  light.position.set(3, -4, 7);
-  scene.add(light);
+  const lightOffset = new THREE.Vector3(5, -7, 12);
+  light.position.copy(lightOffset);
+  light.castShadow = true;
+  light.shadow.mapSize.set(1024, 1024);
+  Object.assign(light.shadow.camera, {
+    left: -9, right: 9, top: 9, bottom: -9, near: 0.1, far: 36,
+  });
+  light.shadow.camera.updateProjectionMatrix();
+  light.shadow.bias = -0.0003;
+  light.shadow.normalBias = 0.015;
+  const fill = new THREE.DirectionalLight(0xffffff, 2);
+  fill.position.copy(lightOffset);
+  fill.visible = false;
+  scene.add(light, light.target, fill);
   const splats = new GaussianSplatRenderer({renderer});
   scene.add(splats);
   let recordingActive = () => false;
@@ -212,26 +228,19 @@ async function main() {
   for (const name of [...layers.keys()].sort()) {
     layers.set(name, visibilityControl(name, !name.endsWith(" collision")).input);
   }
-  const batches = new Map();
-  for (const [name, batch] of Object.entries(manifest.instances)) {
-    const geometry = geometries.get(batch.mesh);
-    if (!geometry) continue;
-    const objects = Array.from({length: batch.count}, (_, i) => {
-      const opacity = batch.opacities?.[i] ?? 1;
-      const color = batch.colors?.[i];
-      const material = new THREE.MeshStandardMaterial({
-        color: color ? new THREE.Color(...color) : 0xaeb7c3,
-        opacity, transparent: opacity < 1, side: THREE.DoubleSide,
-      });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.visible = false;
-      if (batch.scales) mesh.scale.fromArray(batch.scales[i]);
-      scene.add(mesh);
-      return {mesh, controls: batch.layers[i].map(name => layers.get(name))};
-    });
-    batches.set(name, objects);
+  const shadows = visibilityControl("Shadows", true);
+  const gridInput = visibilityControl("1 m grid", true).input;
+  const gridEnabled = uniform(Number(gridInput.checked));
+  gridInput.addEventListener("change", () => { gridEnabled.value = Number(gridInput.checked); });
+  const batches = buildMeshBatches(scene, manifest.instances, geometries, layers, gridEnabled);
+  const offsets = [];
+  for (const target of manifest.targets) {
+    offsets[target.world] ??= new THREE.Vector3().fromArray(target.offset);
   }
-
+  const ghosts = manifest.ghosts.map(spec => {
+    const {input} = visibilityControl(spec.name, true);
+    return {...buildGhost(scene, spec, geometries, offsets), input};
+  });
   manifest.targets.forEach(({world, name}, index) => {
     targetSelect.add(new Option(`World ${world} · ${name}`, index));
   });
@@ -324,15 +333,16 @@ async function main() {
   const arrowVector = new THREE.Vector3();
   const rotation = new THREE.Quaternion();
   const worldOffset = new THREE.Vector3();
-  function interpolatePose(object, from, to, alpha) {
-    object.position.fromArray(from);
-    position.fromArray(to);
+  function interpolatePose(object, from, to, alpha, offset = 0) {
+    object.position.fromArray(from, offset);
+    position.fromArray(to, offset);
     const t = object.position.distanceToSquared(position) > 1 ? 1 : alpha;
     object.position.lerp(position, t);
-    object.quaternion.fromArray(from, 3);
-    rotation.fromArray(to, 3);
+    object.quaternion.fromArray(from, offset + 3);
+    rotation.fromArray(to, offset + 3);
     object.quaternion.slerp(rotation, t);
   }
+  const updateInstances = instanceUpdater(interpolatePose);
   const followTarget = new THREE.Vector3();
   const delta = new THREE.Vector3();
   const pauseButton = document.querySelector("#pause");
@@ -355,6 +365,13 @@ async function main() {
     }
   }
   function showFrame(frame, jump = false) {
+    for (const poses of [frame.poses, frame.ghostPoses]) {
+      for (const name in poses) {
+        if (typeof poses[name] === "string") {
+          poses[name] = new Float32Array(Uint8Array.fromBase64(poses[name]).buffer);
+        }
+      }
+    }
     if (jump || (frames.length && frames.at(-1).frame.epoch !== frame.epoch)) frames.length = 0;
     frames.push({time: performance.now(), frame});
     if (frames.length > 16) frames.shift();
@@ -416,6 +433,7 @@ async function main() {
     const now = performance.now();
     const dt = Math.min((now - lastRender) / 1000, 0.1);
     lastRender = now;
+    let poseFrame;
     if (frames.length) {
       // Render behind the newest packet so regular jitter cannot skip poses.
       const renderTime = now - 60;
@@ -426,17 +444,7 @@ async function main() {
       const to = end.frame;
       const alpha = start === end ? 1 :
         THREE.MathUtils.clamp((renderTime - start.time) / (end.time - start.time), 0, 1);
-      for (const [name, objects] of batches) {
-        const poses = to.poses[name];
-        const previous = from.poses[name] ?? poses;
-        if (!poses) continue;
-        for (let i = 0; i < objects.length; i++) {
-          const {mesh, controls} = objects[i];
-          mesh.visible = controls.some(input => input.checked);
-          if (!mesh.visible) continue;
-          interpolatePose(mesh, previous[i], poses[i], alpha);
-        }
-      }
+      poseFrame = {from, to, alpha};
       const target = Number(targetSelect.value);
       const selected = manifest.targets[target];
       if (selected) worldOffset.fromArray(selected.offset);
@@ -525,6 +533,21 @@ async function main() {
     }
     moveFreeCamera(dt);
     orbit.update(dt);
+    const gaussianVisible = Array.from(clouds.values()).some(cloud => cloud.parent === scene);
+    if (shadows.input.disabled !== gaussianVisible) {
+      shadows.input.disabled = gaussianVisible;
+      shadows.message.textContent = gaussianVisible ? " · Off with Gaussians" : "";
+    }
+    light.visible = shadows.input.checked && !gaussianVisible;
+    fill.visible = !light.visible;
+    if (light.visible) {
+      light.target.position.copy(orbit.target);
+      light.position.copy(light.target.position).add(lightOffset);
+    }
+    if (poseFrame) {
+      const {from, to, alpha} = poseFrame;
+      updateInstances(camera, batches, ghosts, from, to, alpha);
+    }
     renderer.render(scene, camera);
     renderCount++;
     cpuMs += performance.now() - now;

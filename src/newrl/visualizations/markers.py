@@ -35,3 +35,13 @@ class Marker:
             raise ValueError("Batched point markers use world coordinates")
         if not isfinite(self.size) or self.size <= 0 or not 0 <= self.color <= 0xFFFFFF:
             raise ValueError("Markers require a positive size and an RGB color")
+
+
+@dataclass(frozen=True)
+class RobotGhost:
+    """A translucent copy of an entity's visual meshes driven by body poses."""
+
+    name: str
+    entity: str
+    color: int = 0x55DDEE
+    opacity: float = 0.34

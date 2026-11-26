@@ -2,27 +2,34 @@
 
 ## Collision modes
 
-Compare Newton contacts, native MuJoCo Warp contacts, and the custom hybrid
-pipeline on the same ANYmal C scene.
+Compare Newton contacts, native MuJoCo Warp contacts, and NewRL's hybrid
+detector through the production stateful environment. The default sweep
+uses 2,048 and 4,096 ANYmal worlds on a plane, a dense flat slab, and a mixed
+scene with a slab, heightfields, and box terrain.
 
 ```sh
-for contacts in newton mujoco newrl; do
-  python benchmark_mesh_collision.py --terrain hybrid --contacts "$contacts" \
-    --num-envs 1024 --profile-stages 10
-done
+uv run python scripts/benchmark_environments.py --suite collision --profile \
+  --machine-id runner-01 --output benchmark-results/runner-01/collision-001.json
 ```
 
-All modes use the MuJoCo Warp solver. By default, each detector refreshes
-contacts every physics substep. To measure the tradeoff of reusing contacts,
-run `--contact-refresh control` with either external detector.
-The hybrid scene distributes worlds across a triangle mesh slab, native rough
-heightfield, and box stairs. Use `--terrain mesh` for the original slab-only
-benchmark, or `--terrain rough_hard` for heightfields and stairs alone. The
-`custom_pairs` field reports how many candidate pairs the custom kernel owns.
-A mesh-free scene with `--contacts newrl` uses Newton for all contacts.
+Each detector uses the same MuJoCo Warp settings, reset seed, and synthetic
+action trace. Each repeat restores its case's initial checkpoint. The
+benchmark refreshes contacts every physics substep and times stepping without
+resets. It reports the number of
+candidate pairs handled by NewRL and the number of worlds initially placed
+on the mesh, plus a final root-height sanity check. The workload measures
+stepping throughput and does not evaluate locomotion quality.
 
-Throughput uses the selected graph mode and excludes the optional eager
-profiling pass. Native MuJoCo includes collision in its reported solver time.
+By default, throughput uses CUDA graphs. `--profile` adds a separate eager
+pass for stage timings. With native MuJoCo Warp collision, detector time is
+included in `solver_including_collision`. Warp pool peak usage and PyTorch
+peak allocated memory are measured independently in a fresh process per case.
+They are allocator metrics and do not represent total GPU memory usage.
+
+Use `--terrain mesh mixed`, `--collision newton newrl`, or `--num-envs 4096` to
+select cases. Use `--mesh-resolution` to set the grid cells per side and
+`--graph off` for eager throughput. A quick validation run can use
+`--num-envs 4 --steps 10 --warmup 4 --repeats 1`.
 
 ## Environment stepping
 

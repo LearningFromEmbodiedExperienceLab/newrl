@@ -178,7 +178,7 @@ next/
   MuJoCo solver. `task.collision=newrl` routes supported primitive–terrain mesh
   pairs to the custom collider and delegates the remaining pairs to Newton.
   Every mode refreshes contacts on each physics substep. Compare modes with
-  [benchmark_mesh_collision.py](benchmark_mesh_collision.py).
+  the collision sweep in [benchmark_environments.py](scripts/benchmark_environments.py).
   Solver and timing defaults are configured in `EnvironmentConfig`. MuJoCo Warp
   is the default backend; Steel uses augmented drives and point friction so
   its per-world checkpoints remain replayable. Its actuator torque is
@@ -197,13 +197,13 @@ next/
 
 ## Validation and benchmarking
 
-Run the environment regression suite and the standalone terrain collision
-tests after changing the relevant paths. The CUDA suite covers stateful and
+Run the environment regression suite and the terrain collision tests after
+changing the relevant paths. The CUDA suite covers stateful and
 stateless parity, checkpoint replay, selective resets, and mesh spawn replay.
 
 ```sh
 uv run python -m unittest discover -s tests -v
-uv run python -m unittest -v test_terrain_collision
+uv run python -m unittest discover -s tests -p test_terrain_collision.py -v
 newrl play task=AnymalLocoFlat viewer=none steps=5 episode_steps=2 task.num_envs=4
 ```
 
