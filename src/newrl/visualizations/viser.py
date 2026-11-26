@@ -197,7 +197,7 @@ class ViserPlayback:
             None,
         )
         enabled = view.show_gaussians is not None and view.show_gaussians.value
-        source = str(Path(sensor.config.source).expanduser().resolve()) if enabled and sensor else None
+        source = str(Path(sensor.source).expanduser().resolve()) if enabled and sensor else None
         for path, handle in view.gaussians.items():
             handle.visible = path == source
         if source is None:
@@ -224,6 +224,6 @@ class ViserPlayback:
                 opacities=cloud.opacities[:, None],
             )
             view.gaussians[source] = handle
-        transform = sensor.config.world_from_cloud
+        transform = sensor.world_from_cloud
         handle.position = np.asarray(transform[:3]) + self._offsets[world]
         handle.wxyz = (transform[6], *transform[3:6])

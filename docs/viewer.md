@@ -117,11 +117,33 @@ or `history_mib` (256 MiB of pose and tensor data by default).
 Projects with a static Gaussian splat PLY can use `GaussianCameraConfig`
 from `newrl.sensors` with `RGBCameraObservation` or `DepthCameraObservation`.
 Set `mode` to `rgb`, `depth`, or `rgbd`. Configure `world_from_cloud` to
-align the cloud and install `gsrender[gsplat]` in the project environment.
+align a standalone PLY and install the `gsrender` extra with `uv sync --extra gsrender`.
 Gaussian cameras default to 20 Hz. Set `frequency_hz` to change the rate or
 `update_every` to specify a fixed number of control steps between frames.
 Gaussian depth measures expected forward-axis depth and reports pixels below
 `min_alpha` as invalid.
+
+## Reconstructed scenes
+
+Use the standalone gsrender editor to record a camera trajectory and export
+`terrain.ply` and `terrain.json`. Set `ReconstructedTerrainConfig.directory`
+to the exported terrain directory. Use the source `scene.json` as
+`GaussianCameraConfig.source` or `viewer.splat_path` to apply the same
+`worldFromSource` transform used during terrain export. For Gaussian camera
+sensors, the manifest needs a 3DGS PLY in `cloud` or `renderCloud`.
+
+The editor setup and manifest format are documented in the [gsrender repository](https://github.com/LearningFromEmbodiedExperienceLab/gsrender).
+
+On a development machine with a sibling gsrender checkout, first install the
+extra to resolve the backend dependencies, then overlay the local package.
+
+```sh
+uv sync --extra gsrender
+uv pip install --python .venv/bin/python --no-deps -e ../gsrender
+uv run --no-sync newrl play ...
+```
+
+Run the editable install again after a project sync to restore the overlay.
 
 ## Chrome WebGPU troubleshooting
 

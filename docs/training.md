@@ -123,6 +123,14 @@ newrl train task=G1LAFAN1Tracking algo=supermimic
 newrl play checkpoint=outputs_train/G1LAFAN1Tracking/checkpoints/RUN/checkpoint_001000.pt
 ```
 
+Select coordinates with `algo.representation=generalized` (default) or
+`algo.representation=maximal`. Both support
+`algo.representation.integration=direct` (default) and
+`algo.representation.integration=velocity`. Velocity integration predicts
+pose corrections on top of motion integrated from the old and new velocities.
+Maximal coordinates predict body and joint states independently, which removes
+forward kinematics from imagination and allows the two predictions to disagree.
+
 The learner collects noisy actor actions into a compact real-transition replay,
 fits autoregressive physical dynamics and analytic reward consistency, then
 improves a deterministic actor by differentiating through imagined transitions.
@@ -197,10 +205,11 @@ memory = env.mdp.restore_replay_state(transition["mdp_state"])
 ```
 
 The representation selects physical outputs independently of actor/critic
-observation groups. This version exports full body snapshots, then stores compact
-root/joint state through `encode`. `decode` reconstructs body poses, COM twists,
-and projected gravity with differentiable Torch FK using Newton scene metadata.
-It supports one free-root tree with fixed, revolute, and prismatic descendants.
+observation groups. Generalized coordinates store compact root and joint state
+and reconstruct bodies with differentiable Torch FK using Newton scene metadata.
+That path supports one free-root tree with fixed, revolute, and prismatic
+descendants. Maximal coordinates also store nonroot body poses and twists.
+Both decoders expose world-frame COM twists and projected gravity to the MDP.
 Tasks declare compact `replay_fields` and rebuild derived state with
 `restore_replay_state`, without advancing reference time or sampling RNG.
 Custom tasks must include all persistent task/term history in this contract.

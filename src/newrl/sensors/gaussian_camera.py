@@ -11,6 +11,7 @@ import torch
 import warp as wp
 from tensordict import TensorDict
 
+from newrl.utils.gaussian_scene import resolve_gaussian_scene
 from .camera import camera_refresh_mask
 
 if TYPE_CHECKING:
@@ -120,7 +121,8 @@ class GaussianCamera:
         self._cv_mount = self.mount_transform * wp.transform(
             wp.vec3(0.0), wp.quat(1.0, 0.0, 0.0, 0.0)
         )
-        transform = config.world_from_cloud
+        self.source, transform = resolve_gaussian_scene(config.source, config.world_from_cloud)
+        self.world_from_cloud = transform
         self._cloud_from_world = wp.transform_inverse(
             wp.transform(wp.vec3(*transform[:3]), wp.quat(*transform[3:]))
         )
@@ -129,13 +131,13 @@ class GaussianCamera:
         try:
             from gsrender.live import LiveGaussianRenderer
         except ImportError as error:
-            raise ImportError("Install gsrender[gsplat] to enable Gaussian camera frames") from error
+            raise ImportError("Install the NewRL gsrender extra to enable Gaussian camera frames") from error
 
         config = self.config
         device = torch.device(wp.device_to_torch(self.model.device))
         worlds = self.model.world_count
         self._renderer = LiveGaussianRenderer(
-            config.source, device, cell_size=config.cell_size, cache_cells=config.cache_cells,
+            self.source, device, cell_size=config.cell_size, cache_cells=config.cache_cells,
             batch_size=config.batch_size, radius_clip=config.radius_clip,
             tile_size=config.tile_size, temporal_culling=config.temporal_culling,
         )

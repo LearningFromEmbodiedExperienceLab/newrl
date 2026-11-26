@@ -26,6 +26,7 @@ dependencies = [
 
 [project.optional-dependencies]
 viser = ["viser>=1.1.1"]
+gsrender = ["gsrender[gsplat] @ git+https://github.com/LearningFromEmbodiedExperienceLab/gsrender.git@c6e4d2e67767923360e60533ac6fcf3f1bfbffc6"]
 torchrunx = ["torchrunx>=0.3.4"]
 
 [project.scripts]

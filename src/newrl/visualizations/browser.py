@@ -18,6 +18,7 @@ import newton
 import numpy as np
 
 from newrl.sensors import DepthCamera, GaussianCamera
+from newrl.utils.gaussian_scene import resolve_gaussian_scene
 from .camera_preview import CameraPreviews
 from .markers import Marker, Pose, check_pose
 
@@ -132,7 +133,8 @@ class BrowserViewer(newton.viewer.ViewerNull):
         self.cameras = []
         camera_bodies = []
         if splat_path is not None:
-            sources.append(("Gaussian scene", splat_path, (0, 0, 0, 0, 0, 0, 1)))
+            source, pose = resolve_gaussian_scene(splat_path, browser=True)
+            sources.append(("Gaussian scene", source, pose))
         for name, sensor in scene.sensors.items():
             if isinstance(sensor, (DepthCamera, GaussianCamera)):
                 config = sensor.config
@@ -150,7 +152,7 @@ class BrowserViewer(newton.viewer.ViewerNull):
                 camera_bodies.append(sensor.body_ids.tolist())
             if isinstance(sensor, GaussianCamera):
                 sources.append(
-                    (name, sensor.config.source, sensor.config.world_from_cloud)
+                    (name, sensor.source, sensor.world_from_cloud)
                 )
         self._camera_bodies = np.asarray(camera_bodies, dtype=np.intp).reshape(
             len(self.cameras), scene.model.world_count
