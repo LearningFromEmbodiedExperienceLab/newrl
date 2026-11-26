@@ -229,8 +229,8 @@ async function main() {
     layers.set(name, visibilityControl(name, !name.endsWith(" collision")).input);
   }
   const shadows = visibilityControl("Shadows", true);
-  const gridInput = visibilityControl("1 m grid", false).input;
-  const gridEnabled = uniform(0);
+  const gridInput = visibilityControl("1 m grid", true).input;
+  const gridEnabled = uniform(Number(gridInput.checked));
   gridInput.addEventListener("change", () => { gridEnabled.value = Number(gridInput.checked); });
   const batches = buildMeshBatches(scene, manifest.instances, geometries, layers, gridEnabled);
   const offsets = [];

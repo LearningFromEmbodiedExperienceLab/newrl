@@ -1,4 +1,4 @@
-"""Compare stateful stepping and stateless checkpoint round trips on CUDA."""
+"""Benchmark environment stepping, checkpoints, and collision modes on CUDA."""
 
 import argparse
 import json
@@ -51,7 +51,11 @@ def measure(
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--num-envs", type=int, nargs="+", default=[4, 2048, 4096])
+    parser.add_argument("--suite", choices=("state-api", "collision"), default="state-api")
+    parser.add_argument("--num-envs", type=int, nargs="+")
+    parser.add_argument("--terrain", choices=("plane", "mesh", "mixed"), nargs="+")
+    parser.add_argument("--collision", choices=("newton", "mujoco", "newrl"), nargs="+")
+    parser.add_argument("--mesh-resolution", type=int)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
         "--solver-backend", choices=("mujoco", "steel"), default="mujoco"
@@ -64,10 +68,9 @@ def main():
     parser.add_argument(
         "--reset-every",
         type=int,
-        default=100,
-        help="reset alternating halves every N steps, or use 0 for step-only timing",
+        help="reset alternating halves every N steps for the state API suite (default 100)",
     )
-    parser.add_argument("--graph", choices=("both", "on", "off"), default="both")
+    parser.add_argument("--graph", choices=("both", "on", "off"))
     parser.add_argument(
         "--profile",
         action="store_true",
@@ -78,6 +81,17 @@ def main():
         "--machine-id", help="optional anonymous runner label, e.g. runner-01"
     )
     args = parser.parse_args()
+    collision_suite = args.suite == "collision"
+    if args.num_envs is None:
+        args.num_envs = [2048, 4096] if collision_suite else [4, 2048, 4096]
+    if args.reset_every is None:
+        args.reset_every = 0 if collision_suite else 100
+    if args.graph is None:
+        args.graph = "on" if collision_suite else "both"
+    if not collision_suite and any(
+        value is not None for value in (args.terrain, args.collision, args.mesh_resolution)
+    ):
+        parser.error("--terrain, --collision, and --mesh-resolution require --suite collision")
     if args.machine_id is not None and not re.fullmatch(
         r"runner-[0-9]{1,8}", args.machine_id
     ):
@@ -93,6 +107,19 @@ def main():
         parser.error(
             "warmup must be at least 3 and reset frequency must be nonnegative"
         )
+
+    if collision_suite:
+        if args.solver_backend != "mujoco" or args.reset_every:
+            parser.error("the collision suite uses MuJoCo Warp and step-only timing")
+        if args.mesh_resolution is not None and args.mesh_resolution < 1:
+            parser.error("--mesh-resolution must be positive")
+        from benchmark_collision import run_collision_suite
+
+        run = run_collision_suite(args)
+        if args.output is not None:
+            run["metadata"] = collect_metadata(torch.device(args.device), args.machine_id)
+            write_results(args.output, run)
+        return
 
     graphs = (False, True) if args.graph == "both" else (args.graph == "on",)
     for n in args.num_envs:
@@ -217,10 +244,14 @@ def main():
             del envs
 
     if args.output is not None:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        with args.output.open("x") as file:
-            json.dump(run, file, indent=2, allow_nan=False)
-            file.write("\n")
+        write_results(args.output, run)
+
+
+def write_results(path, run):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x") as file:
+        json.dump(run, file, indent=2, allow_nan=False)
+        file.write("\n")
 
 
 if __name__ == "__main__":

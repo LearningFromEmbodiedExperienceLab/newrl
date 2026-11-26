@@ -14,7 +14,7 @@ from newrl.visualizations.task import TaskVisualizationPlayback
 @dataclass
 class PlayConfig(PlaybackConfig):
     steps: int | None = None
-    viewer: GLViewerConfig | ViserViewerConfig | BrowserViewerConfig | None = field(default_factory=GLViewerConfig)
+    viewer: GLViewerConfig | ViserViewerConfig | BrowserViewerConfig | None = field(default_factory=BrowserViewerConfig)
     num_envs: int | None = None
 
     def __post_init__(self) -> None:

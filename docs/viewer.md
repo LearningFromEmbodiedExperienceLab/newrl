@@ -60,8 +60,8 @@ Gaussian clouds. Frustums follow the selected world and remain available
 when playback skips camera observations.
 **Shadows** is on by default for mesh and plane terrain and turns off while
 a Gaussian cloud is visible. Only robot geometry in view casts shadows.
-Enable **1 m grid** to project a world-aligned, one-meter grid across the
-ground. Fine lines fade smoothly with distance.
+**1 m grid** is on by default. Toggle it under **Scene** to hide or show the
+world-aligned grid. Fine lines fade smoothly with distance.
 Gaussian clouds load the first time they are enabled. Pass
 `viewer.splat_path=/path/to/scene.ply` (or `.spz`) to add a cloud already aligned to
 simulation coordinates.

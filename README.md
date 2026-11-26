@@ -40,14 +40,15 @@ uv run newrl play task=AnymalLocoFlat
 uv run newrl train task=AnymalLocoFlat algo=ppo task.num_envs=4096
 
 # Play a checkpoint in the custom viewer
-uv run newrl play checkpoint=path/to/policy.pt viewer=browser num_envs=1
+uv run newrl play checkpoint=path/to/policy.pt num_envs=1
 
 # Rewind and branch a stochastic rollout in one world
 uv run newrl play-timeline checkpoint=path/to/policy.pt deterministic=false
 ```
 
-Open the URL printed by the web viewer. Use `viewer=none steps=100` for a short
-headless run, `viewer=viser` for Viser, or `viewer.port=0` to request a free port.
+Playback opens the custom viewer with the 1 m grid enabled. Open the URL it
+prints. Use `viewer=none steps=100` for a short headless run, `viewer=gl`
+for Newton GL, `viewer=viser` for Viser, or `viewer.port=0` to request a free port.
 
 ## Features
 

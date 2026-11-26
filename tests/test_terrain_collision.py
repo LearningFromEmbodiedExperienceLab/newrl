@@ -5,8 +5,7 @@ import numpy as np
 import warp as wp
 
 from newrl.terrains import flat_ground_mesh
-from newrl.terrain_collision import HybridTerrainCollision
-from terrain_collision import TerrainCollision
+from newrl.terrain_collision import HybridTerrainCollision, TerrainCollision
 
 
 def triangle():
