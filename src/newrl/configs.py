@@ -126,7 +126,8 @@ def G1Tabletop() -> EnvironmentConfig:
     return EnvironmentConfig(
         name="G1Tabletop",
         num_envs=4,
-        solver=SteelSimConfig(),
+        # Full-body contacts can exhaust the default constraint row capacity.
+        solver=SteelSimConfig(articulation_constraint_max=512),
         robots={"robot": assetx_g1},
         objects={
             "table": table,

@@ -68,6 +68,8 @@ class ObjectTests(unittest.TestCase):
             torch.testing.assert_close(step["observation", "privileged"][:, :3], initial[:, :3],
                                        atol=0.01, rtol=0)
 
+        self.assertFalse(env._solver.checkpoint_views()["constraint_overflow"].any())
+
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_partial_reset_and_replay(self):
         for solver in (MujocoSimConfig(), SteelSimConfig()):

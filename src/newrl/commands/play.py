@@ -1,5 +1,9 @@
 """Play a trained policy or roll out zero actions with optional visualization."""
 
+import json
+from pathlib import Path
+
+import warp as wp
 from dataclasses import dataclass, field
 
 import torch
@@ -16,6 +20,7 @@ class PlayConfig(PlaybackConfig):
     steps: int | None = None
     viewer: GLViewerConfig | ViserViewerConfig | BrowserViewerConfig | None = field(default_factory=BrowserViewerConfig)
     num_envs: int | None = None
+    trajectory_log: str | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -28,6 +33,7 @@ class PlayConfig(PlaybackConfig):
 @config_main(PlayConfig, defaults={"task.num_envs": 4})
 def play(cfg: PlayConfig) -> None:
     viewer = None
+    log = None
     try:
         env, policy = build_playback(
             cfg, default_worlds=4, num_envs=cfg.num_envs,
@@ -48,6 +54,10 @@ def play(cfg: PlayConfig) -> None:
             elif isinstance(cfg.viewer, BrowserViewerConfig) and cfg.viewer.task_visualizations:
                 task_playback = TaskVisualizationPlayback(env, viewer)
 
+        if cfg.trajectory_log:
+            path = Path(cfg.trajectory_log)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            log = path.open("x", buffering=1)
         carry = env.reset()
         steps = resets = 0
         marker_step = None
@@ -63,6 +73,19 @@ def play(cfg: PlayConfig) -> None:
                 transition = env.step(decision)
                 carry = transition.select(*carry.keys())
                 steps += 1
+                if log is not None:
+                    sample = {
+                        "step": steps,
+                        "time_s": steps * env.control_dt,
+                        "action": decision["action"].tolist(),
+                        "done": transition["done"].tolist(),
+                        "joint_q": wp.to_torch(env.state.joint_q).reshape(env.num_envs, -1).tolist(),
+                        "joint_qd": wp.to_torch(env.state.joint_qd).reshape(env.num_envs, -1).tolist(),
+                    }
+                    overflow = env._solver.checkpoint_views().get("constraint_overflow")
+                    if overflow is not None:
+                        sample["constraint_overflow"] = overflow.tolist()
+                    print(json.dumps(sample), file=log)
                 finished = transition["done"].squeeze(-1).nonzero(as_tuple=True)[0]
             else:
                 finished = None
@@ -83,6 +106,8 @@ def play(cfg: PlayConfig) -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        if log is not None:
+            log.close()
         if viewer is not None:
             viewer.close()
 
