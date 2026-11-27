@@ -160,6 +160,13 @@ function freeCameraMovement(camera, orbit, canvas) {
 
 async function main() {
   createIcons({icons: {Axis3d, Camera, Layers3}});
+  let receivedBytes = performance.getEntriesByType("navigation")[0]?.transferSize ?? 0;
+  const networkObserver = new PerformanceObserver(list => {
+    for (const entry of list.getEntries()) {
+      if (new URL(entry.name).origin === location.origin) receivedBytes += entry.transferSize;
+    }
+  });
+  networkObserver.observe({type: "resource", buffered: true});
   const forceWebGL = new URLSearchParams(location.search).get("renderer") === "webgl";
   const renderer = new WebGPURenderer({antialias: false, forceWebGL});
   await renderer.init();
@@ -210,7 +217,16 @@ async function main() {
   resize();
 
   let manifest;
+  status.textContent = "Loading scene…";
   while (!(manifest = await latest("/scene.json"))) await delay(150);
+  const sceneTiming = performance.getEntriesByName(new URL("/scene.json", location.href).href).at(-1);
+  if (sceneTiming) {
+    document.querySelector("#scene-transfer").textContent =
+      `${(sceneTiming.encodedBodySize / 1048576).toFixed(2)} MiB / ${(sceneTiming.duration / 1000).toFixed(2)} s`;
+  }
+  if (manifest.protocol !== 3) {
+    throw new Error("Viewer protocol mismatch. Rebuild the viewer on the simulation host and reload.");
+  }
   recordingActive = setupRecording(renderer.domElement, resize);
   const geometries = new Map();
   for (const [name, mesh] of Object.entries(manifest.meshes)) {
@@ -313,8 +329,12 @@ async function main() {
   let drawCount = 0;
   let simulationTime;
   let previousSimulationTime;
+  let previousReceivedBytes = receivedBytes;
+  let receivedFrames = 0;
+  let requestTimeSum = 0;
+  let requestCount = 0;
   const stats = Object.fromEntries(
-    ["fps", "cpu", "draws", "sim-speed", "gpu-util", "gpu-memory"]
+    ["fps", "cpu", "draws", "sim-speed", "gpu-util", "gpu-memory", "network-total", "network-rate", "frame-latency", "frame-rate", "first-frame"]
       .map(id => [id, document.getElementById(id)])
   );
   async function pollGpu() {
@@ -410,12 +430,17 @@ async function main() {
   async function poll() {
     try {
       const request = pauseButton.disabled ? null : pauseRequest;
+      const requestStart = performance.now();
       const frame = await latest("/frame.json", headers => {
         if (request === pauseRequest) {
           updatePauseButton(headers.get("X-Simulation-Paused") === "1");
         }
       });
+      requestTimeSum += performance.now() - requestStart;
+      requestCount++;
       if (frame && frame.id !== liveFrame?.id) {
+        receivedFrames++;
+        if (!liveFrame) stats["first-frame"].textContent = `${(performance.now() / 1000).toFixed(2)} s`;
         if (frame.epoch !== liveFrame?.epoch) previousSimulationTime = undefined;
         liveFrame = frame;
         simulationTime = frame.time;
@@ -554,6 +579,12 @@ async function main() {
     drawCount += renderer.info.render.drawCalls;
     const elapsed = now - statsAt;
     if (elapsed >= 1000) {
+      stats["network-total"].textContent = `${(receivedBytes / 1048576).toFixed(2)} MiB`;
+      stats["network-rate"].textContent = `${((receivedBytes - previousReceivedBytes) * 1000 / elapsed / 1024).toFixed(1)} KiB/s`;
+      stats["frame-latency"].textContent = requestCount ? `${(requestTimeSum / requestCount).toFixed(1)} ms` : "—";
+      stats["frame-rate"].textContent = (1000 * receivedFrames / elapsed).toFixed(1);
+      previousReceivedBytes = receivedBytes;
+      receivedFrames = requestCount = requestTimeSum = 0;
       stats.fps.textContent = (1000 * renderCount / elapsed).toFixed(1);
       stats.cpu.textContent = `${(cpuMs / renderCount).toFixed(1)} ms`;
       stats.draws.textContent = (drawCount / renderCount).toFixed(0);

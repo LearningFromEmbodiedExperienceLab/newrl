@@ -1,11 +1,19 @@
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { resolve } from "node:path";
 import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [{
     name: "bundle-dependency-notices",
-    writeBundle(options) {
+    writeBundle(options, bundle) {
+      for (const name of Object.keys(bundle)) {
+        if (/\.(js|css)$/.test(name)) {
+          const path = resolve(options.dir, name);
+          writeFileSync(path + ".gz", gzipSync(readFileSync(path)));
+        }
+      }
+      writeFileSync(resolve(options.dir, "protocol.txt"), "3\n");
       const dir = resolve(options.dir, "assets/licenses");
       mkdirSync(dir, {recursive: true});
       for (const [name, files] of [

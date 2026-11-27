@@ -1,6 +1,7 @@
 """Local Three.js playback for Newton meshes and static Gaussian scenes."""
 
 import base64
+import gzip
 import json
 import re
 import shutil
@@ -93,11 +94,18 @@ class BrowserViewer(newton.viewer.ViewerNull):
             raise RuntimeError(
                 "Build the browser viewer with npm --prefix viewer ci and npm --prefix viewer run build"
             )
+        protocol = assets / "protocol.txt"
+        if not protocol.is_file() or protocol.read_text().strip() != "3":
+            raise RuntimeError(
+                "Browser viewer assets are out of date. "
+                "Run npm --prefix viewer run build in the NewRL checkout."
+            )
         super().__init__()
         self.meshes = {}
         self.instances = {}
         self.poses = {}
         self.manifest = None
+        self.manifest_gzip = None
         self.frame = None
         self.frame_id = 0
         self.frame_epoch = 0
@@ -278,6 +286,9 @@ class BrowserViewer(newton.viewer.ViewerNull):
                         "/gpu.json": viewer.gpu_stats,
                     }[route]
                     headers = {"X-Simulation-Paused": str(int(viewer.is_paused()))} if route == "/frame.json" else {}
+                    if route == "/scene.json" and payload is not None and self._accepts_gzip():
+                        payload = viewer.manifest_gzip
+                        headers["Content-Encoding"] = "gzip"
                     self._send_json(payload, headers=headers)
                     return
                 path = viewer.cloud_paths.get(route)
@@ -296,19 +307,40 @@ class BrowserViewer(newton.viewer.ViewerNull):
                     ".js": "text/javascript",
                     ".wasm": "application/wasm",
                 }
-                with path.open("rb") as stream:
+                compressed = path.with_name(path.name + ".gz")
+                use_gzip = route.startswith("/assets/") and compressed.is_file() and self._accepts_gzip()
+                source = compressed if use_gzip else path
+                with source.open("rb") as stream:
                     self.send_response(200)
                     self.send_header(
                         "Content-Type",
                         types.get(path.suffix, "application/octet-stream"),
                     )
-                    self.send_header("Content-Length", str(path.stat().st_size))
+                    self.send_header("Content-Length", str(source.stat().st_size))
+                    self.send_header("Vary", "Accept-Encoding")
+                    if use_gzip:
+                        self.send_header("Content-Encoding", "gzip")
+                    if route == "/":
+                        self.send_header("Cache-Control", "no-cache")
+                    elif re.fullmatch(r"/assets/[^/]+-[\w-]+\.(js|css)", route):
+                        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
                     self.end_headers()
                     shutil.copyfileobj(stream, self.wfile)
+
+            def _accepts_gzip(self):
+                for item in self.headers.get("Accept-Encoding", "").split(","):
+                    encoding, *parameters = item.strip().lower().split(";")
+                    if encoding == "gzip":
+                        try:
+                            return all(float(p.split("=", 1)[1]) > 0 for p in parameters if p.strip().startswith("q="))
+                        except ValueError:
+                            return False
+                return False
 
             def _send_json(self, payload, *, headers=()):
                 self.send_response(200 if payload is not None else 204)
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("Vary", "Accept-Encoding")
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload or b"")))
                 for name, value in dict(headers).items():
@@ -537,8 +569,9 @@ class BrowserViewer(newton.viewer.ViewerNull):
         offsets = self.world_offsets.numpy() if self.manifest is None else self._offsets
         self._offsets = offsets
         if self.manifest is None:
-            self.manifest = json.dumps(
+            manifest = json.dumps(
                 {
+                    "protocol": 3,
                     "meshes": self.meshes,
                     "instances": self.instances,
                     "clouds": self.clouds,
@@ -565,6 +598,8 @@ class BrowserViewer(newton.viewer.ViewerNull):
                 },
                 separators=(",", ":"),
             ).encode()
+            self.manifest_gzip = gzip.compress(manifest, compresslevel=1)
+            self.manifest = manifest
         targets = [
             position + offsets[world]
             for position, (world, _, _) in zip(

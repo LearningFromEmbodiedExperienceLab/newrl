@@ -46,6 +46,10 @@ npm --prefix viewer run build
 uv run newrl play task=AnymalLocoFlat viewer=browser num_envs=1
 ```
 
+Rebuild the browser bundle after updating the NewRL checkout. The server checks
+the generated bundle protocol at startup. For SSH forwarding, run the build
+on the simulation host and reload the forwarded URL.
+
 Open the loopback URL printed by playback. The browser interpolates poses and
 smooths the selected follow target while preserving manual orbit controls.
 Turn off **Follow** and click the viewport to move with **WASD**. Use **Q**
@@ -102,6 +106,16 @@ The **Performance** panel shows browser FPS, main thread time per frame, draw
 calls, and simulation speed relative to wall time. When `nvidia-smi` is
 available, it also reports device-wide utilization and memory for the host GPU
 running the simulation. The browser can render on a different GPU.
+
+The scene and JavaScript bundle are served with gzip compression when the
+browser supports it. The browser caches versioned JavaScript and CSS assets
+across sessions. The Performance panel reports the compressed scene size and
+request duration, time from navigation to the first received frame, cumulative
+HTTP response bytes, recent receive rate, average frame request duration and
+the rate of distinct live frames received. HTTP totals include assets, camera
+previews and cloud downloads, as reported by browser Resource Timing. These
+measurements describe HTTP responses and exclude SSH transport overhead.
+
 
 Use **Record** and **Stop & Save** to capture the live viewport at up to 30 FPS.
 NewRL saves the video in `recordings/` under the directory where you launched
