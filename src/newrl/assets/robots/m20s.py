@@ -15,7 +15,7 @@ from assetx import (
 )
 
 from ..cooking import cooked_robot, cooked_usd, robot_model_dir
-from .config import ActuatorGroup, RobotConfig
+from .config import ActuatorGroup, RobotConfig, RoundedWheel
 
 
 DEEP_M20S = (
@@ -60,6 +60,7 @@ def assetx_m20s() -> RobotConfig:
     bundle = cooked_robot("m20s", robot_model_dir())
     return RobotConfig(
         asset=cooked_usd(bundle),
+        wheels=(RoundedWheel((".*_wheel",), 0.090, 0.027),),
         position=(0.0, 0.0, 0.55),
         joint_position={
             ".*_hipx_joint": 0.0,

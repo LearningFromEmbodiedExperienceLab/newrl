@@ -68,7 +68,12 @@ and restore the corresponding model parameters before solver history.
 
 Wheeled locomotion presets are available as `task=M20SLocoFlat`,
 `task=AS2WLocoFlat`, and `task=AS2WSphereLocoFlat`. The sphere variant keeps
-the AS2W tire visuals and uses spheres for wheel contacts. Leg actions set
+the AS2W tire visuals and uses spheres for wheel contacts. The other two
+presets use a rounded wheel, modeled as a disk swept by a sphere. AS2W has
+an 86 mm rolling radius and 26 mm half-width, with tread centers 54.6 mm
+outboard of the foot origins. M20S uses 90 mm and 27 mm respectively.
+Newton and NewRL collide the analytic barrel cylinder. MuJoCo native
+collision uses a 32-sided convex mesh sampled from the same profile. Leg actions set
 joint position offsets, and wheel actions set target angular velocities.
 The actuator gains and action scales are starting values for training.
 
@@ -108,7 +113,7 @@ for a flat border and `task.terrain.border.width=5.0` to set its width.
 
 Set `task.collision=newton` for the default detector, `task.collision=mujoco`
 for MuJoCo Warp's built-in detector, or `task.collision=newrl` to use the
-custom detector on supported mesh pairs. The custom mode delegates heightfields,
+custom detector on supported mesh pairs and rounded wheels against infinite planes. The custom mode delegates heightfields,
 boxes, and other pairs to Newton. All three refresh contacts on each physics
 substep in training.
 

@@ -160,7 +160,10 @@ class Scene:
         if overlap:
             raise ValueError(f"Robot and object names overlap: {sorted(overlap)}")
         robots = {name: factory() for name, factory in config.robots.items()}
-        components = {name: [cfg.build()] for name, cfg in robots.items()}
+        components = {
+            name: [cfg.build(wheel_mesh_segments=32 if config.collision == "mujoco" else None)]
+            for name, cfg in robots.items()
+        }
         rng = Random(config.object_seed)
         self.object_variant_ids: dict[str, tuple[int, ...]] = {}
         for name, cfg in config.objects.items():

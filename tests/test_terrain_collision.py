@@ -61,7 +61,7 @@ class TestTerrainCollision(unittest.TestCase):
             probes.append(builder.add_shape_sphere(body=body, radius=0.1))
         model = builder.finalize()
         pipeline = HybridTerrainCollision(model, surfaces, deterministic=True)
-        self.assertEqual([collider.ground for collider in pipeline.mesh_colliders], surfaces[:2])
+        self.assertEqual([collider.ground for collider in pipeline.terrain_colliders], surfaces[:2])
         fallback_pairs = pipeline.newton.shape_pairs_filtered.numpy()
         self.assertFalse(np.isin(fallback_pairs, surfaces[:2]).any())
 
@@ -148,6 +148,30 @@ class TestTerrainCollision(unittest.TestCase):
         points, normals = contacts(pipeline, state)
         self.assertGreater(len(points), 0)
         self.assertTrue(np.all(normals[:, 2] > 0.9))
+
+    def test_rounded_wheel_plane_support(self):
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        ground = builder.add_ground_plane()
+        body = builder.add_body()
+        wheel = builder.add_shape_cylinder(body, radius=0.06, half_height=0.026, barrel_radius=0.026)
+        model = builder.finalize()
+        pipeline = HybridTerrainCollision(model, [ground], deterministic=True)
+        self.assertIsNone(pipeline.newton)
+        state, buffer = model.state(), pipeline.contacts()
+        for tilt, count in ((0.0, 3), (0.5, 1), (np.pi / 2, 1)):
+            support = 0.026 + 0.06 * np.sin(tilt)
+            for spin in (0.0, 1.2):
+                rotation = wp.quat_from_axis_angle(wp.vec3(1, 0, 0), tilt) * wp.quat_from_axis_angle(
+                    wp.vec3(0, 0, 1), spin
+                )
+                pose = wp.transform(wp.vec3(0, 0, support - 0.001), rotation)
+                state.body_q.assign(np.array([pose], dtype=np.float32))
+                pipeline.collide(state, buffer)
+                self.assertEqual(int(buffer.rigid_contact_count.numpy()[0]), count)
+                np.testing.assert_array_equal(buffer.rigid_contact_shape1.numpy()[:count], wheel)
+                points = buffer.rigid_contact_point1.numpy()[:count] + buffer.rigid_contact_offset1.numpy()[:count]
+                for point in points:
+                    self.assertAlmostEqual(wp.transform_point(pose, wp.vec3(*point))[2], -0.001, places=5)
 
     def test_barrel_widest_cross_section(self):
         # The ends clear the plane. The bulged middle touches it.

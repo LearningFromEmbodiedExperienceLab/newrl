@@ -17,7 +17,7 @@ from assetx import (
 from assetx.conversion.urdf2mjcf import urdf_to_mjcf
 
 from ..cooking import cooked_robot, cooked_usd, robot_model_dir
-from .config import ActuatorGroup, RobotConfig
+from .config import ActuatorGroup, RobotConfig, RoundedWheel
 
 
 UNITREE_AS2W = (
@@ -58,11 +58,15 @@ def build_as2w_sphere(vendor_dir: Path) -> MujocoAsset:
     return build_as2w(vendor_dir, sphere_wheels=True)
 
 
-def assetx_as2w(*, wheel_geometry: Literal["mesh", "sphere"] = "mesh") -> RobotConfig:
-    recipe = {"mesh": "as2w", "sphere": "as2w_sphere"}[wheel_geometry]
+def assetx_as2w(*, wheel_geometry: Literal["rounded", "mesh", "sphere"] = "rounded") -> RobotConfig:
+    recipe = {"rounded": "as2w", "mesh": "as2w", "sphere": "as2w_sphere"}[wheel_geometry]
     bundle = cooked_robot(recipe, robot_model_dir())
     return RobotConfig(
         asset=cooked_usd(bundle),
+        wheels=(
+            RoundedWheel(("[FR]L_foot",), 0.086, 0.026, 0.0546),
+            RoundedWheel(("[FR]R_foot",), 0.086, 0.026, -0.0546),
+        ) if wheel_geometry == "rounded" else (),
         position=(0.0, 0.0, 0.5),
         joint_position={
             ".*L_hip": 0.1,

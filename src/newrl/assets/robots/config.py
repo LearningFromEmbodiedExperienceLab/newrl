@@ -42,6 +42,49 @@ class ActuatorGroup:
 
 
 @dataclass(frozen=True)
+class RoundedWheel:
+    """Disk swept by a sphere of radius half_width, spinning around body Y.
+
+    The support distance along a unit direction n is half_width plus
+    (radius - half_width) times the length of n projected into the disk.
+    Replace the body's collision shape in place to preserve material, sensor
+    IDs, visual shapes and imported rigid-body inertia.
+    """
+
+    bodies: tuple[str, ...]
+    radius: float
+    half_width: float
+    center_y: float = 0.0
+
+    def apply(self, builder: newton.ModelBuilder, *, mesh_segments: int | None) -> None:
+        if not 0 < self.half_width < self.radius:
+            raise ValueError("wheel dimensions require 0 < half_width < radius")
+        core = self.radius - self.half_width
+        mesh = None
+        if mesh_segments is not None:
+            mesh = newton.Mesh.create_cylinder(
+                core, self.half_width, barrel_radius=self.half_width, up_axis=newton.Axis.Z,
+                segments=mesh_segments, compute_normals=False, compute_uvs=False, compute_inertia=False,
+            )
+            mesh.maxhullvert = len(mesh.vertices)
+        for body in resolve_scene_names(self.bodies, builder.body_label):
+            (shape,) = [
+                i for i in builder.body_shapes[body]
+                if builder.shape_flags[i] & newton.ShapeFlags.COLLIDE_SHAPES
+            ]
+            builder.shape_type[shape] = newton.GeoType.CYLINDER if mesh is None else newton.GeoType.CONVEX_MESH
+            builder.shape_source[shape] = mesh
+            builder.shape_scale[shape] = (
+                (core, self.half_width, self.half_width) if mesh is None else (1.0, 1.0, 1.0)
+            )
+            builder.shape_transform[shape] = wp.transform(
+                wp.vec3(0.0, self.center_y, 0.0),
+                wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), math.pi / 2),
+            )
+            builder.shape_collision_radius[shape] = self.radius
+
+
+@dataclass(frozen=True)
 class RobotConfig:
     asset: Path
     position: tuple[float, float, float]
@@ -61,6 +104,7 @@ class RobotConfig:
     joint_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
     body_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
     velocity_joints: tuple[str, ...] = ()
+    wheels: tuple[RoundedWheel, ...] = ()
 
     def __post_init__(self) -> None:
         if self.actuators and any(
@@ -72,7 +116,7 @@ class RobotConfig:
         ):
             raise ValueError("Actuator gains require actuators or explicit sequences")
 
-    def build(self) -> newton.ModelBuilder:
+    def build(self, *, wheel_mesh_segments: int | None = None) -> newton.ModelBuilder:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
         builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(
@@ -93,6 +137,8 @@ class RobotConfig:
             collapse_fixed_joints=False,
             enable_self_collisions=False,
         )
+        for wheel in self.wheels:
+            wheel.apply(builder, mesh_segments=wheel_mesh_segments)
         joints = scalar_joints(builder)
         labels = [builder.joint_label[joint] for joint in joints]
         position = _resolve_values(self.joint_position, labels, "joint_position")

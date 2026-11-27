@@ -7,7 +7,12 @@ type and within-world shape index so adjacent GPU lanes process corresponding
 links across replicas. Cached face IDs are stored by candidate slot, then row,
 so neighboring lanes can read consecutive entries.
 
-Each collision update clears the contact buffer and runs three kernels:
+The hybrid router also handles disk-swept rounded wheels on infinite planes.
+Their lowest witness is the disk rim in the projected downhill direction plus
+the spherical tread offset. A wheel lying on its side uses three rim points.
+Both paths write the same Newton contact records.
+
+Each mesh collision update runs three kernels:
 
 * ``_prepare`` bounds each primitive at its current orientation and expands its
   axis-aligned box by both shapes' gaps and margins. On a cache miss it queries
@@ -109,6 +114,9 @@ def _extent(kind: int, scale: wp.vec3, axis: wp.vec3) -> float:
     if kind == int(GeoType.CAPSULE):
         return scale[0] + scale[1] * axial
     radius = scale[0]
+    if scale[2] == scale[1] and scale[2] > 0.0:
+        # A rounded wheel is a disk swept by a sphere of radius half-width.
+        return radius * wp.length(wp.vec2(axis[0], axis[1])) + scale[1]
     if scale[2] > 0.0:
         # Enclose a barrel in the cylinder through its widest cross-section.
         height_sq = scale[1] * scale[1]
@@ -434,8 +442,50 @@ def _emit(
     tids[slot] = -1
 
 
+@wp.kernel(enable_backward=False)
+def _detect_wheel_plane(
+    queries: wp.array[int], ground: int, body_q: wp.array[wp.transform],
+    bodies: wp.array[int], local: wp.array[wp.transform], scales: wp.array[wp.vec3],
+    gaps: wp.array[float], margins: wp.array[float],
+    scores: wp.array2d[float], candidates: wp.array2d[ContactData],
+):
+    row = wp.tid()
+    wheel = queries[row]
+    pose = wp.transform_multiply(body_q[bodies[wheel]], local[wheel])
+    n = wp.quat_rotate(local[ground].q, wp.vec3(0.0, 0.0, 1.0))
+    direction = wp.quat_rotate_inv(pose.q, -n)
+    radial = wp.vec3(direction[0], direction[1], 0.0)
+    width = scales[wheel][1]
+    for i in range(MANIFOLD_SIZE):
+        scores[row, i] = -1.0e30
+    # A parallel disk face has a support area. Use three rim witnesses there.
+    count = int(1)
+    if wp.length(radial) < 1.0e-6:
+        count = 3
+    for i in range(count):
+        rim = wp.normalize(radial)
+        if count == 3:
+            angle = float(i) * 2.094395102
+            rim = wp.vec3(wp.cos(angle), wp.sin(angle), 0.0)
+        p = wp.transform_point(pose, scales[wheel][0] * rim) - width * n
+        d = wp.dot(n, p - local[ground].p)
+        contact = ContactData()
+        contact.shape_a = ground
+        contact.shape_b = wheel
+        contact.contact_normal_a_to_b = n
+        contact.contact_distance = d
+        contact.contact_point_center = p - 0.5 * d * n
+        contact.radius_eff_b = width
+        contact.margin_a = margins[ground]
+        contact.margin_b = margins[wheel]
+        contact.gap_sum = gaps[ground] + gaps[wheel]
+        if contact_passes_gap_check(contact):
+            scores[row, i] = -d
+            candidates[row, i] = contact
+
+
 class TerrainCollision:
-    """Static terrain BVH shared by all worlds, with a conservative face cache per primitive."""
+    """Static mesh BVH with per-pair face caches, or analytic wheel contacts on an infinite plane."""
 
     def __init__(
         self,
@@ -459,27 +509,41 @@ class TerrainCollision:
             ground_shape = matches[0]
         self.ground = ground = ground_shape
         kinds = model.shape_type.numpy()
-        if kinds[ground] != GeoType.MESH or model.shape_body.numpy()[ground] >= 0:
-            raise ValueError("terrain must be a static triangle mesh")
-        mesh = model.shape_source[ground]
-        scale = model.shape_scale.numpy()[ground]
-        pose = wp.transform(*model.shape_transform.numpy()[ground].tolist())
-        vertices = np.asarray(mesh.vertices).reshape(-1, 3) * scale
-        rotation = np.asarray(wp.quat_to_matrix(wp.transform_get_rotation(pose))).reshape(3, 3)
-        vertices = vertices @ rotation.T + np.asarray(wp.transform_get_translation(pose))
-        indices = np.asarray(mesh.indices).reshape(-1, 3)
-        if np.prod(scale) < 0:
-            indices = indices[:, [0, 2, 1]]
-        self.mesh = wp.Mesh(
-            wp.array(vertices, dtype=wp.vec3, device=self.device),
-            wp.array(indices.flatten(), dtype=int, device=self.device),
-        )
+        if model.shape_body.numpy()[ground] >= 0:
+            raise ValueError("terrain must be static")
+        self.wheel_plane = kinds[ground] == GeoType.PLANE and queries is not None
+        if not self.wheel_plane:
+            if kinds[ground] != GeoType.MESH:
+                raise ValueError("terrain must be a static triangle mesh")
+            mesh = model.shape_source[ground]
+            scale = model.shape_scale.numpy()[ground]
+            pose = wp.transform(*model.shape_transform.numpy()[ground].tolist())
+            vertices = np.asarray(mesh.vertices).reshape(-1, 3) * scale
+            rotation = np.asarray(wp.quat_to_matrix(wp.transform_get_rotation(pose))).reshape(3, 3)
+            vertices = vertices @ rotation.T + np.asarray(wp.transform_get_translation(pose))
+            indices = np.asarray(mesh.indices).reshape(-1, 3)
+            if np.prod(scale) < 0:
+                indices = indices[:, [0, 2, 1]]
+            self.mesh = wp.Mesh(
+                wp.array(vertices, dtype=wp.vec3, device=self.device),
+                wp.array(indices.flatten(), dtype=int, device=self.device),
+            )
         standalone = queries is None
         if standalone:
             pairs = model.shape_contact_pairs.numpy().reshape(-1, 2)
             mesh_pairs = pairs[np.any(pairs == ground, axis=1)]
             queries = mesh_pairs[mesh_pairs != ground]
-        if not np.isin(kinds[queries], _SUPPORTED_PRIMITIVES).all():
+        if self.wheel_plane:
+            scales = model.shape_scale.numpy()
+            widths = scales[queries, 1]
+            if (
+                np.any(scales[ground, :2] != 0)
+                or np.any(kinds[queries] != GeoType.CYLINDER)
+                or np.any(widths <= 0) or np.any(widths != scales[queries, 2])
+                or np.any(model.shape_body.numpy()[queries] < 0)
+            ):
+                raise ValueError("wheel-plane contacts require moving rounded wheels and an infinite plane")
+        elif not np.isin(kinds[queries], _SUPPORTED_PRIMITIVES).all():
             raise ValueError("terrain contacts support sphere, capsule, box, and cylinder primitives")
         # Schedule corresponding links together so adjacent GPU lanes take similar paths.
         worlds = model.shape_world.numpy()
@@ -489,15 +553,16 @@ class TerrainCollision:
         self.query_count = len(queries)
         self.queries = wp.array(queries, dtype=int, device=self.device)
         with wp.ScopedDevice(self.device):
-            self.poses = wp.empty(self.query_count, dtype=wp.transform)
-            self.bounds = wp.empty(self.query_count, dtype=wp.vec3)
-            self.cached_lo = wp.empty(self.query_count, dtype=wp.vec3)
-            self.cached_hi = wp.empty(self.query_count, dtype=wp.vec3)
-            self.counts = wp.full(self.query_count, INVALID_CACHE, dtype=int)
-            # Neighboring lanes load neighboring face IDs even for different worlds.
-            capacity = min(len(indices), MAX_CACHED_FACES)
-            index_dtype = wp.uint16 if len(indices) <= 65536 else wp.int32
-            self.faces = wp.empty((capacity, self.query_count), dtype=index_dtype)
+            if not self.wheel_plane:
+                self.poses = wp.empty(self.query_count, dtype=wp.transform)
+                self.bounds = wp.empty(self.query_count, dtype=wp.vec3)
+                self.cached_lo = wp.empty(self.query_count, dtype=wp.vec3)
+                self.cached_hi = wp.empty(self.query_count, dtype=wp.vec3)
+                self.counts = wp.full(self.query_count, INVALID_CACHE, dtype=int)
+                # Neighboring lanes load neighboring face IDs even for different worlds.
+                capacity = min(len(indices), MAX_CACHED_FACES)
+                index_dtype = wp.uint16 if len(indices) <= 65536 else wp.int32
+                self.faces = wp.empty((capacity, self.query_count), dtype=index_dtype)
             shape = (self.query_count, MANIFOLD_SIZE)
             self.scores = wp.empty(shape, dtype=float)
             self.candidates = wp.empty(shape, dtype=ContactData)
@@ -513,7 +578,8 @@ class TerrainCollision:
             )
 
     def invalidate(self) -> None:
-        self.counts.fill_(INVALID_CACHE)
+        if not self.wheel_plane:
+            self.counts.fill_(INVALID_CACHE)
 
     def collide(self, state: newton.State, contacts: newton.Contacts | None  =  None) -> None:
         m = self.model
@@ -522,49 +588,57 @@ class TerrainCollision:
             c = self.contacts
             c.clear()
         if self.query_count:
-            wp.launch(
-                _prepare,
-                self.query_count,
-                inputs=[
-                    state.body_q,
-                    self.queries,
-                    m.shape_body,
-                    m.shape_transform,
-                    m.shape_scale,
-                    m.shape_type,
-                    m.shape_margin,
-                    m.shape_gap,
-                    self.ground,
-                    wp.uint64(self.mesh.id),
-                    self.poses,
-                    self.bounds,
-                    self.cached_lo,
-                    self.cached_hi,
-                    self.counts,
-                    self.faces,
-                ],
-                device=self.device,
-            )
-            wp.launch(
-                _detect,
-                self.query_count,
-                inputs=[
-                    self.queries,
-                    self.poses,
-                    self.bounds,
-                    m.shape_scale,
-                    m.shape_type,
-                    m.shape_margin,
-                    m.shape_gap,
-                    self.ground,
-                    wp.uint64(self.mesh.id),
-                    self.counts,
-                    self.faces,
-                    self.scores,
-                    self.candidates,
-                ],
-                device=self.device,
-            )
+            if self.wheel_plane:
+                wp.launch(
+                    _detect_wheel_plane, self.query_count,
+                    inputs=[self.queries, self.ground, state.body_q, m.shape_body,
+                            m.shape_transform, m.shape_scale, m.shape_gap, m.shape_margin,
+                            self.scores, self.candidates], device=self.device,
+                )
+            else:
+                wp.launch(
+                    _prepare,
+                    self.query_count,
+                    inputs=[
+                        state.body_q,
+                        self.queries,
+                        m.shape_body,
+                        m.shape_transform,
+                        m.shape_scale,
+                        m.shape_type,
+                        m.shape_margin,
+                        m.shape_gap,
+                        self.ground,
+                        wp.uint64(self.mesh.id),
+                        self.poses,
+                        self.bounds,
+                        self.cached_lo,
+                        self.cached_hi,
+                        self.counts,
+                        self.faces,
+                    ],
+                    device=self.device,
+                )
+                wp.launch(
+                    _detect,
+                    self.query_count,
+                    inputs=[
+                        self.queries,
+                        self.poses,
+                        self.bounds,
+                        m.shape_scale,
+                        m.shape_type,
+                        m.shape_margin,
+                        m.shape_gap,
+                        self.ground,
+                        wp.uint64(self.mesh.id),
+                        self.counts,
+                        self.faces,
+                        self.scores,
+                        self.candidates,
+                    ],
+                    device=self.device,
+                )
             if self.deterministic:
                 wp.launch(
                     _flag_contacts, (self.query_count, MANIFOLD_SIZE),
@@ -605,7 +679,7 @@ class TerrainCollision:
 
 
 class HybridTerrainCollision:
-    """Route supported primitive–mesh pairs to the terrain kernel and the rest to Newton."""
+    """Route supported mesh and wheel–plane pairs to terrain kernels and the rest to Newton."""
 
     def __init__(
         self,
@@ -615,33 +689,41 @@ class HybridTerrainCollision:
         deterministic: bool  =  False,
     ) -> None:
         self.model = model
-        self.mesh_colliders = []
+        self.terrain_colliders = []
         kinds = model.shape_type.numpy()
         bodies = model.shape_body.numpy()
         mesh_shapes = [
             index for index in terrain_shapes
             if kinds[index] == GeoType.MESH and bodies[index] < 0
         ]
+        scales = model.shape_scale.numpy()
+        wheel = (kinds == GeoType.CYLINDER) & (scales[:, 1] == scales[:, 2]) & (scales[:, 2] > 0)
+        planes = [
+            i for i in terrain_shapes if kinds[i] == GeoType.PLANE
+            and bodies[i] < 0 and np.all(scales[i, :2] == 0)
+        ] if wheel.any() else []
         self.newton = None
         mesh_properties = model._shape_mesh_properties
         has_surface_velocity = mesh_properties is not None and np.any(
             mesh_properties.numpy() & int(MeshProperties.SURFACE_VELOCITY)
         )
         if (
-            mesh_shapes
+            (mesh_shapes or planes)
             and not model._has_body_variants
             and not has_surface_velocity
             and not np.any(model.shape_flags.numpy() & int(newton.ShapeFlags.HYDROELASTIC))
         ):
             remaining = model.shape_contact_pairs.numpy().reshape(-1, 2)
-            for ground in mesh_shapes:
+            for ground in [*mesh_shapes, *planes]:
                 ground_first = remaining[:, 0] == ground
                 other = np.where(ground_first, remaining[:, 1], remaining[:, 0])
                 owned = (ground_first | (remaining[:, 1] == ground)) & np.isin(
                     kinds[other], _SUPPORTED_PRIMITIVES
                 )
+                if kinds[ground] == GeoType.PLANE:
+                    owned &= wheel[other] & (bodies[other] >= 0)
                 if owned.any():
-                    self.mesh_colliders.append(
+                    self.terrain_colliders.append(
                         TerrainCollision(
                             model,
                             ground_shape=ground,
@@ -651,11 +733,11 @@ class HybridTerrainCollision:
                     )
                     remaining = remaining[~owned]
 
-        if not self.mesh_colliders:
+        if not self.terrain_colliders:
             self.newton = newton.CollisionPipeline(model, deterministic=deterministic)
             return
 
-        self.custom_capacity = sum(item.contact_capacity for item in self.mesh_colliders)
+        self.custom_capacity = sum(item.contact_capacity for item in self.terrain_colliders)
         if len(remaining) or model.particle_count:
             newton_capacity = model.rigid_contact_max
             if newton_capacity is None:
@@ -680,5 +762,5 @@ class HybridTerrainCollision:
             self.newton.collide(state, contacts)
         else:
             contacts.clear()
-        for collider in self.mesh_colliders:
+        for collider in self.terrain_colliders:
             collider.collide(state, contacts)
