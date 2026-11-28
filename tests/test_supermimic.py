@@ -37,7 +37,7 @@ class RepresentationTests(unittest.TestCase):
         model = builder.finalize(device='cpu')
         q_indices = torch.tensor([builder.joint_q_start[j] for j in (hinge, slide)])
         robot = RobotEntity(
-            joint_target_indices=None, default_position=None, action=None,
+            joint_target_indices=None, default_position=None,
             root_q_indices=torch.arange(7).unsqueeze(0), body_indices=torch.arange(4).unsqueeze(0),
             joint_q_indices=q_indices.unsqueeze(0), joint_qd_indices=q_indices.unsqueeze(0), joint_names=('hinge', 'slide'),
             body_names=('pelvis', 'arm', 'fixed', 'slider'),

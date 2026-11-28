@@ -1,6 +1,9 @@
 """CUDA regression tests for checkpoint replay and explicit resets."""
 
 import unittest
+from pathlib import Path
+from typing import override
+from unittest.mock import patch
 from dataclasses import replace
 
 import newton
@@ -9,11 +12,17 @@ import warp as wp
 from tensordict import TensorDict
 
 from newrl.configs import (
-    AS2Locomotion, AS2WLocomotion, AnymalLocomotion, G1Locomotion, M20SLocomotion, SpotLocomotion,
+    AS2Locomotion, AS2WLocomotion, AnymalLocomotion, EnvironmentConfig, G1Locomotion, M20SLocomotion, SpotLocomotion,
 )
 from newrl.sensors import ContactSensorConfig
 from newrl.env import StatefulEnvironment, StatelessEnvironment
+from newrl.assets.robots import ActuatorGroup, RobotConfig
+from newrl.mdp.actions import (
+    Action, ActionChannel, ActionConfig, JointPosition, JointPositionDelta, JointReferenceModel, JointVelocity,
+)
+from newrl.mdp.base import MDP, ObservationGroup
 from newrl.mdp.episode_ends import Timeout
+from newrl.mdp.observations import previous_action
 from newrl.solver_adapters import MujocoSimConfig, SteelSimConfig
 from newrl.steel import reconstruct_augmented_drive_torque
 from newrl.terrains import FlatMeshTerrainConfig, PlaneTerrainConfig
@@ -74,7 +83,8 @@ class EnvironmentTests(unittest.TestCase):
                     )
                     env.reset()
                     entity = env.scene.entities["robot"]
-                    mask = entity.velocity_mask
+                    mask = [i for i, channel in enumerate(env.scene.actions.channels) if channel.target == "velocity"]
+                    self.assertEqual(mask, [3, 7, 11, 15])
                     action = torch.zeros(2, env.action_dim, device=env.device)
                     action[:, mask] = 0.5
                     env.step(TensorDict({"action": action}, action.shape[:-1]))
@@ -88,6 +98,245 @@ class EnvironmentTests(unittest.TestCase):
                     target = wp.to_torch(env.control.joint_target_qd)[entity.joint_qd_indices]
                     self.assertTrue(torch.all(target[0] == 0))
                     self.assertTrue(torch.all(target[1, mask] == 5.0))
+
+    def test_combined_joint_targets(self):
+        def import_joint(builder, *args, **kwargs):
+            body = builder.add_link(mass=2.0, inertia=wp.mat33(1.0))
+            joint = builder.add_joint_prismatic(parent=-1, child=body, axis=(1, 0, 0), label="slide")
+            builder.add_articulation([joint])
+
+        def robot():
+            return RobotConfig(
+                asset=Path(__file__), position=(0, 0, 0), joint_position=(0,),
+                actuators=(ActuatorGroup(
+                    joint_names=("slide",), stiffness=20.0, damping=4.0, armature=0.05,
+                    effort_limit=5.0,
+                ),),
+                joint_mirror={"slide": ("slide", -1)},
+            )
+
+        mdp = MDP(
+            actions={
+                "position": JointPosition(joint_names="slide", scale=0.5),
+                "velocity": JointVelocity(joint_names="slide", scale=2.0),
+            },
+            observations={"action": ObservationGroup({"previous": previous_action})},
+        )
+        for solver in (MujocoSimConfig(), SteelSimConfig()):
+            with self.subTest(solver=type(solver).__name__), patch.object(
+                newton.ModelBuilder, "add_usd", import_joint
+            ):
+                cfg = EnvironmentConfig(
+                    num_envs=2, robots={"robot": robot}, solver=solver, substeps=1, sim_dt=1.0e-4,
+                    graph_capture=False, output_physical_fields=(("robot", "joint_torque"),),
+                )
+                env = StatefulEnvironment(cfg, mdp=mdp)
+                reset = env.reset()
+                self.assertEqual(env.action_dim, 2)
+                self.assertEqual(reset["observation", "action"].shape, (2, 2))
+                self.assertEqual(env.scene.actions.slices, {"position": slice(0, 1), "velocity": slice(1, 2)})
+                self.assertEqual(env.scene.action_symmetry_transform().signs.tolist(), [-1, -1])
+                action = torch.tensor([[0.2, 0.25], [0.4, 0.5]], device=env.device)
+                transition = env.step(TensorDict({"action": action}, [2]))
+                entity = env.scene.robots["robot"]
+                q = wp.to_torch(env.control.joint_target_q)[entity.joint_target_indices]
+                qd = wp.to_torch(env.control.joint_target_qd)[entity.joint_qd_indices]
+                torch.testing.assert_close(q, action[:, :1] * 0.5)
+                torch.testing.assert_close(qd, action[:, 1:] * 2)
+                torch.testing.assert_close(transition["observation", "action"], action)
+                # The two terms sum to four and eight, with the latter capped at five.
+                expected = torch.tensor([[4.0], [5.0]], device=env.device)
+                torch.testing.assert_close(
+                    transition["physical_state", "robot", "joint_torque"], expected,
+                    atol=0.01, rtol=0,
+                )
+                env.reset(torch.tensor([0], device=env.device))
+                for buffer, indices, kept in (
+                    (env.control.joint_target_q, entity.joint_target_indices, 0.2),
+                    (env.control.joint_target_qd, entity.joint_qd_indices, 1.0),
+                ):
+                    torch.testing.assert_close(
+                        wp.to_torch(buffer)[indices],
+                        torch.tensor([[0.0], [kept]], device=env.device),
+                    )
+
+    def test_joint_reference_model_capture_replay_and_partial_reset(self):
+        cfg = AS2WLocomotion(num_envs=2, substeps=3, graph_capture=True)
+        cfg.mdp.actions["FL_position"] = JointReferenceModel(
+            joint_names="FL_(hip|thigh|calf)", scale=0.4, omega=20.0, zeta=0.8,
+        )
+        env = StatefulEnvironment(cfg)
+        stateless = StatelessEnvironment(replace(cfg, graph_capture=False))
+        env.reset()
+        sim, mdp, _ = stateless.reset()
+        initial, initial_mdp = sim, mdp
+        robot = env.scene.robots["robot"]
+        position = "action/FL_position/reference_position"
+        velocity = "action/FL_position/reference_velocity"
+        joints = robot.joint_q_indices[:, :3]
+        torch.testing.assert_close(sim[position], wp.to_torch(env.state.joint_q)[joints])
+        self.assertFalse(torch.equal(sim[position], robot.default_position[:, :3]))
+        self.assertEqual(env.action_dim, 16)
+        self.assertFalse(torch.any(sim[velocity]))
+        q, v = sim[position].clone(), sim[velocity].clone()
+        for magnitude in (0.3, -0.2, 0.5, -0.4):
+            action = torch.full((2, 16), magnitude, device=env.device)
+            inputs = TensorDict({"action": action}, [2])
+            target = robot.default_position[:, :3] + 0.4 * action[:, :3]
+            for _ in range(cfg.substeps):
+                v = v + cfg.sim_dt * (400.0 * (target - q) - 32.0 * v)
+                q = q + cfg.sim_dt * v
+            expected = env.step(inputs)
+            sim, mdp, actual = stateless.step(sim, mdp, inputs)
+            torch.testing.assert_close(actual, expected)
+            state, _ = env.snapshot()
+            for key, value in ((position, q), (velocity, v)):
+                torch.testing.assert_close(sim[key], value)
+                torch.testing.assert_close(state[key], sim[key])
+            for field, indices, value in (
+                (env.control.joint_target_q, robot.joint_target_indices, q),
+                (env.control.joint_target_qd, robot.joint_qd_indices, v),
+            ):
+                torch.testing.assert_close(wp.to_torch(field)[indices[:, :3]], value)
+
+        self.assertEqual(len(env._physics_graphs), 2)
+        ids = torch.tensor([0], device=env.device)
+        env.reset(ids)
+        partial, _ = env.snapshot()
+        stateless_partial, _, _ = stateless.reset(sim, mdp, env_ids=ids)
+        torch.testing.assert_close(partial[position][0], wp.to_torch(env.state.joint_q)[joints][0])
+        self.assertFalse(torch.any(partial[velocity][0]))
+        for key in (position, velocity):
+            torch.testing.assert_close(partial[key][1], sim[key][1], rtol=0, atol=0)
+            torch.testing.assert_close(partial[key], stateless_partial[key])
+
+        env.restore(initial, initial_mdp)
+        expected = env.step(inputs)
+        replay, _, actual = stateless.step(initial, initial_mdp, inputs)
+        torch.testing.assert_close(actual, expected)
+        state, _ = env.snapshot()
+        torch.testing.assert_close(state[position], replay[position])
+        torch.testing.assert_close(state[velocity], replay[velocity])
+
+    def test_joint_position_delta_integrates_and_replays(self):
+        cfg = AS2WLocomotion(num_envs=2, substeps=3, graph_capture=True)
+        for leg, alpha in (("FL", 1.0), ("FR", 0.25)):
+            cfg.mdp.actions[f"{leg}_position"] = JointPositionDelta(
+                joint_names=f"{leg}_(hip|thigh|calf)", scale=2.0, alpha=alpha,
+            )
+        env = StatefulEnvironment(cfg)
+        stateless = StatelessEnvironment(replace(cfg, graph_capture=False))
+        env.reset()
+        sim, mdp, _ = stateless.reset()
+        robot = env.scene.robots["robot"]
+        cases = []
+        for leg, alpha in (("FL", 1.0), ("FR", 0.25)):
+            name = f"{leg}_position"
+            columns = env.scene.actions.slices[name]
+            joints, _ = robot.find_joints(f"{leg}_(hip|thigh|calf)")
+            position = f"action/{name}/position_target"
+            rate = f"action/{name}/filtered_rate"
+            q_indices = robot.joint_q_indices[:, joints]
+            target_indices = robot.joint_target_indices[:, joints]
+            torch.testing.assert_close(sim[position], sim["joint_q"].flatten()[q_indices])
+            cases.append((columns, alpha, position, rate, q_indices, target_indices))
+
+        for magnitude in (0.3, -0.2, 0.4, 0.0):
+            action = torch.full((2, env.action_dim), magnitude, device=env.device)
+            inputs = TensorDict({"action": action}, [2])
+            next_sim, next_mdp, transition = stateless.step(sim, mdp, inputs)
+            torch.testing.assert_close(env.step(inputs), transition)
+            for columns, alpha, position, rate, _, target_indices in cases:
+                q, v = sim[position], sim[rate]
+                for _ in range(cfg.substeps):
+                    v = v + alpha * (2.0 * action[:, columns] - v)
+                    q = q + cfg.sim_dt * v
+                torch.testing.assert_close(next_sim[position], q)
+                torch.testing.assert_close(next_sim[rate], v)
+                target = wp.to_torch(env.control.joint_target_q)[target_indices]
+                torch.testing.assert_close(target, q)
+            sim, mdp = next_sim, next_mdp
+
+        env.reset(torch.tensor([0], device=env.device))
+        partial, _ = env.snapshot()
+        for _, _, position, rate, q_indices, _ in cases:
+            torch.testing.assert_close(partial[position][0], partial["joint_q"].flatten()[q_indices[0]])
+            self.assertFalse(partial[rate][0].any())
+            torch.testing.assert_close(partial[position][1], sim[position][1])
+            torch.testing.assert_close(partial[rate][1], sim[rate][1])
+
+        env.restore(sim, mdp)
+        for _, _, position, _, _, target_indices in cases:
+            target = wp.to_torch(env.control.joint_target_q)[target_indices]
+            torch.testing.assert_close(target, sim[position])
+
+    def test_low_pass_joint_targets_and_non_joint_action_state(self):
+        class Accumulator(Action):
+            channels = (ActionChannel("accumulate"),)
+
+            @override
+            def _initialize(self, scene, outputs):
+                self.total = torch.zeros((scene.config.num_envs, 1), device=scene.model.device.alias)
+
+            @override
+            def process_action(self, action):
+                self.total.add_(action)
+
+            @override
+            def reset(self, state, ids):
+                self.total[ids] = 0
+
+            @override
+            def checkpoint_views(self):
+                return {"total": self.total}
+
+        class AccumulatorConfig(ActionConfig):
+            @override
+            def build(self, robots, sim_dt):
+                return Accumulator()
+
+        base = AS2WLocomotion(num_envs=2, substeps=3, graph_capture=True)
+        for name in ("FL_position", "FL_velocity", "FR_position"):
+            base.mdp.actions[name] = replace(base.mdp.actions[name], alpha=0.25)
+        base.mdp.actions["non_joint"] = AccumulatorConfig()
+        env = StatefulEnvironment(base)
+        env.reset()
+        initial, initial_mdp = env.snapshot()
+        robot = env.scene.robots["robot"]
+        q_key = "action/FL_position/filtered_target"
+        v_key = "action/FL_velocity/filtered_target"
+        right_key = "action/FR_position/filtered_target"
+        total_key = "action/non_joint/total"
+        self.assertEqual(env.action_dim, 17)
+        q, v, right = initial[q_key], initial[v_key], initial[right_key]
+        for value in (0.5, -0.2, 0.1):
+            action = torch.full((2, 17), value, device=env.device)
+            desired_q = robot.default_position[:, :3] + 0.4 * value
+            desired_v = action[:, 3:4] * 10.0
+            desired_right = robot.default_position[:, 4:7] + 0.4 * value
+            for _ in range(base.substeps):
+                q = q + 0.25 * (desired_q - q)
+                v = v + 0.25 * (desired_v - v)
+                right = right + 0.25 * (desired_right - right)
+            env.step(TensorDict({"action": action}, [2]))
+        sim, _ = env.snapshot()
+        torch.testing.assert_close(sim[q_key], q)
+        torch.testing.assert_close(sim[v_key], v)
+        torch.testing.assert_close(sim[right_key], right)
+        torch.testing.assert_close(sim[total_key], torch.full_like(sim[total_key], 0.4))
+        torch.testing.assert_close(wp.to_torch(env.control.joint_target_q)[robot.joint_target_indices[:, :3]], q)
+        torch.testing.assert_close(wp.to_torch(env.control.joint_target_qd)[robot.joint_qd_indices[:, 3:4]], v)
+
+        env.reset(torch.tensor([0], device=env.device))
+        reset, _ = env.snapshot()
+        for key in (q_key, v_key, right_key, total_key):
+            torch.testing.assert_close(reset[key][1], sim[key][1], rtol=0, atol=0)
+        self.assertFalse(reset[v_key][0].any())
+        self.assertFalse(reset[total_key][0].any())
+        env.restore(initial, initial_mdp)
+        restored, _ = env.snapshot()
+        for key in (q_key, v_key, right_key, total_key):
+            torch.testing.assert_close(restored[key], initial[key], rtol=0, atol=0)
 
     def test_quadruped_flat_step_reflects_observations_and_rewards(self):
         for factory in (

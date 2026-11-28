@@ -135,7 +135,11 @@ class WheelTerrainTests(unittest.TestCase):
                             )
 
                         action = torch.zeros((2, env.action_dim), device=env.device)
-                        action[:, robot.velocity_mask] = (0.5 * sides)[:, None]
+                        wheel_channels = [
+                            i for i, channel in enumerate(env.scene.actions.channels)
+                            if channel.target == "velocity"
+                        ]
+                        action[:, wheel_channels] = (0.5 * sides)[:, None]
                         gaps = []
                         loads = []
                         wheel_positions = []

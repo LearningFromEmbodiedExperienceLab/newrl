@@ -77,6 +77,90 @@ collision uses a 32-sided convex mesh sampled from the same profile. Leg actions
 joint position offsets, and wheel actions set target angular velocities.
 The actuator gains and action scales are starting values for training.
 
+## Action layout
+
+The MDP declares an ordered mapping of action components. Each joint action
+selects scalar joints on one robot and contributes one
+policy channel per match, in scene joint order. The environment concatenates
+the components in declaration order. The resulting layout defines the width
+and order of `sim_inputs["action"]`, the previous-action observation, and
+action symmetry.
+
+```python
+from newrl.mdp.actions import JointPosition, JointVelocity
+
+task.mdp.actions = {
+    "position": JointPosition(joint_names=".*_knee_joint", scale=0.3),
+    "velocity": JointVelocity(joint_names=".*_knee_joint", scale=1.5),
+}
+```
+
+The two components write distinct target fields for the same joints. Position
+commands are scaled offsets from the nominal pose. Velocity commands are
+absolute targets in joint units per second. Set the robot's stiffness and
+damping for the fields in use. A velocity-only channel requires zero stiffness.
+Each joint target field can have one writer. Unselected fields keep their
+reset targets of nominal position and zero velocity.
+
+The `ActionLayout` constructor calls `ActionConfig.build()` to resolve channels
+and set actuator modes on the robot templates before replication. After
+replication, the layout calls `Action._initialize(scene, outputs)` and supplies
+writable views for any declared joint outputs. Every action implements `process_action()`.
+Mark methods inherited from either action base class with `@override` when
+implementing or overriding them.
+Actions that update at physics rate set `every_substep` and implement
+`apply_substep()`. Stateful actions expose their persistent tensors through
+`checkpoint_views()` and reset only the selected worlds.
+
+Use `env.scene.actions.channels` and `.slices` to inspect the bound policy
+order. A checkpoint's policy expects the same channel order and mapping
+during playback.
+
+Set `alpha<1` on `JointPosition` or `JointVelocity` to low-pass filter its
+target. Each physics substep applies `filtered += alpha * (desired - filtered)`.
+Reset seeds a filtered position from the actual reset pose and a filtered
+velocity from zero. The default `alpha=1` publishes the direct target once per
+control tick, before the first solver substep.
+
+`JointPositionDelta` writes position targets by integrating `scale * action`
+as a rate in joint units per second. Each substep low-pass filters that rate
+using `alpha`, then adds `sim_dt * filtered_rate` to the previous position
+target. Reset starts from the actual reset pose with zero rate. Both the last
+target and the filtered rate are part of the simulator checkpoint.
+
+Use `JointReferenceModel` for one policy channel per joint with filtered
+position and velocity targets.
+
+```python
+from newrl.mdp.actions import JointReferenceModel
+
+task.mdp.actions = {
+    "knees": JointReferenceModel(
+        joint_names=".*_knee_joint", scale=0.3, omega=20.0, zeta=1.0,
+    ),
+}
+```
+
+The action sets the desired position relative to nominal. At each physics
+substep, the filter applies acceleration
+`omega**2 * (desired - reference_position) - 2 * zeta * omega * reference_velocity`.
+It integrates velocity first, then position, and sends both to the PD drive.
+`omega` is in radians per second and `zeta` is the damping ratio. Both accept
+a scalar or a joint-name mapping. Use matching filter parameters on mirrored
+joints for symmetry augmentation, and select a physics timestep small enough
+for stable integration.
+
+Bound components own their live filter buffers. The simulator checkpoint
+copies them under `action/<component>/<field>`. Reset seeds the reference
+model from the actual reset joint positions and zero reference velocity.
+The desired position is regenerated from the action at the next control step.
+Changing `sim_dt` requires rebuilding the environment. SuperMimic residual
+actions require direct position channels.
+
+An action component can declare policy channels with no joint outputs.
+The layout dispatches the component's input and lifecycle hooks and
+publishes joint targets for components that declare them.
+
 ## MDP term selection
 
 Observation and reward `body_names`/`joint_names` selectors accept a name, a

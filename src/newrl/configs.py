@@ -8,6 +8,8 @@ from dataclasses import dataclass, field, replace
 import newton
 
 from .assets.objects import BoxConfig, CylinderConfig, ObjectConfig, ObjectVariants, SphereConfig, TableConfig
+from .mdp.actions import ActionConfig, JointPosition, JointVelocity
+from .assets.robots.g1 import g1_actuators
 from .mdp.base import MDP, ObservationGroup, RewardGroup
 from .mdp.episode_ends import HeightTermination, TiltTermination, Timeout
 from .mdp.observations import (
@@ -92,6 +94,15 @@ class EnvironmentConfig:
             raise ValueError("collision must be newton, mujoco, or newrl")
 
 
+def _g1_actions() -> dict[str, ActionConfig]:
+    scales = {
+        pattern: 0.25 * group.effort_limit / group.stiffness
+        for group in g1_actuators()
+        for pattern in group.joint_names
+    }
+    return {"position": JointPosition(scale=scales)}
+
+
 def locomotion_mdp(mdp_type: type[MDP] = MDP, base: str = "base") -> MDP:
     return mdp_type(
         observations={
@@ -138,6 +149,7 @@ def G1Tabletop() -> EnvironmentConfig:
             )),
         },
         mdp=MDP(
+            actions=_g1_actions(),
             observations={
                 "proprio": ObservationGroup({"joint_pos": EntityField("robot", "joint_pos")}),
                 "privileged": ObservationGroup({"object_pose": EntityField("object", "body_pose_w")}),
@@ -159,25 +171,44 @@ def G1MotionTracking(**overrides: Any) -> EnvironmentConfig:
         "(left|right)_elbow_link",
         "(left|right)_wrist_yaw_link",
     )
-    # TODO: du not reuse locomotion_mdp 
-    mdp = locomotion_mdp(MotionTrackingMDP, base="pelvis")
-    mdp.observations["command"] = ObservationGroup({"reference": ReferenceMotion()})
-    mdp.rewards["tracking"] = RewardGroup({
-        "body_pos": TrackBodyMotion(1.0, 0.3, "position", body_names=bodies, anchor_body="pelvis"),
-        "body_ori": TrackBodyMotion(1.0, 0.4, "orientation", body_names=bodies, anchor_body="pelvis"),
-        "body_lin_vel": TrackBodyMotion(1.0, 1.0, "linear_velocity", body_names=bodies),
-        "body_ang_vel": TrackBodyMotion(1.0, 3.14, "angular_velocity", body_names=bodies),
-        "root_pos": TrackBodyMotion(0.5, 0.3, body_names="pelvis"),
-        "root_ori": TrackBodyMotion(0.5, 0.4, "orientation", body_names="pelvis"),
-        "action_rate": ActionRate(0.05),
-        "joint_limit": JointLimit(2.0),
-    })
-    mdp.terminations = {
-        "height": TrackingDeviation(BodyHeight("robot", "pelvis")),
-        "tilt": TrackingDeviation(BodyHeight("robot", "pelvis"), "tilt", 0.8),
-    }
-    mdp.truncations["clip_end"] = ClipEnd()
-    mdp.truncations["timeout"] = Timeout(1000)
+    mdp = MotionTrackingMDP(
+        actions=_g1_actions(),
+        observations={
+            "proprio": ObservationGroup(
+                {
+                    "joint_pos": EntityField("robot", "joint_pos"),
+                    "joint_vel": EntityField("robot", "joint_vel"),
+                    "projected_gravity": ProjectedGravity("robot", "pelvis"),
+                    "previous_action": previous_action,
+                    "root_ang_vel_b": BodyAngularVelocity("robot", "pelvis", frame="body"),
+                }
+            ),
+            "privileged": ObservationGroup(
+                {
+                    "root_lin_vel_b": BodyLinearVelocity("robot", "pelvis", frame="body"),
+                    "root_height": BodyHeight("robot", "pelvis"),
+                }
+            ),
+            "command": ObservationGroup({"reference": ReferenceMotion()}),
+        },
+        rewards={
+            "tracking": RewardGroup({
+                "body_pos": TrackBodyMotion(1.0, 0.3, "position", body_names=bodies, anchor_body="pelvis"),
+                "body_ori": TrackBodyMotion(1.0, 0.4, "orientation", body_names=bodies, anchor_body="pelvis"),
+                "body_lin_vel": TrackBodyMotion(1.0, 1.0, "linear_velocity", body_names=bodies),
+                "body_ang_vel": TrackBodyMotion(1.0, 3.14, "angular_velocity", body_names=bodies),
+                "root_pos": TrackBodyMotion(0.5, 0.3, body_names="pelvis"),
+                "root_ori": TrackBodyMotion(0.5, 0.4, "orientation", body_names="pelvis"),
+                "action_rate": ActionRate(0.05),
+                "joint_limit": JointLimit(2.0),
+            }),
+        },
+        terminations={
+            "height": TrackingDeviation(BodyHeight("robot", "pelvis")),
+            "tilt": TrackingDeviation(BodyHeight("robot", "pelvis"), "tilt", 0.8),
+        },
+        truncations={"timeout": Timeout(1000), "clip_end": ClipEnd()},
+    )
     options = dict(num_envs=4096, robots={"robot": assetx_g1}, mdp=mdp, name="G1LAFAN1Tracking")
     options.update(overrides)
     return EnvironmentConfig(**options)
@@ -192,6 +223,7 @@ def G1Locomotion(
     """Track planar velocity and yaw rate with the 29-DoF Unitree G1."""
     config = _velocity_locomotion(
         assetx_g1,
+        actions=_g1_actions(),
         base="pelvis",
         feet=r"(left|right)_ankle_roll_link",
         contact_observation=contact_observation,
@@ -219,6 +251,7 @@ def AnymalLocomotion(
 ) -> EnvironmentConfig:
     return _velocity_locomotion(
         newton_anymal_c,
+        actions={"position": JointPosition(scale=0.5)},
         base="base",
         feet=r"(LF|LH|RF|RH)_FOOT",
         contact_observation=contact_observation,
@@ -235,6 +268,7 @@ def SpotLocomotion(
 ) -> EnvironmentConfig:
     return _velocity_locomotion(
         assetx_spot,
+        actions={"position": JointPosition(scale=0.5)},
         base="base_link",
         feet=".*_foot",
         contact_observation=contact_observation,
@@ -251,6 +285,7 @@ def AS2Locomotion(
 ) -> EnvironmentConfig:
     return _velocity_locomotion(
         assetx_as2,
+        actions={"position": JointPosition(scale=0.4)},
         base="base_link",
         feet=".*_foot",
         contact_observation=contact_observation,
@@ -262,16 +297,35 @@ def AS2Locomotion(
 def AS2WLocomotion(
     *, contact_observation: bool = False, sphere_wheels: bool = False, **overrides: Any
 ) -> EnvironmentConfig:
+    # Each leg's wheel channel follows its position channels.
+    actions: dict[str, ActionConfig] = {}
+    for leg in ("FL", "FR", "RL", "RR"):
+        actions[f"{leg}_position"] = JointPosition(
+            joint_names=f"{leg}_(hip|thigh|calf)", scale=0.4
+        )
+        actions[f"{leg}_velocity"] = JointVelocity(joint_names=f"{leg}_foot", scale=10.0)
     return _velocity_locomotion(
         assetx_as2w_sphere if sphere_wheels else assetx_as2w,
+        actions=actions,
         base="base_link", feet=r"(FL|FR|RL|RR)_foot",
         contact_observation=contact_observation, foot_slip_weight=None, **overrides,
     )
 
 
 def M20SLocomotion(*, contact_observation: bool  =  False, **overrides: Any) -> EnvironmentConfig:
+    # Each leg's wheel channel follows its position channels.
+    actions: dict[str, ActionConfig] = {}
+    for leg in ("fl", "fr", "hl", "hr"):
+        actions[f"{leg}_position"] = JointPosition(
+            joint_names=f"{leg}_(hipx|hipy|knee)_joint", scale=0.4
+        )
+        actions[f"{leg}_velocity"] = JointVelocity(
+            joint_names=f"{leg}_wheel_joint", scale=10.0
+        )
     return _velocity_locomotion(
-        assetx_m20s, base="base_link", feet=r"(fl|fr|hl|hr)_wheel",
+        assetx_m20s,
+        actions=actions,
+        base="base_link", feet=r"(fl|fr|hl|hr)_wheel",
         contact_observation=contact_observation, foot_slip_weight=None, **overrides,
     )
 
@@ -279,6 +333,7 @@ def M20SLocomotion(*, contact_observation: bool  =  False, **overrides: Any) -> 
 def _velocity_locomotion(
     robot: Callable[[], RobotConfig],
     *,
+    actions: dict[str, ActionConfig],
     base: str,
     feet: str,
     contact_observation: bool,
@@ -286,6 +341,7 @@ def _velocity_locomotion(
     **overrides: Any,
 ) -> EnvironmentConfig:
     mdp = locomotion_mdp(VelocityMDP, base)
+    mdp.actions = actions
     mdp.observations["command"] = ObservationGroup(
         {"velocity_command": velocity_command}
     )

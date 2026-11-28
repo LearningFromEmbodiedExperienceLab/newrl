@@ -94,8 +94,13 @@ class TrackingEnvironmentTests(unittest.TestCase):
         action = learner.eval().act(initial.clone(), deterministic=True)["action"]
         learner.train()
         robot = env.scene.entities[task.mdp.entity]
+        with env._stream():
+            env.scene.actions.process_actions(action)
+            env.scene.actions.apply_substep(
+                env.control, env.state, first_substep=True,
+            )
         torch.testing.assert_close(
-            robot.action(action, robot.default_position),
+            wp.to_torch(env.control.joint_target_q)[robot.joint_target_indices],
             initial["mdp_state", "future_reference", "joint_pos"][:, 0],
         )
         batch, carry = learner.collect(env, 4, initial)
@@ -163,7 +168,7 @@ class TrackingEnvironmentTests(unittest.TestCase):
                 # FK must have incorporated root and joint reset velocities.
                 pelvis = next(i for i, name in enumerate(robot.body_names) if name.rsplit("/", 1)[-1] == "pelvis")
                 torch.testing.assert_close(wp.to_torch(env.state.body_qd)[robot.body_indices[:, pelvis]], expected)
-                action = TensorDict({"action": torch.zeros(2, 29, device=env.device)}, [2])
+                action = TensorDict({"action": torch.zeros(2, env.action_dim, device=env.device)}, [2])
                 next_sim, next_mdp, transition = env.step(sim, mdp, action)
                 env.mdp.velocities = False
                 ids = torch.tensor([0], device=env.device)

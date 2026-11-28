@@ -105,8 +105,6 @@ def assetx_as2w(*, wheel_geometry: Literal["rounded", "mesh", "sphere"] = "round
                 friction=0.01,
             ),
         ),
-        action_scale={".*_(hip|thigh|calf)": 0.4, ".*_foot": 10.0},
-        velocity_joints=(".*_foot",),
         joint_mirror={
             "FL_hip": ("FR_hip", -1),
             "FR_hip": ("FL_hip", -1),

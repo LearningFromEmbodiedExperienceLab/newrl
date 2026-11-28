@@ -89,7 +89,6 @@ class RobotConfig:
     asset: Path
     position: tuple[float, float, float]
     joint_position: tuple[float, ...] | dict[str, float]
-    action_scale: ValueSpec
     stiffness: tuple[float, ...] | dict[str, float] | None = None
     damping: tuple[float, ...] | dict[str, float] | None = None
     armature: tuple[float, ...] | dict[str, float] | None = None
@@ -103,7 +102,6 @@ class RobotConfig:
     contact_friction: float = 0.75
     joint_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
     body_mirror: dict[str, tuple[str, int]] = field(default_factory=dict)
-    velocity_joints: tuple[str, ...] = ()
     wheels: tuple[RoundedWheel, ...] = ()
 
     def __post_init__(self) -> None:
@@ -143,25 +141,22 @@ class RobotConfig:
         labels = [builder.joint_label[joint] for joint in joints]
         position = _resolve_values(self.joint_position, labels, "joint_position")
         stiffness, damping, armature, effort, velocity, friction, viscous = self._gains(labels)
-        velocity_indices = set()
-        if self.velocity_joints:
-            velocity_indices = set(resolve_scene_names(self.velocity_joints, labels))
         values = zip(
             joints, position, stiffness, damping, armature, effort, velocity, friction, viscous,
             strict=True,
         )
-        for index, (joint, pos, ke, kd, arm, limit, speed, joint_friction, passive_damping) in enumerate(values):
+        for joint, pos, ke, kd, arm, limit, speed, joint_friction, passive_damping in values:
             q = builder.joint_q_start[joint]
             dof = builder.joint_qd_start[joint]
             builder.joint_q[q] = pos
             builder.joint_target_ke[dof] = ke
             builder.joint_target_kd[dof] = kd
             builder.joint_armature[dof] = arm
-            mode = newton.JointTargetMode.POSITION
-            if index in velocity_indices and ke != 0:
-                raise ValueError(f"Velocity joint {labels[index]!r} requires zero stiffness")
-            if index in velocity_indices:
-                mode = newton.JointTargetMode.VELOCITY
+            # The task selects the mode for driven channels. Joints outside
+            # the action layout hold their nominal position or zero velocity.
+            mode = newton.JointTargetMode.POSITION if ke > 0 else (
+                newton.JointTargetMode.VELOCITY if kd > 0 else newton.JointTargetMode.NONE
+            )
             builder.joint_target_mode[dof] = int(mode)
             if limit is not None:
                 builder.joint_effort_limit[dof] = limit
@@ -172,9 +167,6 @@ class RobotConfig:
             if passive_damping is not None:
                 builder.joint_damping[dof] = passive_damping
         return builder
-
-    def action_scales(self, labels: Sequence[str]) -> tuple[float, ...]:
-        return tuple(_resolve_values(self.action_scale, labels, "action_scale"))
 
     def _gains(self, labels: Sequence[str]) -> tuple[list[float | None], ...]:
         if not self.actuators:

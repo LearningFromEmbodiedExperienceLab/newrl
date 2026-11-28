@@ -10,6 +10,7 @@ from tensordict import TensorDict
 
 from newrl.utils.symmetry import SymmetryTransform
 
+from .actions import ActionConfig
 from .terms import EpisodeEndTerm, ObservationTerm, RewardTerm
 
 if TYPE_CHECKING:
@@ -180,6 +181,7 @@ class MDP:
     rewards: dict[str, RewardGroup] = field(default_factory=dict)
     terminations: dict[str, EpisodeEndTerm] = field(default_factory=dict)
     truncations: dict[str, EpisodeEndTerm] = field(default_factory=dict)
+    actions: dict[str, ActionConfig] = field(default_factory=dict)
     _history: dict[str, ObservationTerm] = field(default_factory=dict, init=False, repr=False)
 
     def _initialize(self, scene: "Scene") -> Self:

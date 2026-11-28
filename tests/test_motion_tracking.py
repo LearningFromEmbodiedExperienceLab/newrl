@@ -53,7 +53,7 @@ class MotionTrackingTests(unittest.TestCase):
     def scene(self):
         joints, bodies = len(JOINT_NAMES), len(self.motion.body_names)
         robot = RobotEntity(
-            joint_target_indices=None, default_position=None, action=None,
+            joint_target_indices=None, default_position=None,
             joint_names=JOINT_NAMES, body_names=self.motion.body_names,
             joint_q_indices=torch.arange(joints).expand(2, -1), joint_qd_indices=torch.arange(joints).expand(2, -1),
             root_q_indices=torch.arange(7).expand(2, -1), root_qd_indices=torch.arange(6).expand(2, -1),

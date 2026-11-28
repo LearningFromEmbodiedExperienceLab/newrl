@@ -90,8 +90,6 @@ def assetx_m20s() -> RobotConfig:
                 friction=0.01,
             ),
         ),
-        action_scale={".*_(hipx|hipy|knee)_joint": 0.4, ".*_wheel_joint": 10.0},
-        velocity_joints=(".*_wheel_joint",),
         joint_mirror={
             "fl_hipx_joint": ("fr_hipx_joint", -1),
             "fr_hipx_joint": ("fl_hipx_joint", -1),

@@ -30,7 +30,7 @@ class _EnvironmentCore:
             raise ValueError("The batched environment requires CUDA")
         self.config = config
         self.num_envs = config.num_envs
-        self.scene = Scene(config)
+        self.scene = Scene(config, mdp)
         self.model = self.scene.model
         self.device = torch.device(wp.device_to_torch(self.model.device))
         with self._stream():
@@ -65,10 +65,7 @@ class _EnvironmentCore:
         self._physics_graphs = {}
         self._physics_warmed_up = False
         self.control = self.model.control()
-        self.action_sizes = [
-            entity.joint_q_indices.shape[1] for entity in self.scene.robots.values()
-        ]
-        self.action_dim = sum(self.action_sizes)
+        self.action_dim = self.scene.actions.dim
         self.control_dt = self.scene.control_dt
         self.profiler: StageProfiler | None = None
 
@@ -117,7 +114,12 @@ class _EnvironmentCore:
     ) -> tuple[newton.State, newton.State]:
         for sensor in self.scene.contact_sensors.values():
             sensor.begin_step()
+        actions = self.scene.actions
         for substep in range(self.config.substeps):
+            with self._profile_stage("action_substep") if profile else nullcontext():
+                actions.apply_substep(
+                    self.control, state, first_substep=substep == 0,
+                )
             final = substep == self.config.substeps - 1
             sample_contacts = any(
                 sensor.track_history or final
@@ -235,11 +237,7 @@ class _EnvironmentCore:
             self.state,
             joint_mask=wp.from_torch(joint_mask, dtype=wp.bool),
         )
-        targets = wp.to_torch(self.control.joint_target_q)
-        for entity in self.scene.robots.values():
-            targets[entity.joint_target_indices[ids]] = entity.default_position[ids]
-            if entity.velocity_mask is not None:
-                wp.to_torch(self.control.joint_target_qd)[entity.joint_qd_indices[ids]] = 0.0
+        self.scene.actions.reset(self.control, self.state, ids)
         self._sample_cameras(
             reset=True, reset_mask=None if env_ids is None else mask[:-1]
         )
@@ -257,14 +255,11 @@ class _EnvironmentCore:
             raise ValueError(
                 f"Expected action shape {(self.num_envs, self.action_dim)}, got {tuple(action.shape)}"
             )
+        if self.config.sim_dt != self.scene.sim_dt:
+            raise ValueError("Changing sim_dt requires rebuilding the environment")
         with self._profile_stage("action"):
             action = action.to(device=self.device, dtype=torch.float32).clone()
-            for entity, values in zip(
-                self.scene.robots.values(),
-                action.split(self.action_sizes, dim=-1),
-                strict=True,
-            ):
-                entity.write_action(self.control, values)
+            self.scene.actions.process_actions(action)
         self._advance()
         self._sample_cameras()
         with self._profile_stage("state_read"):
@@ -286,6 +281,7 @@ class _EnvironmentCore:
             for name, array in arrays.items()
         }
         views.update(self._solver.checkpoint_views())
+        views.update(self.scene.actions.checkpoint_views())
         if (randomization := self.scene.randomization) is not None:
             views.update({
                 f"randomization:{name}": value
@@ -339,6 +335,7 @@ class _EnvironmentCore:
             if name.startswith("randomization:"):
                 continue
             view.copy_(sim_state[name])
+        self.scene.actions.restore_outputs(self.control)
 
 
 class StatefulEnvironment(_EnvironmentCore):

@@ -62,7 +62,8 @@ a partial reset.
   `reset(env_ids)` to reset selected worlds.
 - `StatelessEnvironment.step(sim_state, mdp_state, sim_inputs)` returns
   `(next_sim_state, next_mdp_state, transition)`. The simulator checkpoint
-  includes persistent solver buffers as well as Newton state. The
+  includes persistent solver buffers and action-component state as well as
+  Newton state. The
   optional `physical_state` in the transition is a physical snapshot. Use the
   explicit simulator checkpoint for branching or replay. A partial stateless
   reset requires both prior checkpoints and `env_ids`.
@@ -74,9 +75,15 @@ a partial reset.
 ## Transition schema and training
 
 Both environment step APIs accept a TensorDict of simulator inputs containing
-`action` with shape `[num_envs, action_dim]`. The environment owns the
-interpretation of simulator inputs. Its step output contains the true successor
+`action` with shape `[num_envs, action_dim]`. The MDP declares ordered action
+components in `mdp.actions`. The scene binds their joint targets before solver
+construction, and the environment writes the targets. Use the bound layout
+for action size, channel order, previous-action observations, and symmetry.
+The step output contains the true successor
 observation, MDP outputs, optional physical snapshot, reward and ending flags.
+Implement action interfaces through the `ActionConfig` and `Action` ABCs and
+mark overridden methods with `@override`. Use separate action classes for
+different command semantics.
 
 The shared collector in [rollout.py](src/newrl/algos/rollout.py) assembles a
 TensorDict with batch size `[num_envs]` for each real transition.
@@ -226,8 +233,8 @@ observation: zero on reset and the successor count on step. Output snapshots
 own their storage and remain valid after later steps and partial resets.
 
 Passive objects use `EnvironmentConfig.objects`. Bind physical fields and
-contact sensors through named scene entities. Use `scene.robots` for action
-dimensions, actuator targets and action symmetry. Object variants preserve
+contact sensors through named scene entities. Use `scene.actions` for the
+bound policy action layout. Object variants preserve
 ordered body and joint topology across worlds. See the
 [simulation guide](docs/simulation.md#passive-objects-and-per-world-variants)
 for the backend-specific geometry constraints and replay contract.

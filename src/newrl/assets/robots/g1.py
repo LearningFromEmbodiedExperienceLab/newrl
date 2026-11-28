@@ -35,9 +35,7 @@ def build_g1(vendor_dir: Path) -> MujocoAsset:
     ]).transform(MujocoAsset.from_file(vendor_dir / "g1.xml"))
 
 
-def assetx_g1() -> RobotConfig:
-    """mjlab's 29-DoF G1 with its bent-knee pose and implicit motor gains."""
-    bundle = cooked_robot("g1", robot_model_dir())
+def g1_actuators() -> tuple[ActuatorGroup, ...]:
     # Reflected motor inertias from mjlab's unitree_g1/g1_constants.py.
     armature_5020 = 0.139e-4 * ((1 + 46 / 18) * 4.5) ** 2 + 0.017e-4 * 4.5**2 + 0.169e-4
     armature_7520_14 = (
@@ -47,7 +45,7 @@ def assetx_g1() -> RobotConfig:
     armature_7520_22 = 0.489e-4 * (4.5 * 5)**2 + 0.109e-4 * 5**2 + 0.738e-4
     armature_4010 = 0.068e-4 * (5 * 5)**2
     frequency = 10 * 2 * math.pi
-    actuators = tuple(
+    return tuple(
         ActuatorGroup(
             joint_names=names,
             stiffness=armature * frequency**2,
@@ -71,6 +69,11 @@ def assetx_g1() -> RobotConfig:
             ),
         )
     )
+
+
+def assetx_g1() -> RobotConfig:
+    """mjlab's 29-DoF G1 with its bent-knee pose and implicit motor gains."""
+    bundle = cooked_robot("g1", robot_model_dir())
     return RobotConfig(
         asset=cooked_usd(bundle),
         position=(0.0, 0.0, 0.76),
@@ -85,10 +88,5 @@ def assetx_g1() -> RobotConfig:
             ".*_(hip_roll|hip_yaw|ankle_roll|shoulder_yaw|wrist_roll|wrist_pitch|wrist_yaw)_joint": 0.0,
             "waist_(yaw|roll|pitch)_joint": 0.0,
         },
-        actuators=actuators,
-        action_scale={
-            pattern: 0.25 * group.effort_limit / group.stiffness
-            for group in actuators
-            for pattern in group.joint_names
-        },
+        actuators=g1_actuators(),
     )

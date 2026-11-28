@@ -182,6 +182,15 @@ class ConfigTests(unittest.TestCase):
         if ("widget", "base") not in cs:
             cs.store("base", _Widget(), group="widget")
 
+    def test_action_components_round_trip_in_policy_order(self):
+        from newrl.utils.config import dump, load
+
+        task = cs.get("task", "AS2WLocoFlat")
+        self.assertEqual(
+            list(load(dump(task)).mdp.actions.items()),
+            list(task.mdp.actions.items()),
+        )
+
     def test_overrides_round_trip_slice_tuple_and_callable(self):
         from newrl.utils.config import resolve
 

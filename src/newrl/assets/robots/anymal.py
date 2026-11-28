@@ -17,7 +17,6 @@ def newton_anymal_c() -> RobotConfig:
         stiffness=tuple(cfg["mjw_joint_stiffness"]),
         damping=tuple(cfg["mjw_joint_damping"]),
         armature=tuple(cfg["mjw_joint_armature"]),
-        action_scale=float(cfg["action_scale"]),
         joint_mirror={
             "LF_HAA": ("RF_HAA", -1),
             "RF_HAA": ("LF_HAA", -1),

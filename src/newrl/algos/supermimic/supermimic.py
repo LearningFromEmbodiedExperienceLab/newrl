@@ -208,14 +208,7 @@ class SuperMimicConfig:
                 raise ValueError('Residual actions require a single motion-tracking robot')
             if 'future_reference' not in env.output_mdp_fields:
                 raise ValueError('Residual actions require future_reference in MDP outputs')
-            robot = env.scene.entities[mdp.entity]
-            if robot.velocity_mask is not None:
-                raise ValueError('Residual actions require position-controlled joints')
-            nominal = robot.default_position[0]
-            scale = torch.as_tensor(robot.action.scale, device=nominal.device, dtype=nominal.dtype)
-            if not (torch.isfinite(scale) & (scale > 0)).all():
-                raise ValueError('Residual actions require finite, positive action scales')
-            action_mapping = nominal.detach().clone(), scale.reciprocal()
+            action_mapping = env.scene.actions.inverse_position_mapping(mdp.entity)
         return SuperMimic(self, mdp, representation, env.device, env.action_dim, dynamics, action_mapping)
 
 
@@ -294,7 +287,7 @@ class SuperMimic(nn.Module):
         device: torch.device | str,
         action_dim: int,
         dynamics: ObservationGroup | None,
-        action_mapping: tuple[torch.Tensor, torch.Tensor] | None,
+        action_mapping: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None,
     ) -> None:
         super().__init__()
         self.config, self.mdp = config, mdp
@@ -311,7 +304,8 @@ class SuperMimic(nn.Module):
         self.actor[-1].weight._non_muon = True
         nn.init.zeros_(self.actor[-1].weight)
         nn.init.zeros_(self.actor[-1].bias)
-        nominal, inverse_scale = action_mapping if action_mapping is not None else (None, None)
+        order, nominal, inverse_scale = action_mapping if action_mapping is not None else (None, None, None)
+        self.register_buffer('_action_joint_order', order, persistent=False)
         self.register_buffer('_nominal_joint_pos', nominal, persistent=False)
         self.register_buffer('_inverse_action_scale', inverse_scale, persistent=False)
         self.actor_ema = (
@@ -372,6 +366,7 @@ class SuperMimic(nn.Module):
                 if memory is None:
                     raise ValueError('Residual actions require decision-time MDP state')
                 reference = memory['future_reference', 'joint_pos'][..., 0, :]
+                reference = reference.index_select(-1, self._action_joint_order)
                 action = action + (reference - self._nominal_joint_pos) * self._inverse_action_scale
             return action
 

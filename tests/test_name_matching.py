@@ -71,7 +71,7 @@ class TermSelectionTests(unittest.TestCase):
 
     def setUp(self):
         robot = RobotEntity(
-            joint_target_indices=None, root_q_indices=None, default_position=None, action=None,
+            joint_target_indices=None, root_q_indices=None, default_position=None,
             joint_names=('robot/right_knee','robot/left_knee','robot/waist'),
             body_names=('robot/right_foot','robot/base','robot/left_foot'),
             joint_q_indices=torch.arange(3).unsqueeze(0),joint_qd_indices=torch.arange(3).unsqueeze(0),body_indices=torch.arange(3).unsqueeze(0),

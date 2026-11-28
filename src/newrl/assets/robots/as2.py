@@ -89,7 +89,6 @@ def assetx_as2() -> RobotConfig:
                 friction=0.01,
             ),
         ),
-        action_scale={".*_joint": 0.4},
         joint_mirror={
             "FL_hip_joint": ("FR_hip_joint", -1),
             "FR_hip_joint": ("FL_hip_joint", -1),

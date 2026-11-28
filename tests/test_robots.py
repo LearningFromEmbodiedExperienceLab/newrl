@@ -7,6 +7,8 @@ from unittest.mock import patch
 
 import newton
 
+from newrl.configs import AS2Locomotion, G1Locomotion, SpotLocomotion
+from newrl.mdp.actions import ActionLayout
 from newrl.assets.robots import ActuatorGroup, RobotConfig, assetx_as2, assetx_g1, assetx_spot, scalar_joints
 
 
@@ -29,7 +31,7 @@ class ActuatorSpecTests(unittest.TestCase):
                 ):
                     config = RobotConfig(
                         asset=asset, position=(0, 0, 0),
-                        joint_position={".*": 0.0}, action_scale=0.5,
+                        joint_position={".*": 0.0},
                         actuators=(
                             ActuatorGroup(
                                 joint_names=("hip",),
@@ -52,7 +54,7 @@ class ActuatorSpecTests(unittest.TestCase):
             with patch.object(newton.ModelBuilder, "add_usd", import_joints):
                 config = RobotConfig(
                     asset=asset, position=(0, 0, 0), joint_position=(0, 0),
-                    action_scale=0.5, stiffness=(10, 10), damping=(2, 3), armature=(0.1, 0.1),
+                    stiffness=(10, 10), damping=(2, 3), armature=(0.1, 0.1),
                 )
                 self.assertEqual(config.build().joint_damping, [0.7, 0.7])
 
@@ -74,7 +76,8 @@ class ActuatorSpecTests(unittest.TestCase):
         labels = [builder.joint_label[joint] for joint in joints]
         self.assertEqual(len(joints), 29)
         stiffness, damping, armature, effort, speed, _, _ = config._gains(labels)
-        scales = config.action_scales(labels)
+        layout = ActionLayout(G1Locomotion().mdp.actions, {"robot": (builder, joints)}, 0.005)
+        scales = [channel.scale for channel in layout.channels[layout.slices["position"]]]
         for index, joint in enumerate(joints):
             dof = builder.joint_qd_start[joint]
             self.assertAlmostEqual(builder.joint_target_ke[dof], stiffness[index])
@@ -89,9 +92,9 @@ class ActuatorSpecTests(unittest.TestCase):
         self.assertAlmostEqual(builder.joint_q[2], 0.76, places=5)
 
     def test_spot_and_as2_cover_their_joints(self):
-        for factory, hip_stiffness, calf_armature, scale in (
-            (assetx_spot, 60.0, 0.01, 0.5),
-            (assetx_as2, 60.0, 0.038, 0.4),
+        for factory, task, hip_stiffness, calf_armature, scale in (
+            (assetx_spot, SpotLocomotion, 60.0, 0.01, 0.5),
+            (assetx_as2, AS2Locomotion, 60.0, 0.038, 0.4),
         ):
             with self.subTest(factory=factory.__name__):
                 config = factory()
@@ -100,7 +103,8 @@ class ActuatorSpecTests(unittest.TestCase):
                 labels = [builder.joint_label[joint] for joint in joints]
                 self.assertEqual(len(labels), 12)
                 stiffness, _, armature, effort, _, _, _ = config._gains(labels)
-                scales = config.action_scales(labels)
+                layout = ActionLayout(task().mdp.actions, {"robot": (builder, joints)}, 0.005)
+                scales = [channel.scale for channel in layout.channels[layout.slices["position"]]]
                 self.assertEqual(set(scales), {scale})
                 self.assertIn(hip_stiffness, stiffness)
                 self.assertIn(calf_armature, armature)

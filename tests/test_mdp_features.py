@@ -27,7 +27,7 @@ from newrl.mdp.rewards import (
 class MDPTests(unittest.TestCase):
     def test_history_updates_only_on_step_and_retains_imagination_gradients(self):
         robot = RobotEntity(
-            joint_target_indices=None, body_indices=None, root_q_indices=None, default_position=None, action=None,
+            joint_target_indices=None, body_indices=None, root_q_indices=None, default_position=None,
             joint_q_indices=torch.zeros(1, 2, dtype=torch.long), joint_qd_indices=torch.zeros(1, 2, dtype=torch.long),
             joint_names=('robot/a', 'robot/b'), body_names=(),
         )
@@ -112,7 +112,7 @@ class MDPTests(unittest.TestCase):
             entities={
                 "robot": RobotEntity(
                     joint_names=(), joint_q_indices=None, joint_qd_indices=None, joint_target_indices=None, root_q_indices=None,
-                    default_position=None, action=None,
+                    default_position=None,
                     body_names=("robot/base",),
                     body_indices=torch.zeros(1, 1, dtype=torch.long),
                 )
@@ -189,7 +189,7 @@ class RewardRangeTests(unittest.TestCase):
             entities={
                 "robot": RobotEntity(
                     joint_names=(), joint_q_indices=None, joint_qd_indices=None, joint_target_indices=None, root_q_indices=None,
-                    default_position=None, action=None,
+                    default_position=None,
                     body_names=("robot/base", "robot/ignored", "robot/foot"),
                     body_indices=torch.zeros(2, 3, dtype=torch.long),
                 )
@@ -261,7 +261,7 @@ class RewardRangeTests(unittest.TestCase):
 def _bind_joints(term, names=("LF_HAA", "LF_KFE")):
     entity = RobotEntity(
         joint_q_indices=None, joint_target_indices=None, body_indices=None, root_q_indices=None, default_position=None,
-        action=None, body_names=(),
+        body_names=(),
         joint_names=tuple(f"robot/{name}" for name in names),
         joint_qd_indices=torch.zeros(1, len(names), dtype=torch.long),
     )

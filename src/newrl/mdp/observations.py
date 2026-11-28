@@ -90,7 +90,7 @@ class PreviousAction:
     _size: int | None = runtime_field()
 
     def _initialize(self, scene: "Scene") -> Self:
-        return replace(self, _size=sum(entity.joint_q_indices.shape[1] for entity in scene.robots.values()))
+        return replace(self, _size=scene.actions.dim)
 
     @property
     def shape(self) -> torch.Size:

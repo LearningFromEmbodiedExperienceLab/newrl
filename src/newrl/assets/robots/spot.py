@@ -84,7 +84,6 @@ def assetx_spot() -> RobotConfig:
                 friction=0.01,
             ),
         ),
-        action_scale=0.5,
         joint_mirror={
             "fl_hx": ("fr_hx", -1),
             "fr_hx": ("fl_hx", -1),

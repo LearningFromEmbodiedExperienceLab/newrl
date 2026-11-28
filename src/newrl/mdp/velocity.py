@@ -144,6 +144,7 @@ class VelocityMDP(MDP):
         return {"velocity_command": command}
 
     def _sample_command(self, mdp_state: TensorDict, selected: torch.Tensor) -> None:
+        """Set commands and hold counters for selected worlds at reset or resampling."""
         previous = mdp_state["velocity_command"]
         samples, rng = self._uniform(mdp_state["command_rng"], 3, previous.dtype)
         lo = previous.new_tensor((self.vx[0], self.vy[0], self.yaw_rate[0]))

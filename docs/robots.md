@@ -72,8 +72,8 @@ directly using the following fields.
 - `actuators` defines groups of joints with PD gains, armature, effort and
   velocity limits, friction, and optional passive `viscous_damping`. The
   alternative is to provide explicit stiffness, damping and armature values.
-- `action_scale` defines the action-to-target scaling. Use
-  `velocity_joints` for joints controlled by velocity targets, such as wheels.
+- The task's `mdp.actions` declares the policy channels and their target
+  scales. See [Action layout](simulation.md#action-layout).
 - `joint_mirror` and `body_mirror` describe symmetry for mirrored
   observations and actions when using symmetry augmentation.
 

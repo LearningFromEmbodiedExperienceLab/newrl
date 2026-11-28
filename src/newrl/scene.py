@@ -11,7 +11,7 @@ import torch
 import warp as wp
 from tensordict import TensorDict
 
-from .mdp.actions import JointPositionAction
+from .mdp.actions import ActionLayout
 from .assets.objects import ObjectVariants
 from .randomization import DomainRandomization
 from .assets.robots.config import scalar_joints
@@ -136,23 +136,23 @@ class Entity:
 @dataclass(kw_only=True)
 class RobotEntity(Entity):
     joint_target_indices: torch.Tensor
-    action: JointPositionAction
-    velocity_mask: torch.Tensor | None = None
 
-    def write_action(self, control: newton.Control, action: torch.Tensor) -> None:
-        position = self.action(action, self.default_position)
-        if self.velocity_mask is not None:
-            position = torch.where(self.velocity_mask, self.default_position, position)
-            wp.to_torch(control.joint_target_qd)[self.joint_qd_indices] = torch.where(
-                self.velocity_mask, self.action.scale * action, 0.0
-            )
-        wp.to_torch(control.joint_target_q)[self.joint_target_indices] = position
+    def write_joint_target(
+        self, control: newton.Control, env_ids: torch.Tensor | slice, *,
+        joint_pos: torch.Tensor | float | None = None,
+        joint_vel: torch.Tensor | float | None = None,
+    ) -> None:
+        """Write position and/or velocity targets in entity order for the selected worlds."""
+        if joint_pos is not None:
+            wp.to_torch(control.joint_target_q)[self.joint_target_indices[env_ids]] = joint_pos
+        if joint_vel is not None:
+            wp.to_torch(control.joint_target_qd)[self.joint_qd_indices[env_ids]] = joint_vel
 
 
 class Scene:
     physical_read_plan: dict[str, tuple[str, ...]]
 
-    def __init__(self, config: "EnvironmentConfig") -> None:
+    def __init__(self, config: "EnvironmentConfig", mdp: "MDP | None" = None) -> None:
         self.config = config
         self.sim_dt = config.sim_dt
         self.control_dt = config.sim_dt * config.substeps
@@ -164,6 +164,12 @@ class Scene:
             name: [cfg.build(wheel_mesh_segments=32 if config.collision == "mujoco" else None)]
             for name, cfg in robots.items()
         }
+        robot_joints = {name: scalar_joints(parts[0]) for name, parts in components.items()}
+        self.actions = ActionLayout(
+            (config.mdp if mdp is None else mdp).actions,
+            {name: (parts[0], robot_joints[name]) for name, parts in components.items()},
+            self.sim_dt,
+        )
         rng = Random(config.object_seed)
         self.object_variant_ids: dict[str, tuple[int, ...]] = {}
         for name, cfg in config.objects.items():
@@ -195,7 +201,8 @@ class Scene:
             for name, options in components.items():
                 part = options[chosen.get(name, 0)]
                 if name not in layouts:
-                    joints = [world.joint_count + j for j in scalar_joints(part)]
+                    local_joints = robot_joints[name] if name in robot_joints else scalar_joints(part)
+                    joints = [world.joint_count + j for j in local_joints]
                     bodies = range(world.body_count, world.body_count + part.body_count)
                     roots = [world.joint_count + j for j, kind in enumerate(part.joint_type)
                              if kind == newton.JointType.FREE and part.joint_parent[j] == -1]
@@ -268,25 +275,16 @@ class Scene:
             )
             if name in robots:
                 robot = robots[name]
-                part = components[name][0]
-                local_labels = [part.joint_label[j] for j in scalar_joints(part)]
-                velocity_mask = None
-                if robot.velocity_joints:
-                    indices = resolve_scene_names(robot.velocity_joints, labels)
-                    velocity_mask = torch.zeros(len(labels), dtype=torch.bool, device=device)
-                    velocity_mask[indices] = True
                 self.robots[name] = RobotEntity(
                     **fields,
                     joint_target_indices=wp.to_torch(model.joint_target_q_start)[joint_ids].long(),
-                    action=JointPositionAction(torch.tensor(robot.action_scales(local_labels),
-                                                           dtype=torch.float32, device=device)),
                     joint_mirror=robot.joint_mirror, body_mirror=robot.body_mirror,
-                    velocity_mask=velocity_mask,
                 )
                 self.entities[name] = self.robots[name]
             else:
                 self.entities[name] = Entity(**fields)
 
+        self.actions._initialize(self)
         self.randomization: DomainRandomization | None = None
         self.sensors: dict[str, Sensor] = {}
         for name, sensor in config.sensors.items():
@@ -332,23 +330,8 @@ class Scene:
                 self.camera_bvh_refit |= sensor.requires_bvh_refit
 
     def action_symmetry_transform(self) -> SymmetryTransform:
-        """Build a CPU transform in the same entity and joint order as actions."""
-        transforms = []
-        for name, entity in self.robots.items():
-            try:
-                transform = entity.joint_symmetry_transform()
-                default = entity.default_position[0].cpu()
-                scale = entity.action.scale.cpu()
-                if not torch.allclose(transform(default), default):
-                    raise ValueError("The nominal joint pose is not mirror symmetric")
-                if not torch.allclose(transform.permute(scale), scale):
-                    raise ValueError("Paired joints must use the same action scale")
-            except ValueError as exc:
-                raise ValueError(
-                    f"Cannot reflect actions for entity {name!r}: {exc}"
-                ) from exc
-            transforms.append(transform)
-        return SymmetryTransform.cat(transforms)
+        """Build a CPU transform in flattened policy channel order."""
+        return self.actions.symmetry_transform()
 
     def resolve_physical_fields(
         self,
