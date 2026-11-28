@@ -66,7 +66,7 @@ def assetx_spot() -> RobotConfig:
         joint_position={".*_hx": 0.0, ".*_hy": 1.04, ".*_kn": -1.8},
         actuators=(
             ActuatorGroup(
-                (".*_hx", ".*_hy"),
+                joint_names=(".*_hx", ".*_hy"),
                 stiffness=60.0,
                 damping=1.5,
                 armature=0.01,
@@ -75,7 +75,7 @@ def assetx_spot() -> RobotConfig:
                 friction=0.01,
             ),
             ActuatorGroup(
-                (".*_kn",),
+                joint_names=(".*_kn",),
                 stiffness=60.0,
                 damping=1.5,
                 armature=0.01,

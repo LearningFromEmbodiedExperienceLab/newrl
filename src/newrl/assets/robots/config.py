@@ -14,7 +14,7 @@ from newrl.utils.string import resolve_scene_names
 ValueSpec = float | dict[str, float]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class ActuatorGroup:
     """Gains for the joints selected by ``joint_names``.
 

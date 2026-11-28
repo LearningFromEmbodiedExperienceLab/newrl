@@ -117,6 +117,13 @@ custom detector on supported mesh pairs and rounded wheels against infinite plan
 boxes, and other pairs to Newton. All three refresh contacts on each physics
 substep in training.
 
+On static meshes where at least 10% of faces touch a coplanar internal
+feature, rounded wheels use exact face witnesses for shallow contacts and
+Newton's convex query for exposed edges, vertices, and deep overlap. This
+path suppresses artificial contacts at coplanar internal features.
+Predominantly noncoplanar meshes use the generic convex query. Both paths
+reuse cached BVH candidates.
+
 ## Robot asset cache
 
 See the [robot contribution guide](robots.md) for adding robot definitions
