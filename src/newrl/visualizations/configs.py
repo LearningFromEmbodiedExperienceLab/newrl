@@ -59,6 +59,7 @@ class BrowserViewerConfig:
     terrain_origin_frames: bool = True
     camera_preview: bool = False
     task_visualizations: bool = True
+    paused: bool = False
 
     def __post_init__(self) -> None:
         if not 0 <= self.port <= 65535:
@@ -75,6 +76,7 @@ class BrowserViewerConfig:
             recording_dir=self.recording_dir, task_name=env.config.name,
             timeline=timeline,
             terrain_origin_frames=self.terrain_origin_frames,
+            paused=self.paused,
         )
 
 

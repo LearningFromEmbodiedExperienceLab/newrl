@@ -89,6 +89,7 @@ class BrowserViewer(newton.viewer.ViewerNull):
     def __init__(
         self, scene, port, splat_path=None, *, recording_dir="recordings",
         task_name="viewport", timeline=None, terrain_origin_frames=True,
+        paused=False,
     ):
         assets = Path(__file__).with_name("browser_assets")
         if not (assets / "index.html").is_file():
@@ -113,6 +114,8 @@ class BrowserViewer(newton.viewer.ViewerNull):
         self.started_at = None
         self._last_frame_time = None
         self._paused = Event()
+        if paused:
+            self._paused.set()
         self.running = True
         self.timeline = timeline
         self.num_worlds = scene.model.world_count

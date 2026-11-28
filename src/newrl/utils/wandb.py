@@ -3,6 +3,7 @@
 import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event, Thread
 
 _RUN_PART = re.compile(r"[A-Za-z0-9_.-]+")
 _CHECKPOINT = re.compile(r"checkpoint_([0-9]+)\.pt")
@@ -24,7 +25,9 @@ def resolve_checkpoint(spec: str, cache_dir: Path) -> Path:
     selected_iteration = int(iteration) if separator else None
 
     import wandb
+    from tqdm import tqdm
 
+    print(f"Resolving W&B checkpoint for {run_path}...", flush=True)
     run = wandb.Api().run(run_path)
     selected = None
     latest_iteration = -1
@@ -48,12 +51,52 @@ def resolve_checkpoint(spec: str, cache_dir: Path) -> Path:
     path = directory / selected.name
     if path.is_file() and path.stat().st_size == selected.size:
         return path
+    print(
+        f"Downloading {selected.name} ({selected.size / 1_000_000:.1f} MB)...",
+        flush=True,
+    )
     with TemporaryDirectory(dir=directory) as temporary:
-        with selected.download(root=temporary):
-            downloaded = Path(temporary) / selected.name
+        downloaded = _download_with_progress(selected, Path(temporary), tqdm)
         if downloaded.stat().st_size != selected.size:
             raise OSError(
                 f"Incomplete download of {selected.name} from W&B run {run_path}"
             )
         downloaded.replace(path)
     return path
+
+
+def _download_with_progress(file, root: Path, tqdm) -> Path:
+    """Download ``file`` into ``root`` while showing bytes written."""
+    destination = root / file.name
+    stop = Event()
+
+    def watch() -> None:
+        seen = 0
+        with tqdm(
+            total=file.size,
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1000,
+            desc=file.name,
+            leave=False,
+        ) as bar:
+            while not stop.wait(0.2):
+                seen = _advance(bar, destination, seen)
+            _advance(bar, destination, seen)
+
+    watcher = Thread(target=watch, daemon=True)
+    watcher.start()
+    try:
+        with file.download(root=root):
+            pass
+    finally:
+        stop.set()
+        watcher.join()
+    return destination
+
+
+def _advance(bar, path: Path, seen: int) -> int:
+    current = path.stat().st_size if path.is_file() else 0
+    if current > seen:
+        bar.update(current - seen)
+    return max(current, seen)
