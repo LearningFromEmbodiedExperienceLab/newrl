@@ -68,7 +68,12 @@ and restore the corresponding model parameters before solver history.
 
 Wheeled locomotion presets are available as `task=M20SLocoFlat`,
 `task=AS2WLocoFlat`, and `task=AS2WSphereLocoFlat`. The sphere variant keeps
-the AS2W tire visuals and uses spheres for wheel contacts. Leg actions set
+the AS2W tire visuals and uses spheres for wheel contacts. The other two
+presets use a rounded wheel, modeled as a disk swept by a sphere. AS2W has
+an 86 mm rolling radius and 26 mm half-width, with tread centers 54.6 mm
+outboard of the foot origins. M20S uses 90 mm and 27 mm respectively.
+Newton and NewRL collide the analytic barrel cylinder. MuJoCo native
+collision uses a 32-sided convex mesh sampled from the same profile. Leg actions set
 joint position offsets, and wheel actions set target angular velocities.
 The actuator gains and action scales are starting values for training.
 
@@ -108,9 +113,50 @@ for a flat border and `task.terrain.border.width=5.0` to set its width.
 
 Set `task.collision=newton` for the default detector, `task.collision=mujoco`
 for MuJoCo Warp's built-in detector, or `task.collision=newrl` to use the
-custom detector on supported mesh pairs. The custom mode delegates heightfields,
+custom detector on supported mesh pairs and rounded wheels against infinite planes. The custom mode delegates heightfields,
 boxes, and other pairs to Newton. All three refresh contacts on each physics
 substep in training.
+
+On static meshes where at least 10% of faces touch a coplanar internal
+feature, rounded wheels use exact face witnesses for shallow contacts and
+Newton's convex query for exposed edges, vertices, and deep overlap. This
+path suppresses artificial contacts at coplanar internal features.
+Predominantly noncoplanar meshes use the generic convex query. Both paths
+reuse cached BVH candidates.
+
+### Wheel collision follow-ups
+
+On the flat and rough triangle meshes tested, the analytic wheel with
+`task.collision=newrl` stepped 1.56–2.33× and 1.28–1.49× faster,
+respectively, than a 32-sided hull sampled from the same profile. Both used
+the MuJoCo Warp solver. NewRL handled the analytic wheel–terrain pairs
+and delegated the hull–terrain pairs to Newton. Treat these results as a
+baseline for this detector and workload.
+
+1. **Find what dominates on each terrain.** Profile cache hits, candidate
+   triangles, direct face contacts, convex queries, and emitted contacts.
+   Compare AS2W and M20S at 2,048 and 4,096 worlds with the same geometry,
+   reset seed, and action trace. Measure collision and solver time in a
+   separate eager pass and report captured step time. Use flat, mixed, and
+   rough meshes to check the current 10% coplanar threshold. See the
+   [benchmark guide](../benchmarks/README.md).
+2. **Reduce triangle visits where they dominate.** Merge connected coplanar
+   triangles into collision patches or index those patches above the
+   triangle BVH. Preserve boundaries, holes, material boundaries, and sharp
+   features. Mixed terrain may benefit from selecting the fast path per
+   patch if the extra dispatch and storage pay for themselves.
+3. **Specialize remaining contact queries if profiling warrants it.** For
+   separated cores, the closest distance from the wheel's disk to a triangle
+   minus the sweep radius gives clearance. Try direct disk–edge and
+   disk–vertex queries when the convex fallback dominates. Keep the convex
+   query for overlapping cores and ambiguous witnesses. For generated stairs,
+   benchmark wheel–box separately before adding a dedicated kernel.
+
+Validate each change against the infinite plane and several tessellations
+of the same surface, then check a ramp seam, stair nose, and concave valley.
+Track axle-height ripple, lateral impulses, normal continuity, and contact
+counts. Check winding and boundaries on reconstructed meshes, and verify
+that contact and constraint buffers have room during batch benchmarks.
 
 ## Robot asset cache
 

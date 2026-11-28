@@ -17,7 +17,7 @@ from assetx import (
 from assetx.conversion.urdf2mjcf import urdf_to_mjcf
 
 from ..cooking import cooked_robot, cooked_usd, robot_model_dir
-from .config import ActuatorGroup, RobotConfig
+from .config import ActuatorGroup, RobotConfig, RoundedWheel
 
 
 UNITREE_AS2W = (
@@ -58,11 +58,15 @@ def build_as2w_sphere(vendor_dir: Path) -> MujocoAsset:
     return build_as2w(vendor_dir, sphere_wheels=True)
 
 
-def assetx_as2w(*, wheel_geometry: Literal["mesh", "sphere"] = "mesh") -> RobotConfig:
-    recipe = {"mesh": "as2w", "sphere": "as2w_sphere"}[wheel_geometry]
+def assetx_as2w(*, wheel_geometry: Literal["rounded", "mesh", "sphere"] = "rounded") -> RobotConfig:
+    recipe = {"rounded": "as2w", "mesh": "as2w", "sphere": "as2w_sphere"}[wheel_geometry]
     bundle = cooked_robot(recipe, robot_model_dir())
     return RobotConfig(
         asset=cooked_usd(bundle),
+        wheels=(
+            RoundedWheel(("[FR]L_foot",), 0.086, 0.026, 0.0546),
+            RoundedWheel(("[FR]R_foot",), 0.086, 0.026, -0.0546),
+        ) if wheel_geometry == "rounded" else (),
         position=(0.0, 0.0, 0.5),
         joint_position={
             ".*L_hip": 0.1,
@@ -73,9 +77,33 @@ def assetx_as2w(*, wheel_geometry: Literal["mesh", "sphere"] = "mesh") -> RobotC
             ".*_foot": 0.0,
         },
         actuators=(
-            ActuatorGroup((".*_hip", ".*_thigh"), 60.0, 1.5, 0.026, 60.0, 20.0, 0.01),
-            ActuatorGroup((".*_calf",), 60.0, 1.5, 0.038, 90.0, 20.0, 0.01),
-            ActuatorGroup((".*_foot",), 0.0, 1.5, 0.01, 15.0, 30.0, 0.01),
+            ActuatorGroup(
+                joint_names=(".*_hip", ".*_thigh"),
+                stiffness=60.0,
+                damping=1.5,
+                armature=0.026,
+                effort_limit=60.0,
+                velocity_limit=20.0,
+                friction=0.01,
+            ),
+            ActuatorGroup(
+                joint_names=(".*_calf",),
+                stiffness=60.0,
+                damping=1.5,
+                armature=0.038,
+                effort_limit=90.0,
+                velocity_limit=20.0,
+                friction=0.01,
+            ),
+            ActuatorGroup(
+                joint_names=(".*_foot",),
+                stiffness=0.0,
+                damping=1.5,
+                armature=0.01,
+                effort_limit=15.0,
+                velocity_limit=30.0,
+                friction=0.01,
+            ),
         ),
         action_scale={".*_(hip|thigh|calf)": 0.4, ".*_foot": 10.0},
         velocity_joints=(".*_foot",),

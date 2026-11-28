@@ -49,7 +49,7 @@ def assetx_g1() -> RobotConfig:
     frequency = 10 * 2 * math.pi
     actuators = tuple(
         ActuatorGroup(
-            names,
+            joint_names=names,
             stiffness=armature * frequency**2,
             damping=4 * armature * frequency,
             armature=armature,

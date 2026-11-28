@@ -176,7 +176,7 @@ next/
 - The RL environment defaults to Newton's `CollisionPipeline`.
   `task.collision=mujoco` uses MuJoCo Warp's built-in detector and requires the
   MuJoCo solver. `task.collision=newrl` routes supported primitive–terrain mesh
-  pairs to the custom collider and delegates the remaining pairs to Newton.
+  pairs and rounded-wheel–infinite-plane pairs to the custom collider and delegates the remaining pairs to Newton.
   Every mode refreshes contacts on each physics substep. Compare modes with
   the collision sweep in [benchmark_environments.py](scripts/benchmark_environments.py).
   Solver and timing defaults are configured in `EnvironmentConfig`. MuJoCo Warp

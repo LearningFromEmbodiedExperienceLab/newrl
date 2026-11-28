@@ -15,7 +15,7 @@ from assetx import (
 )
 
 from ..cooking import cooked_robot, cooked_usd, robot_model_dir
-from .config import ActuatorGroup, RobotConfig
+from .config import ActuatorGroup, RobotConfig, RoundedWheel
 
 
 DEEP_M20S = (
@@ -60,6 +60,7 @@ def assetx_m20s() -> RobotConfig:
     bundle = cooked_robot("m20s", robot_model_dir())
     return RobotConfig(
         asset=cooked_usd(bundle),
+        wheels=(RoundedWheel((".*_wheel",), 0.090, 0.027),),
         position=(0.0, 0.0, 0.55),
         joint_position={
             ".*_hipx_joint": 0.0,
@@ -70,8 +71,24 @@ def assetx_m20s() -> RobotConfig:
             ".*_wheel_joint": 0.0,
         },
         actuators=(
-            ActuatorGroup((".*_(hipx|hipy|knee)_joint",), 60.0, 1.5, 0.02, 60.0, 20.0, 0.01),
-            ActuatorGroup((".*_wheel_joint",), 0.0, 1.5, 0.01, 28.5, 30.0, 0.01),
+            ActuatorGroup(
+                joint_names=(".*_(hipx|hipy|knee)_joint",),
+                stiffness=60.0,
+                damping=1.5,
+                armature=0.02,
+                effort_limit=60.0,
+                velocity_limit=20.0,
+                friction=0.01,
+            ),
+            ActuatorGroup(
+                joint_names=(".*_wheel_joint",),
+                stiffness=0.0,
+                damping=1.5,
+                armature=0.01,
+                effort_limit=28.5,
+                velocity_limit=30.0,
+                friction=0.01,
+            ),
         ),
         action_scale={".*_(hipx|hipy|knee)_joint": 0.4, ".*_wheel_joint": 10.0},
         velocity_joints=(".*_wheel_joint",),

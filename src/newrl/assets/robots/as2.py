@@ -62,7 +62,7 @@ def assetx_as2() -> RobotConfig:
         },
         actuators=(
             ActuatorGroup(
-                (".*_hip_joint",),
+                joint_names=(".*_hip_joint",),
                 stiffness=60.0,
                 damping=1.5,
                 armature=0.026,
@@ -71,7 +71,7 @@ def assetx_as2() -> RobotConfig:
                 friction=0.01,
             ),
             ActuatorGroup(
-                (".*_thigh_joint",),
+                joint_names=(".*_thigh_joint",),
                 stiffness=60.0,
                 damping=1.5,
                 armature=0.026,
@@ -80,7 +80,7 @@ def assetx_as2() -> RobotConfig:
                 friction=0.01,
             ),
             ActuatorGroup(
-                (".*_calf_joint",),
+                joint_names=(".*_calf_joint",),
                 stiffness=60.0,
                 damping=1.5,
                 armature=0.038,

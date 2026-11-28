@@ -10,7 +10,7 @@ from .spot import MENAGERIE_SPOT, build_spot, assetx_spot
 from .as2 import UNITREE_AS2, build_as2, assetx_as2
 from .as2w import UNITREE_AS2W, build_as2w, build_as2w_sphere, assetx_as2w, assetx_as2w_sphere
 from .m20s import DEEP_M20S, build_m20s, assetx_m20s
-from .config import ActuatorGroup, RobotConfig, scalar_joints
+from .config import ActuatorGroup, RobotConfig, RoundedWheel, scalar_joints
 
 
 for _name, _recipe in {

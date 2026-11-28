@@ -97,7 +97,7 @@ def collision_case(args, n, terrain_name, detector, graph):
             "collision": detector,
             "collision_updates": "every physics substep",
             "custom_pairs": sum(
-                collider.query_count for collider in getattr(env.collision, "mesh_colliders", ())
+                collider.query_count for collider in getattr(env.collision, "terrain_colliders", ())
             ),
             "solver_backend": "mujoco",
             "solver_config": asdict(cfg.solver),

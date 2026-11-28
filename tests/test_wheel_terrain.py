@@ -30,6 +30,8 @@ def _wheel_clearance(env, normals, offset, kind):
     scales = wp.to_torch(model.shape_scale)[shape_ids]
     kinds = model.shape_type.numpy()[shape_ids]
     np.testing.assert_array_equal(kinds, np.full_like(kinds, kind))
+    if kind == newton.GeoType.CYLINDER:
+        torch.testing.assert_close(scales[:, 1], scales[:, 2])
     vertices = None
     if kind == newton.GeoType.CONVEX_MESH:
         vertices = [
@@ -49,7 +51,7 @@ def _wheel_clearance(env, normals, offset, kind):
         elif kind == newton.GeoType.CYLINDER:
             support = -(
                 scales[:, 0] * local_normal[:, :2].norm(dim=-1)
-                + scales[:, 1] * local_normal[:, 2].abs()
+                + scales[:, 1]
             )
         else:
             support = torch.stack(
@@ -68,13 +70,18 @@ def _wheel_clearance(env, normals, offset, kind):
 class WheelTerrainTests(unittest.TestCase):
     def test_wheel_penetration_on_heightfield_slopes(self):
         slope = 0.25
-        for factory, sphere_wheels, wheel_kind in (
-            (M20SLocomotion, False, newton.GeoType.CYLINDER),
-            (AS2WLocomotion, False, newton.GeoType.CONVEX_MESH),
-            (AS2WLocomotion, True, newton.GeoType.SPHERE),
+        for factory, sphere_wheels in (
+            (M20SLocomotion, False),
+            (AS2WLocomotion, False),
+            (AS2WLocomotion, True),
         ):
             for inverted in (False, True):
                 for collision in ("newton", "mujoco"):
+                    wheel_kind = newton.GeoType.CYLINDER
+                    if sphere_wheels:
+                        wheel_kind = newton.GeoType.SPHERE
+                    elif collision == "mujoco":
+                        wheel_kind = newton.GeoType.CONVEX_MESH
                     with self.subTest(
                         robot=factory.__name__, wheels=wheel_kind.name,
                         inverted=inverted, collision=collision,

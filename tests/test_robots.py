@@ -31,8 +31,19 @@ class ActuatorSpecTests(unittest.TestCase):
                         asset=asset, position=(0, 0, 0),
                         joint_position={".*": 0.0}, action_scale=0.5,
                         actuators=(
-                            ActuatorGroup(("hip",), 10.0, 2.0, 0.1, viscous_damping=override),
-                            ActuatorGroup(("knee",), 10.0, 3.0, 0.1),
+                            ActuatorGroup(
+                                joint_names=("hip",),
+                                stiffness=10.0,
+                                damping=2.0,
+                                armature=0.1,
+                                viscous_damping=override,
+                            ),
+                            ActuatorGroup(
+                                joint_names=("knee",),
+                                stiffness=10.0,
+                                damping=3.0,
+                                armature=0.1,
+                            ),
                         ),
                     )
                     builder = config.build()
@@ -48,7 +59,13 @@ class ActuatorSpecTests(unittest.TestCase):
     def test_passive_damping_rejects_invalid_values(self):
         for value in (-1.0, float("nan"), float("inf")):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                ActuatorGroup((".*",), 10.0, 2.0, 0.1, viscous_damping=value)
+                ActuatorGroup(
+                    joint_names=(".*",),
+                    stiffness=10.0,
+                    damping=2.0,
+                    armature=0.1,
+                    viscous_damping=value,
+                )
 
     def test_g1_covers_all_29_joints(self):
         config = assetx_g1()
