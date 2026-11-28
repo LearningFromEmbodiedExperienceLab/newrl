@@ -124,6 +124,40 @@ path suppresses artificial contacts at coplanar internal features.
 Predominantly noncoplanar meshes use the generic convex query. Both paths
 reuse cached BVH candidates.
 
+### Wheel collision follow-ups
+
+On the flat and rough triangle meshes tested, the analytic wheel with
+`task.collision=newrl` stepped 1.56–2.33× and 1.28–1.49× faster,
+respectively, than a 32-sided hull sampled from the same profile. Both used
+the MuJoCo Warp solver. NewRL handled the analytic wheel–terrain pairs
+and delegated the hull–terrain pairs to Newton. Treat these results as a
+baseline for this detector and workload.
+
+1. **Find what dominates on each terrain.** Profile cache hits, candidate
+   triangles, direct face contacts, convex queries, and emitted contacts.
+   Compare AS2W and M20S at 2,048 and 4,096 worlds with the same geometry,
+   reset seed, and action trace. Measure collision and solver time in a
+   separate eager pass and report captured step time. Use flat, mixed, and
+   rough meshes to check the current 10% coplanar threshold. See the
+   [benchmark guide](../benchmarks/README.md).
+2. **Reduce triangle visits where they dominate.** Merge connected coplanar
+   triangles into collision patches or index those patches above the
+   triangle BVH. Preserve boundaries, holes, material boundaries, and sharp
+   features. Mixed terrain may benefit from selecting the fast path per
+   patch if the extra dispatch and storage pay for themselves.
+3. **Specialize remaining contact queries if profiling warrants it.** For
+   separated cores, the closest distance from the wheel's disk to a triangle
+   minus the sweep radius gives clearance. Try direct disk–edge and
+   disk–vertex queries when the convex fallback dominates. Keep the convex
+   query for overlapping cores and ambiguous witnesses. For generated stairs,
+   benchmark wheel–box separately before adding a dedicated kernel.
+
+Validate each change against the infinite plane and several tessellations
+of the same surface, then check a ramp seam, stair nose, and concave valley.
+Track axle-height ripple, lateral impulses, normal continuity, and contact
+counts. Check winding and boundaries on reconstructed meshes, and verify
+that contact and constraint buffers have room during batch benchmarks.
+
 ## Robot asset cache
 
 See the [robot contribution guide](robots.md) for adding robot definitions
