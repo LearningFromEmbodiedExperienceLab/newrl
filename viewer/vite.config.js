@@ -13,7 +13,7 @@ export default defineConfig({
           writeFileSync(path + ".gz", gzipSync(readFileSync(path)));
         }
       }
-      writeFileSync(resolve(options.dir, "protocol.txt"), "3\n");
+      writeFileSync(resolve(options.dir, "protocol.txt"), "4\n");
       const dir = resolve(options.dir, "assets/licenses");
       mkdirSync(dir, {recursive: true});
       for (const [name, files] of [
