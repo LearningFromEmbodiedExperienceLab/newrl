@@ -184,8 +184,11 @@ async function main() {
   const moveFreeCamera = freeCameraMovement(camera, orbit, renderer.domElement);
   orbit.target.set(0, 0, 0.45);
   orbit.enableDamping = true;
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x777f89, 2));
-  const light = new THREE.DirectionalLight(0xffffff, 2);
+  // Keep the combined diffuse lighting below the output clipping point.
+  // Bright authored tints (such as the AS2W's pale blue) otherwise wash out.
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x777f89, 1.2));
+  const keyIntensity = 1.7;
+  const light = new THREE.DirectionalLight(0xffffff, keyIntensity);
   const lightOffset = new THREE.Vector3(5, -7, 12);
   light.position.copy(lightOffset);
   light.castShadow = true;
@@ -196,7 +199,7 @@ async function main() {
   light.shadow.camera.updateProjectionMatrix();
   light.shadow.bias = -0.0003;
   light.shadow.normalBias = 0.015;
-  const fill = new THREE.DirectionalLight(0xffffff, 2);
+  const fill = new THREE.DirectionalLight(0xffffff, keyIntensity);
   fill.position.copy(lightOffset);
   fill.visible = false;
   scene.add(light, light.target, fill);
@@ -224,7 +227,7 @@ async function main() {
     document.querySelector("#scene-transfer").textContent =
       `${(sceneTiming.encodedBodySize / 1048576).toFixed(2)} MiB / ${(sceneTiming.duration / 1000).toFixed(2)} s`;
   }
-  if (manifest.protocol !== 3) {
+  if (manifest.protocol !== 4) {
     throw new Error("Viewer protocol mismatch. Rebuild the viewer on the simulation host and reload.");
   }
   recordingActive = setupRecording(renderer.domElement, resize);
@@ -235,6 +238,18 @@ async function main() {
     geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(Uint8Array.fromBase64(mesh.indices).buffer), 1));
     if (mesh.normals) geometry.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(Uint8Array.fromBase64(mesh.normals).buffer), 3));
     else geometry.computeVertexNormals();
+    if (mesh.texture) {
+      const {rgba, width, height, hasAlpha} = mesh.texture;
+      geometry.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(Uint8Array.fromBase64(mesh.uvs).buffer), 2));
+      const map = new THREE.DataTexture(Uint8Array.fromBase64(rgba), width, height);
+      map.colorSpace = THREE.SRGBColorSpace;
+      map.wrapS = map.wrapT = THREE.RepeatWrapping;
+      map.magFilter = THREE.LinearFilter;
+      map.minFilter = THREE.LinearMipmapLinearFilter;
+      map.generateMipmaps = true;
+      map.needsUpdate = true;
+      geometry.userData.baseColor = {map, hasAlpha};
+    }
     geometries.set(name, geometry);
   }
   const layers = new Map();

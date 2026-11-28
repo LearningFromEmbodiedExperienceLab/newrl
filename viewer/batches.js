@@ -1,10 +1,11 @@
 import * as THREE from "three";
 import { MeshStandardNodeMaterial } from "three/webgpu";
-import { color as nodeColor, Fn, If, materialColor, mix, normalWorld, positionWorld, smoothstep, vec2 } from "three/tsl";
+import { color as nodeColor, Fn, If, materialColor, mix, normalWorld, positionWorld, smoothstep, vec2, vec4 } from "three/tsl";
 
 function groundGridColor(enabled) {
   return Fn(() => {
-    const base = materialColor.rgb.toVar();
+    const albedo = vec4(materialColor);
+    const base = albedo.rgb.toVar();
     If(enabled.greaterThan(0.5), () => {
       const xy = positionWorld.xy;
       const nearestLine = xy.add(0.5).fract().sub(0.5).abs();
@@ -15,7 +16,7 @@ function groundGridColor(enabled) {
       const slope = smoothstep(0.15, 0.45, normalWorld.z.abs());
       base.assign(mix(base, nodeColor(0xadc8d7), coverage.x.max(coverage.y).mul(slope).mul(0.42)));
     });
-    return base;
+    return vec4(base, albedo.a);
   })();
 }
 
@@ -37,25 +38,29 @@ function uploadVisible(attribute, count, width) {
 }
 
 export function buildMeshBatches(scene, specifications, geometries, layers, gridEnabled) {
-  const opaqueMaterial = new THREE.MeshStandardMaterial({side: THREE.DoubleSide});
+  const opaqueMaterials = new Map();
   const groundMaterials = new Map();
   const gridColor = groundGridColor(gridEnabled);
   return Object.entries(specifications).flatMap(([name, spec]) => {
     const geometry = geometries.get(spec.mesh);
     if (!geometry) return [];
+    const {map = null, hasAlpha = false} = geometry.userData.baseColor ?? {};
     const opaque = new Map();
     const transparent = [];
     for (let i = 0; i < spec.count; i++) {
       const opacity = spec.opacities?.[i] ?? 1;
-      const color = spec.colors?.[i] ? new THREE.Color(...spec.colors[i]) : new THREE.Color(0xaeb7c3);
+      const rgb = spec.colors?.[i];
+      const color = rgb
+        ? new THREE.Color().setRGB(...rgb, THREE.SRGBColorSpace)
+        : new THREE.Color(map ? 0xffffff : 0xaeb7c3);
       const scale = spec.scales ? new THREE.Vector3(...spec.scales[i]) : new THREE.Vector3(1, 1, 1);
       const controls = spec.layers[i].map(layer => layers.get(layer));
       const ground = spec.layers[i].includes("Ground");
-      if (opacity < 1) {
+      if (opacity < 1 || hasAlpha) {
         if (opacity <= 0) continue;
         const Material = ground ? MeshStandardNodeMaterial : THREE.MeshStandardMaterial;
         const material = new Material({
-          color, opacity, transparent: true, side: THREE.DoubleSide,
+          color, map, opacity, transparent: true, side: THREE.DoubleSide,
         });
         if (ground) material.colorNode = gridColor;
         const mesh = new THREE.Mesh(geometry, material);
@@ -70,21 +75,39 @@ export function buildMeshBatches(scene, specifications, geometries, layers, grid
       }
     }
     const groups = Array.from(opaque.values(), ({controls, rows, layers, ground}) => {
-      let material = opaqueMaterial;
+      const uniformColor = rows.every(({color}) => color.equals(rows[0].color));
+      const color = uniformColor ? rows[0].color : new THREE.Color(0xffffff);
+      let material;
       if (ground) {
-        const color = rows[0].color;
+        if (!groundMaterials.has(map)) groundMaterials.set(map, new Map());
+        const materials = groundMaterials.get(map);
         const key = color.getHex();
-        if (!groundMaterials.has(key)) {
-          const material = new MeshStandardNodeMaterial({color, side: THREE.DoubleSide});
+        if (!materials.has(key)) {
+          const material = new MeshStandardNodeMaterial({color, map, side: THREE.DoubleSide});
           material.colorNode = gridColor;
-          groundMaterials.set(key, material);
+          materials.set(key, material);
         }
-        material = groundMaterials.get(key);
+        material = materials.get(key);
+      } else {
+        if (!opaqueMaterials.has(map)) opaqueMaterials.set(map, new Map());
+        const materials = opaqueMaterials.get(map);
+        const key = color.getHex();
+        if (!materials.has(key)) {
+          materials.set(key, new THREE.MeshStandardMaterial({color, map, side: THREE.DoubleSide}));
+        }
+        material = materials.get(key);
       }
       const mesh = instances(scene, geometry, material, rows.length);
       mesh.castShadow = layers.some(layer => layer.endsWith(" visuals"));
       mesh.receiveShadow = ground;
-      return {mesh, controls, rows, colorSlots: ground ? null : new Int32Array(rows.length).fill(-1)};
+      let colorSlots = null;
+      if (!uniformColor) {
+        // Declare the attribute before the renderer builds the material pipeline.
+        mesh.setColorAt(0, rows[0].color);
+        mesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+        colorSlots = new Int32Array(rows.length).fill(-1);
+      }
+      return {mesh, controls, rows, colorSlots};
     });
     return [{name, groups, transparent}];
   });

@@ -18,6 +18,7 @@ from uuid import uuid4
 
 import newton
 import numpy as np
+from newton._src.viewer.utils import prepare_viewer_texture
 
 from newrl.sensors import DepthCamera, GaussianCamera
 from newrl.utils.gaussian_scene import resolve_gaussian_scene
@@ -95,7 +96,7 @@ class BrowserViewer(newton.viewer.ViewerNull):
                 "Build the browser viewer with npm --prefix viewer ci and npm --prefix viewer run build"
             )
         protocol = assets / "protocol.txt"
-        if not protocol.is_file() or protocol.read_text().strip() != "3":
+        if not protocol.is_file() or protocol.read_text().strip() != "4":
             raise RuntimeError(
                 "Browser viewer assets are out of date. "
                 "Run npm --prefix viewer run build in the NewRL checkout."
@@ -504,12 +505,28 @@ class BrowserViewer(newton.viewer.ViewerNull):
             layers.append(categories)
         return layers
 
-    def log_mesh(self, name, points, indices, normals=None, uvs=None, **kwargs):
-        self.meshes[name] = {
+    def log_mesh(self, name, points, indices, normals=None, uvs=None, *, texture=None, **kwargs):
+        mesh = {
             "points": _pack(points.numpy(), "<f4"),
             "indices": _pack(indices.numpy(), "<u4"),
             "normals": _pack(normals.numpy(), "<f4") if normals is not None else None,
         }
+        if texture is not None and uvs is not None and len(uvs) == len(points):
+            image = prepare_viewer_texture(texture)
+            if image is not None:
+                height, width, channels = image.shape
+                has_alpha = channels == 4 and bool(np.any(image[..., 3] < 255))
+                if channels == 3:
+                    image = np.pad(image, ((0, 0), (0, 0), (0, 1)), constant_values=255)
+                mesh["uvs"] = _pack(uvs.numpy(), "<f4")
+                mesh["texture"] = {
+                    "width": width,
+                    "height": height,
+                    # Newton UVs start at the bottom of the image.
+                    "rgba": _pack(image[::-1], "u1"),
+                    "hasAlpha": has_alpha,
+                }
+        self.meshes[name] = mesh
 
     def log_instances(
         self,
@@ -571,7 +588,7 @@ class BrowserViewer(newton.viewer.ViewerNull):
         if self.manifest is None:
             manifest = json.dumps(
                 {
-                    "protocol": 3,
+                    "protocol": 4,
                     "meshes": self.meshes,
                     "instances": self.instances,
                     "clouds": self.clouds,
